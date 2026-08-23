@@ -11,9 +11,9 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.2 — SQLite event store
 
-- [ ] Create the complete forward-compatible SQLite schema and first migration.
-- [ ] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
-- [ ] Implement typed repository writes and trace-tree reads.
+- [x] Create the complete forward-compatible SQLite schema and first migration.
+- [x] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
+- [x] Implement typed repository writes and trace-tree reads.
 
 ### P0.3 — Redaction and content-addressed blobs
 
