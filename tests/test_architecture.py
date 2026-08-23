@@ -1,3 +1,4 @@
+import ast
 import tomllib
 from pathlib import Path
 
@@ -70,3 +71,25 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         for contract in contracts
     }
     assert actual == expected
+
+
+def test_events_source_uses_no_absolute_glassbox_imports() -> None:
+    """Keep the dependency-neutral events package independently importable."""
+    events_root = PROJECT_ROOT / "glassbox" / "events"
+    violations: list[str] = []
+
+    for source_path in events_root.glob("*.py"):
+        for node in ast.walk(ast.parse(source_path.read_text(), filename=str(source_path))):
+            if isinstance(node, ast.Import):
+                violations.extend(
+                    f"{source_path.relative_to(PROJECT_ROOT)}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "glassbox" or alias.name.startswith("glassbox.")
+                )
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "glassbox" or node.module.startswith("glassbox."):
+                    violations.append(
+                        f"{source_path.relative_to(PROJECT_ROOT)}: from {node.module} import ..."
+                    )
+
+    assert violations == []

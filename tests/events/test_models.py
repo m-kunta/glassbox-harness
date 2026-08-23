@@ -44,6 +44,57 @@ def test_event_models_are_immutable() -> None:
         event.status = "error"  # type: ignore[misc]
 
 
+def test_trace_attributes_are_recursively_immutable() -> None:
+    event = TraceEvent(
+        trace_id=TRACE_ID,
+        agent_name="replenishment-triage-ai",
+        agent_version="abc123",
+        started_at=TIMESTAMP,
+        environment="shadow",
+        attributes={"inventory": {"positions": [0, 2]}},
+    )
+
+    with pytest.raises((TypeError, AttributeError)):
+        event.attributes["inventory"]["positions"][0] = 5
+
+
+def test_decision_recommendation_is_recursively_immutable() -> None:
+    event = DecisionEvent(
+        decision_id=DECISION_ID,
+        trace_id=TRACE_ID,
+        agent_name="agent",
+        agent_version="version",
+        entity_type="sku_dc",
+        entity_id="123-DC04",
+        decision_type="flag_exception",
+        recommendation={"actions": [{"type": "review"}]},
+        rationale="Inventory risk is elevated.",
+        rationale_citations=[EVIDENCE_ID],
+        confidence=0.5,
+        alternatives_considered=[],
+        decided_at=TIMESTAMP,
+    )
+
+    with pytest.raises((TypeError, AttributeError)):
+        event.recommendation["actions"][0]["type"] = "order"
+
+
+def test_evidence_field_value_is_recursively_immutable() -> None:
+    event = EvidenceEvent(
+        evidence_id=EVIDENCE_ID,
+        decision_id=DECISION_ID,
+        source_system="BY_Fulfillment",
+        source_ref="item_loc/123/DC04",
+        field_name="on_hand",
+        field_value={"history": [{"units": 0}]},
+        weight=0.8,
+        retrieved_at=TIMESTAMP,
+    )
+
+    with pytest.raises((TypeError, AttributeError)):
+        event.field_value["history"][0]["units"] = 8
+
+
 @pytest.mark.parametrize(
     ("model", "payload", "timestamp_field"),
     [

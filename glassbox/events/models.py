@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -11,6 +12,40 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 
 _ULID_PATTERN = re.compile(r"^[0-7][0-9A-HJKMNPQRSTVWXYZ]{25}$")
 _UTC_OFFSET = timedelta(0)
+
+
+class FrozenDict(Mapping[str, Any]):
+    """A read-only mapping used for canonical event payload data."""
+
+    def __init__(self, values: Mapping[str, Any] | None = None) -> None:
+        self._values = dict(values or {})
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Convert mapping and sequence payload data to immutable JSON-compatible forms."""
+    if isinstance(value, Mapping):
+        return FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _json_payload(value: Any) -> Any:
+    """Return immutable payload data as ordinary JSON-compatible containers."""
+    if isinstance(value, Mapping):
+        return {key: _json_payload(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_payload(item) for item in value]
+    return value
 
 
 def _validate_ulid(value: str) -> str:
@@ -62,15 +97,20 @@ class TraceEvent(EventModel):
     total_tokens: int | None = Field(default=None, ge=0)
     total_cost_usd: float | None = Field(default=None, ge=0)
     latency_ms: float | None = Field(default=None, ge=0)
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    attributes: Mapping[str, Any] = Field(default_factory=FrozenDict)
 
     _validate_trace_id = field_validator("trace_id")(_validate_ulid)
     _validate_started_at = field_validator("started_at")(_validate_utc_timestamp)
     _validate_ended_at = field_validator("ended_at")(_validate_utc_timestamp)
+    _freeze_attributes = field_validator("attributes", mode="after")(_deep_freeze)
 
     @field_serializer("started_at", "ended_at", when_used="json")
     def serialize_timestamp(self, value: datetime | None) -> str | None:
         return None if value is None else _serialize_timestamp(value)
+
+    @field_serializer("attributes", when_used="json")
+    def serialize_attributes(self, value: Mapping[str, Any]) -> Any:
+        return _json_payload(value)
 
 
 class SpanEvent(EventModel):
@@ -81,7 +121,7 @@ class SpanEvent(EventModel):
     started_at: datetime
     parent_span_id: str | None = None
     ended_at: datetime | None = None
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    attributes: Mapping[str, Any] = Field(default_factory=FrozenDict)
     prompt_ref: str | None = None
     completion_ref: str | None = None
     model: str | None = None
@@ -95,10 +135,15 @@ class SpanEvent(EventModel):
     _validate_parent_span_id = field_validator("parent_span_id")(_validate_ulid)
     _validate_started_at = field_validator("started_at")(_validate_utc_timestamp)
     _validate_ended_at = field_validator("ended_at")(_validate_utc_timestamp)
+    _freeze_attributes = field_validator("attributes", mode="after")(_deep_freeze)
 
     @field_serializer("started_at", "ended_at", when_used="json")
     def serialize_timestamp(self, value: datetime | None) -> str | None:
         return None if value is None else _serialize_timestamp(value)
+
+    @field_serializer("attributes", when_used="json")
+    def serialize_attributes(self, value: Mapping[str, Any]) -> Any:
+        return _json_payload(value)
 
 
 class DecisionEvent(EventModel):
@@ -109,7 +154,7 @@ class DecisionEvent(EventModel):
     entity_type: str
     entity_id: str
     decision_type: str
-    recommendation: dict[str, Any]
+    recommendation: Mapping[str, Any]
     rationale: str
     rationale_citations: tuple[str, ...]
     confidence: float = Field(ge=0, le=1)
@@ -119,10 +164,16 @@ class DecisionEvent(EventModel):
     _validate_decision_id = field_validator("decision_id")(_validate_ulid)
     _validate_trace_id = field_validator("trace_id")(_validate_ulid)
     _validate_decided_at = field_validator("decided_at")(_validate_utc_timestamp)
+    _freeze_recommendation = field_validator("recommendation", mode="after")(_deep_freeze)
+    _freeze_alternatives = field_validator("alternatives_considered", mode="after")(_deep_freeze)
 
     @field_serializer("decided_at", when_used="json")
     def serialize_timestamp(self, value: datetime) -> str:
         return _serialize_timestamp(value)
+
+    @field_serializer("recommendation", "alternatives_considered", when_used="json")
+    def serialize_payload(self, value: Any) -> Any:
+        return _json_payload(value)
 
 
 class EvidenceEvent(EventModel):
@@ -137,7 +188,12 @@ class EvidenceEvent(EventModel):
 
     _validate_decision_id = field_validator("decision_id")(_validate_ulid)
     _validate_retrieved_at = field_validator("retrieved_at")(_validate_utc_timestamp)
+    _freeze_field_value = field_validator("field_value", mode="after")(_deep_freeze)
 
     @field_serializer("retrieved_at", when_used="json")
     def serialize_timestamp(self, value: datetime) -> str:
         return _serialize_timestamp(value)
+
+    @field_serializer("field_value", when_used="json")
+    def serialize_field_value(self, value: Any) -> Any:
+        return _json_payload(value)
