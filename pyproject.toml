@@ -40,7 +40,13 @@ files = ["glassbox"]
 [tool.importlinter]
 root_package = "glassbox"
 
-[[tool.importlinter.contract]]
+# NOTE: the array-of-tables key is "contracts" (plural). import-linter's TOML
+# reader only recognizes `[[tool.importlinter.contracts]]`; a singular
+# "contract" key parses without error but leaves every contract unregistered,
+# so `lint-imports` silently checks nothing and always exits 0. See TODO.md
+# decision log (2026-08-22).
+
+[[tool.importlinter.contracts]]
 name = "events-dependency-neutral"
 type = "forbidden"
 source_modules = ["glassbox.events"]
@@ -53,37 +59,43 @@ forbidden_modules = [
   "glassbox.web",
 ]
 
-[[tool.importlinter.contract]]
-name = "sdk-dependencies"
-type = "forbidden"
-source_modules = ["glassbox.sdk"]
-forbidden_modules = [
-  "glassbox.collector",
-  "glassbox.eval",
-  "glassbox.explain",
-  "glassbox.store",
-  "glassbox.web",
-]
-
-[[tool.importlinter.contract]]
-name = "collector-dependencies"
-type = "forbidden"
-source_modules = ["glassbox.collector"]
-forbidden_modules = [
-  "glassbox.eval",
-  "glassbox.explain",
-  "glassbox.sdk",
-  "glassbox.web",
-]
-
-[[tool.importlinter.contract]]
+[[tool.importlinter.contracts]]
 name = "store-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.store"]
 forbidden_modules = ["glassbox.eval", "glassbox.explain", "glassbox.web"]
 
-[[tool.importlinter.contract]]
-name = "web-dependencies"
-type = "forbidden"
-source_modules = ["glassbox.web"]
-forbidden_modules = ["glassbox.sdk"]
+# The contracts below are deferred: import-linter requires a contract's
+# source_modules to already exist as importable packages, and glassbox.sdk,
+# glassbox.collector, and glassbox.web are not created until Task 5, Task 4,
+# and P2 respectively. Re-enable each contract in the task that creates its
+# source package (forbidden_modules that don't exist yet are tolerated).
+#
+# [[tool.importlinter.contracts]]
+# name = "sdk-dependencies"
+# type = "forbidden"
+# source_modules = ["glassbox.sdk"]
+# forbidden_modules = [
+#   "glassbox.collector",
+#   "glassbox.eval",
+#   "glassbox.explain",
+#   "glassbox.store",
+#   "glassbox.web",
+# ]
+#
+# [[tool.importlinter.contracts]]
+# name = "collector-dependencies"
+# type = "forbidden"
+# source_modules = ["glassbox.collector"]
+# forbidden_modules = [
+#   "glassbox.eval",
+#   "glassbox.explain",
+#   "glassbox.sdk",
+#   "glassbox.web",
+# ]
+#
+# [[tool.importlinter.contracts]]
+# name = "web-dependencies"
+# type = "forbidden"
+# source_modules = ["glassbox.web"]
+# forbidden_modules = ["glassbox.sdk"]

@@ -81,6 +81,11 @@ def _serialize_timestamp(value: datetime) -> str:
     return value_text.replace("+00:00", "Z")
 
 
+def canonical_dumps(value: Any) -> str:
+    """Serialize *value* as deterministic JSON: sorted keys, compact separators."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 class EventModel(BaseModel):
     """Shared immutable behavior for canonical events."""
 
@@ -88,12 +93,7 @@ class EventModel(BaseModel):
 
     def canonical_json(self) -> str:
         """Return a deterministic JSON representation with sorted object keys."""
-        return json.dumps(
-            self.model_dump(mode="json", exclude_none=True),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        return canonical_dumps(self.model_dump(mode="json", exclude_none=True))
 
 
 class TraceEvent(EventModel):

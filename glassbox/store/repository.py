@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias, cast
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
+from glassbox.events.models import canonical_dumps
 
 from .database import Database
 
@@ -189,7 +190,7 @@ class Repository:
 
     @staticmethod
     def _json(value: object) -> str:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return canonical_dumps(value)
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:

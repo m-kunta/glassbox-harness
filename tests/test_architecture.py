@@ -45,8 +45,11 @@ def test_package_metadata_declares_required_quality_tools() -> None:
 
 def test_import_linter_contracts_preserve_module_boundaries() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
-    contracts = config["tool"]["importlinter"]["contract"]
+    contracts = config["tool"]["importlinter"]["contracts"]
 
+    # sdk-dependencies, collector-dependencies, and web-dependencies are commented
+    # out in pyproject.toml until Task 5 / Task 4 / P2 create their source packages
+    # (import-linter requires a contract's source_modules to already exist).
     expected = {
         "events-dependency-neutral": {
             "source_modules": ["glassbox.events"],
@@ -59,32 +62,9 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.web",
             ],
         },
-        "sdk-dependencies": {
-            "source_modules": ["glassbox.sdk"],
-            "forbidden_modules": [
-                "glassbox.collector",
-                "glassbox.eval",
-                "glassbox.explain",
-                "glassbox.store",
-                "glassbox.web",
-            ],
-        },
-        "collector-dependencies": {
-            "source_modules": ["glassbox.collector"],
-            "forbidden_modules": [
-                "glassbox.eval",
-                "glassbox.explain",
-                "glassbox.sdk",
-                "glassbox.web",
-            ],
-        },
         "store-dependencies": {
             "source_modules": ["glassbox.store"],
             "forbidden_modules": ["glassbox.eval", "glassbox.explain", "glassbox.web"],
-        },
-        "web-dependencies": {
-            "source_modules": ["glassbox.web"],
-            "forbidden_modules": ["glassbox.sdk"],
         },
     }
 
@@ -96,6 +76,23 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         for contract in contracts
     }
     assert actual == expected
+
+
+def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts() -> None:
+    """Regression guard: a wrong TOML array key (singular "contract" instead of
+    "contracts") parses without error but leaves import-linter's contract list
+    empty, so `lint-imports` silently checks nothing and always exits success.
+    See TODO.md decision log, 2026-08-22."""
+    from importlinter.application.use_cases import lint_imports, read_user_options
+    from importlinter.configuration import configure
+
+    configure()
+    config_path = str(PROJECT_ROOT / "pyproject.toml")
+
+    user_options = read_user_options(config_filename=config_path)
+    assert len(user_options.contracts_options) == 2
+
+    assert lint_imports(config_filename=config_path, cache_dir=None) is True
 
 
 def test_events_source_uses_no_absolute_glassbox_imports() -> None:
