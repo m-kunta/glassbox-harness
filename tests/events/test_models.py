@@ -58,6 +58,50 @@ def test_trace_attributes_are_recursively_immutable() -> None:
         event.attributes["inventory"]["positions"][0] = 5
 
 
+def test_trace_attributes_do_not_share_mutable_input_data() -> None:
+    attributes = {"inventory": {"positions": [0, 2]}}
+    event = TraceEvent(
+        trace_id=TRACE_ID,
+        agent_name="replenishment-triage-ai",
+        agent_version="abc123",
+        started_at=TIMESTAMP,
+        environment="shadow",
+        attributes=attributes,
+    )
+
+    attributes["inventory"]["positions"][0] = 5
+
+    assert event.attributes["inventory"]["positions"] == (0, 2)
+
+
+@pytest.mark.parametrize("unsupported_value", [{"locations"}, bytearray(b"payload")])
+def test_trace_event_rejects_non_json_payload_values(unsupported_value: object) -> None:
+    with pytest.raises(ValidationError, match="JSON-compatible"):
+        TraceEvent(
+            trace_id=TRACE_ID,
+            agent_name="replenishment-triage-ai",
+            agent_version="abc123",
+            started_at=TIMESTAMP,
+            environment="shadow",
+            attributes={"payload": unsupported_value},
+        )
+
+
+@pytest.mark.parametrize("unsupported_value", [{"locations"}, bytearray(b"payload")])
+def test_evidence_event_rejects_non_json_payload_values(unsupported_value: object) -> None:
+    with pytest.raises(ValidationError, match="JSON-compatible"):
+        EvidenceEvent(
+            evidence_id=EVIDENCE_ID,
+            decision_id=DECISION_ID,
+            source_system="BY_Fulfillment",
+            source_ref="item_loc/123/DC04",
+            field_name="on_hand",
+            field_value=unsupported_value,
+            weight=0.8,
+            retrieved_at=TIMESTAMP,
+        )
+
+
 def test_trace_attributes_do_not_expose_a_mutable_backing_store() -> None:
     event = TraceEvent(
         trace_id=TRACE_ID,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -32,12 +33,21 @@ class FrozenDict(Mapping[str, Any]):
 
 
 def _deep_freeze(value: Any) -> Any:
-    """Convert mapping and sequence payload data to immutable JSON-compatible forms."""
+    """Validate and freeze a JSON-compatible payload value."""
     if isinstance(value, Mapping):
-        return FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+        frozen_values: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("payload mapping keys must be strings")
+            frozen_values[key] = _deep_freeze(item)
+        return FrozenDict(frozen_values)
     if isinstance(value, (list, tuple)):
         return tuple(_deep_freeze(item) for item in value)
-    return value
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ValueError("payload values must be JSON-compatible")
 
 
 def _json_payload(value: Any) -> Any:
@@ -103,7 +113,7 @@ class TraceEvent(EventModel):
     _validate_trace_id = field_validator("trace_id")(_validate_ulid)
     _validate_started_at = field_validator("started_at")(_validate_utc_timestamp)
     _validate_ended_at = field_validator("ended_at")(_validate_utc_timestamp)
-    _freeze_attributes = field_validator("attributes", mode="after")(_deep_freeze)
+    _freeze_attributes = field_validator("attributes", mode="before")(_deep_freeze)
 
     @field_serializer("started_at", "ended_at", when_used="json")
     def serialize_timestamp(self, value: datetime | None) -> str | None:
@@ -136,7 +146,7 @@ class SpanEvent(EventModel):
     _validate_parent_span_id = field_validator("parent_span_id")(_validate_ulid)
     _validate_started_at = field_validator("started_at")(_validate_utc_timestamp)
     _validate_ended_at = field_validator("ended_at")(_validate_utc_timestamp)
-    _freeze_attributes = field_validator("attributes", mode="after")(_deep_freeze)
+    _freeze_attributes = field_validator("attributes", mode="before")(_deep_freeze)
 
     @field_serializer("started_at", "ended_at", when_used="json")
     def serialize_timestamp(self, value: datetime | None) -> str | None:
@@ -165,8 +175,8 @@ class DecisionEvent(EventModel):
     _validate_decision_id = field_validator("decision_id")(_validate_ulid)
     _validate_trace_id = field_validator("trace_id")(_validate_ulid)
     _validate_decided_at = field_validator("decided_at")(_validate_utc_timestamp)
-    _freeze_recommendation = field_validator("recommendation", mode="after")(_deep_freeze)
-    _freeze_alternatives = field_validator("alternatives_considered", mode="after")(_deep_freeze)
+    _freeze_recommendation = field_validator("recommendation", mode="before")(_deep_freeze)
+    _freeze_alternatives = field_validator("alternatives_considered", mode="before")(_deep_freeze)
 
     @field_serializer("decided_at", when_used="json")
     def serialize_timestamp(self, value: datetime) -> str:
@@ -189,7 +199,7 @@ class EvidenceEvent(EventModel):
 
     _validate_decision_id = field_validator("decision_id")(_validate_ulid)
     _validate_retrieved_at = field_validator("retrieved_at")(_validate_utc_timestamp)
-    _freeze_field_value = field_validator("field_value", mode="after")(_deep_freeze)
+    _freeze_field_value = field_validator("field_value", mode="before")(_deep_freeze)
 
     @field_serializer("retrieved_at", when_used="json")
     def serialize_timestamp(self, value: datetime) -> str:

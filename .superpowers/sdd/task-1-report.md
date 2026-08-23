@@ -145,3 +145,66 @@ Result: `19 passed`.
 .venv/bin/lint-imports
 git diff --check
 ```
+
+## Final review-fix report
+
+### Findings resolved
+
+1. Canonical payload validation is now recursive and strict. It accepts only JSON
+   primitives, finite floats, mappings with string keys, and lists or tuples of
+   accepted values. Accepted mappings and sequences are recursively frozen;
+   unsupported values (including `set` and `bytearray`) raise Pydantic validation
+   errors before they can be retained or serialized. Existing canonical sorted-key
+   JSON output remains unchanged.
+2. The events import guard now rejects both absolute `glassbox` imports and only
+   those relative imports whose level escapes `glassbox.events`. Its recursive
+   tests cover root-level `from ..collector import ...` and `from .. import ...`,
+   their nested-module equivalents, and an allowed nested relative import that
+   remains inside `glassbox.events`.
+
+### Fresh TDD evidence
+
+RED after adding the payload regressions and before changing the payload validator:
+
+```shell
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v
+```
+
+Result: `4 failed, 22 passed`; trace and evidence events accepted both `set` and
+`bytearray` payload values instead of raising validation errors.
+
+GREEN after adding strict recursive validation and pre-validation freezing:
+
+```shell
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v
+```
+
+Result: `26 passed`.
+
+RED after refining the import-guard tests to distinguish relative imports that
+escape the events package from nested imports that remain within it:
+
+```shell
+.venv/bin/python -m pytest tests/test_architecture.py -v
+```
+
+Result: `1 failed, 8 passed`; the original guard rejected an allowed nested
+`from ..collector import ...` import.
+
+GREEN after calculating relative-import escape depth from each source module:
+
+```shell
+.venv/bin/python -m pytest tests/test_architecture.py -v
+```
+
+Result: `9 passed`.
+
+### Final verification
+
+```text
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v  29 passed
+.venv/bin/ruff check .                                                       All checks passed
+.venv/bin/mypy glassbox                                                      Success: no issues found in 3 source files
+.venv/bin/lint-imports                                                       Contracts: 0 kept, 0 broken
+git diff --check                                                              passed
+```

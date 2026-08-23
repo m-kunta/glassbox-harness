@@ -2,10 +2,12 @@ import ast
 import tomllib
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
-def _absolute_glassbox_import_violations(events_root: Path) -> list[str]:
+def _events_import_violations(events_root: Path) -> list[str]:
     violations: list[str] = []
 
     for source_path in events_root.rglob("*.py"):
@@ -19,6 +21,11 @@ def _absolute_glassbox_import_violations(events_root: Path) -> list[str]:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 if node.module == "glassbox" or node.module.startswith("glassbox."):
                     violations.append(f"{source_path}: from {node.module} import ...")
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.level - 1 > len(source_path.relative_to(events_root).parent.parts)
+            ):
+                violations.append(f"{source_path}: relative import escapes glassbox.events")
 
     return violations
 
@@ -95,7 +102,7 @@ def test_events_source_uses_no_absolute_glassbox_imports() -> None:
     """Keep the dependency-neutral events package independently importable."""
     events_root = PROJECT_ROOT / "glassbox" / "events"
 
-    assert _absolute_glassbox_import_violations(events_root) == []
+    assert _events_import_violations(events_root) == []
 
 
 def test_absolute_import_check_covers_nested_events_modules(tmp_path: Path) -> None:
@@ -103,6 +110,37 @@ def test_absolute_import_check_covers_nested_events_modules(tmp_path: Path) -> N
     nested_module.parent.mkdir(parents=True)
     nested_module.write_text("from glassbox.events import TraceEvent\n")
 
-    assert _absolute_glassbox_import_violations(tmp_path / "events") == [
+    assert _events_import_violations(tmp_path / "events") == [
         f"{nested_module}: from glassbox.events import ..."
     ]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source"),
+    [
+        (Path("module.py"), "from ..collector import Collector\n"),
+        (Path("module.py"), "from .. import collector\n"),
+        (Path("nested/module.py"), "from ...collector import Collector\n"),
+        (Path("nested/module.py"), "from ... import collector\n"),
+    ],
+)
+def test_events_import_check_rejects_relative_imports_that_escape_events(
+    tmp_path: Path, relative_path: Path, source: str
+) -> None:
+    source_path = tmp_path / "events" / relative_path
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(source)
+
+    assert _events_import_violations(tmp_path / "events") == [
+        f"{source_path}: relative import escapes glassbox.events"
+    ]
+
+
+def test_events_import_check_allows_nested_relative_imports_within_events(
+    tmp_path: Path,
+) -> None:
+    nested_module = tmp_path / "events" / "nested" / "module.py"
+    nested_module.parent.mkdir(parents=True)
+    nested_module.write_text("from ..collector import Collector\n")
+
+    assert _events_import_violations(tmp_path / "events") == []
