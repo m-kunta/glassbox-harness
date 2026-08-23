@@ -6,14 +6,14 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.1 — Package and event contracts
 
-- [ ] Establish Python package metadata, quality tooling, and import-boundary checks.
-- [ ] Define dependency-neutral canonical trace, span, decision, and evidence events.
+- [x] Establish Python package metadata, quality tooling, and import-boundary checks.
+- [x] Define dependency-neutral canonical trace, span, decision, and evidence events.
 
 ### P0.2 — SQLite event store
 
-- [ ] Create the complete forward-compatible SQLite schema and first migration.
-- [ ] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
-- [ ] Implement typed repository writes and trace-tree reads.
+- [x] Create the complete forward-compatible SQLite schema and first migration.
+- [x] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
+- [x] Implement typed repository writes and trace-tree reads.
 
 ### P0.3 — Redaction and content-addressed blobs
 
