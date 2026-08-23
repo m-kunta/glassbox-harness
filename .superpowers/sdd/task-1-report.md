@@ -97,3 +97,51 @@ Result: `17 passed`.
 - `mypy glassbox`: `Success: no issues found in 3 source files`
 - `lint-imports`: `Contracts: 0 kept, 0 broken`
 - `git diff --check`: passed
+
+## Second review-fix report
+
+### Findings resolved
+
+1. `FrozenDict` now keeps its internal values in a `MappingProxyType`; accessing
+   `event.attributes._values` exposes a read-only proxy rather than a mutable
+   dictionary. Recursive freezing and JSON serialization behavior are unchanged.
+2. The absolute-import architecture check now searches `glassbox/events/`
+   recursively. A fixture-style test proves an absolute import in a nested event
+   module is reported.
+
+### Fresh TDD evidence
+
+RED, after adding the backing-store regression test and before changing
+`FrozenDict`:
+
+```shell
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v
+```
+
+Result: `1 failed, 18 passed`. The new test showed
+`event.attributes._values["inventory"] = 5` mutated the event payload.
+
+GREEN, after storing the values behind a read-only mapping proxy:
+
+```shell
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v
+```
+
+Result: `19 passed`.
+
+### Files changed
+
+- `glassbox/events/models.py`
+- `tests/events/test_models.py`
+- `tests/test_architecture.py`
+- `.superpowers/sdd/task-1-report.md`
+
+### Verification
+
+```text
+.venv/bin/python -m pytest tests/events/test_models.py tests/test_architecture.py -v  19 passed
+.venv/bin/ruff check .
+.venv/bin/mypy glassbox
+.venv/bin/lint-imports
+git diff --check
+```

@@ -58,6 +58,22 @@ def test_trace_attributes_are_recursively_immutable() -> None:
         event.attributes["inventory"]["positions"][0] = 5
 
 
+def test_trace_attributes_do_not_expose_a_mutable_backing_store() -> None:
+    event = TraceEvent(
+        trace_id=TRACE_ID,
+        agent_name="replenishment-triage-ai",
+        agent_version="abc123",
+        started_at=TIMESTAMP,
+        environment="shadow",
+        attributes={"inventory": 2},
+    )
+
+    with pytest.raises((TypeError, AttributeError)):
+        event.attributes._values["inventory"] = 5  # type: ignore[attr-defined,index]
+
+    assert event.attributes["inventory"] == 2
+
+
 def test_decision_recommendation_is_recursively_immutable() -> None:
     event = DecisionEvent(
         decision_id=DECISION_ID,

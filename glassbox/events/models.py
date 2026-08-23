@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -18,7 +19,7 @@ class FrozenDict(Mapping[str, Any]):
     """A read-only mapping used for canonical event payload data."""
 
     def __init__(self, values: Mapping[str, Any] | None = None) -> None:
-        self._values = dict(values or {})
+        self._values = MappingProxyType(dict(values or {}))
 
     def __getitem__(self, key: str) -> Any:
         return self._values[key]
