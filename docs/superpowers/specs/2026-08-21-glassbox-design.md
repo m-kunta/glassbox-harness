@@ -1,6 +1,6 @@
 # Glassbox P0–P2 Design
 
-**Approved source:** `/Users/MKunta/Downloads/glassbox-spec-v1.2.md`
+**Approved source:** [`docs/spec/glassbox-spec-v1.2.md`](../../spec/glassbox-spec-v1.2.md)
 
 Glassbox is a local-first Python harness for tracing, evaluating, and explaining supply-chain agent decisions. The first release is a modular monolith delivered as three gated increments: P0 tracing and persistence, P1 deterministic evaluation, and P2 planner-readable Decision Cards with durable feedback.
 
