@@ -47,8 +47,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
     contracts = config["tool"]["importlinter"]["contracts"]
 
-    # sdk-dependencies, collector-dependencies, and web-dependencies are commented
-    # out in pyproject.toml until Task 5 / Task 4 / P2 create their source packages
+    # sdk-dependencies and web-dependencies are commented out in pyproject.toml
+    # until Task 5 / P2 create their source packages
     # (import-linter requires a contract's source_modules to already exist).
     expected = {
         "events-dependency-neutral": {
@@ -65,6 +65,15 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         "store-dependencies": {
             "source_modules": ["glassbox.store"],
             "forbidden_modules": ["glassbox.eval", "glassbox.explain", "glassbox.web"],
+        },
+        "collector-dependencies": {
+            "source_modules": ["glassbox.collector"],
+            "forbidden_modules": [
+                "glassbox.eval",
+                "glassbox.explain",
+                "glassbox.sdk",
+                "glassbox.web",
+            ],
         },
     }
 
@@ -90,7 +99,7 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 2
+    assert len(user_options.contracts_options) == 3
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
 

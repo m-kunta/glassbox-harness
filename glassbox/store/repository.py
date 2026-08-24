@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, TypeAlias, cast
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
@@ -37,48 +38,53 @@ class Repository:
 
     def __init__(self, database: Database) -> None:
         self._connection = database.connection
+        self._operation_lock: RLock = database._operation_lock
 
     def write_event(self, event: Event) -> None:
         """Persist one canonical event in a transaction."""
-        with self._connection:
-            if isinstance(event, TraceEvent):
-                self._write_trace(event)
-            elif isinstance(event, SpanEvent):
-                self._write_span(event)
-            elif isinstance(event, DecisionEvent):
-                self._write_decision(event)
-            else:
-                self._write_evidence(event)
+        with self._operation_lock:
+            with self._connection:
+                if isinstance(event, TraceEvent):
+                    self._write_trace(event)
+                elif isinstance(event, SpanEvent):
+                    self._write_span(event)
+                elif isinstance(event, DecisionEvent):
+                    self._write_decision(event)
+                else:
+                    self._write_evidence(event)
 
     def mark_trace_partial(self, trace_id: str) -> None:
         """Mark an already-persisted trace partial without creating a new trace."""
-        with self._connection:
-            self._connection.execute(
-                "UPDATE traces SET status = 'partial' WHERE trace_id = ?", (trace_id,)
-            )
+        with self._operation_lock:
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE traces SET status = 'partial' WHERE trace_id = ?", (trace_id,)
+                )
 
     def trace_tree(self, trace_id: str) -> TraceTree | None:
         """Return the trace, its spans, and decisions with their evidence."""
-        trace_row = self._connection.execute(
-            "SELECT * FROM traces WHERE trace_id = ?", (trace_id,)
-        ).fetchone()
-        if trace_row is None:
-            return None
+        with self._operation_lock:
+            trace_row = self._connection.execute(
+                "SELECT * FROM traces WHERE trace_id = ?", (trace_id,)
+            ).fetchone()
+            if trace_row is None:
+                return None
 
-        spans = tuple(
-            self._span_from_row(row)
-            for row in self._connection.execute(
-                "SELECT * FROM spans WHERE trace_id = ? ORDER BY started_at, span_id", (trace_id,)
+            spans = tuple(
+                self._span_from_row(row)
+                for row in self._connection.execute(
+                    "SELECT * FROM spans WHERE trace_id = ? ORDER BY started_at, span_id",
+                    (trace_id,),
+                )
             )
-        )
-        decisions = tuple(
-            self._stored_decision_from_row(row)
-            for row in self._connection.execute(
-                "SELECT * FROM decisions WHERE trace_id = ? ORDER BY decided_at, decision_id",
-                (trace_id,),
+            decisions = tuple(
+                self._stored_decision_from_row(row)
+                for row in self._connection.execute(
+                    "SELECT * FROM decisions WHERE trace_id = ? ORDER BY decided_at, decision_id",
+                    (trace_id,),
+                )
             )
-        )
-        return TraceTree(self._trace_from_row(trace_row), spans, decisions)
+            return TraceTree(self._trace_from_row(trace_row), spans, decisions)
 
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
