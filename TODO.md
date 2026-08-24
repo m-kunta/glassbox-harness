@@ -14,6 +14,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Create the complete forward-compatible SQLite schema and first migration.
 - [x] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
 - [x] Implement typed repository writes and trace-tree reads.
+- [ ] Add a rebuild migration for databases created before strict UTC RFC3339 storage validation.
 
 ### P0.3 — Redaction and content-addressed blobs
 
