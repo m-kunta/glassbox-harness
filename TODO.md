@@ -23,8 +23,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.4 — Bounded fail-open collector
 
-- [ ] Implement a bounded drop-newest, fail-open collector.
-- [ ] Expose dropped-event metrics, partial-trace state, flush, and shutdown.
+- [x] Implement a bounded drop-newest, fail-open collector.
+- [x] Expose dropped-event metrics, partial-trace state, flush, and shutdown.
 
 ### P0.5 — Public tracing SDK
 
