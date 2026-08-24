@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS traces (
     ),
     agent_name TEXT NOT NULL,
     agent_version TEXT NOT NULL,
-    started_at TEXT NOT NULL CHECK (started_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at) IS NOT NULL),
-    ended_at TEXT CHECK (ended_at IS NULL OR (ended_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', ended_at) IS NOT NULL)),
+    started_at TEXT NOT NULL CHECK ((started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(started_at, 21, 3) != '000') OR (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(started_at, 24, 3) != '000')) AND CAST(substr(started_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(started_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(started_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(started_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(started_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(started_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(started_at) = substr(started_at, 1, 10)),
+    ended_at TEXT CHECK (ended_at IS NULL OR ((ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(ended_at, 21, 3) != '000') OR (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(ended_at, 24, 3) != '000')) AND CAST(substr(ended_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(ended_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(ended_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(ended_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(ended_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(ended_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(ended_at) = substr(ended_at, 1, 10))),
     status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'partial')),
     environment TEXT NOT NULL CHECK (environment IN ('dev', 'shadow', 'prod')),
     input_ref TEXT,
@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS spans (
     parent_span_id TEXT REFERENCES spans(span_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     span_kind TEXT NOT NULL CHECK (span_kind IN ('llm', 'retrieval', 'tool', 'compute')),
-    started_at TEXT NOT NULL CHECK (started_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at) IS NOT NULL),
-    ended_at TEXT CHECK (ended_at IS NULL OR (ended_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', ended_at) IS NOT NULL)),
+    started_at TEXT NOT NULL CHECK ((started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(started_at, 21, 3) != '000') OR (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(started_at, 24, 3) != '000')) AND CAST(substr(started_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(started_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(started_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(started_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(started_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(started_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(started_at) = substr(started_at, 1, 10)),
+    ended_at TEXT CHECK (ended_at IS NULL OR ((ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(ended_at, 21, 3) != '000') OR (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(ended_at, 24, 3) != '000')) AND CAST(substr(ended_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(ended_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(ended_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(ended_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(ended_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(ended_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(ended_at) = substr(ended_at, 1, 10))),
     attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes)),
     prompt_ref TEXT,
     completion_ref TEXT,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     rationale_citations TEXT NOT NULL CHECK (json_valid(rationale_citations)),
     confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
     alternatives_considered TEXT NOT NULL CHECK (json_valid(alternatives_considered)),
-    decided_at TEXT NOT NULL CHECK (decided_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', decided_at) IS NOT NULL)
+    decided_at TEXT NOT NULL CHECK ((decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(decided_at, 21, 3) != '000') OR (decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(decided_at, 24, 3) != '000')) AND CAST(substr(decided_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(decided_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(decided_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(decided_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(decided_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(decided_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(decided_at) = substr(decided_at, 1, 10))
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_agent_decided_at ON decisions(agent_name, decided_at);
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     field_name TEXT NOT NULL,
     field_value_json TEXT NOT NULL CHECK (json_valid(field_value_json)),
     weight REAL NOT NULL,
-    retrieved_at TEXT NOT NULL CHECK (retrieved_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', retrieved_at) IS NOT NULL),
+    retrieved_at TEXT NOT NULL CHECK ((retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(retrieved_at, 21, 3) != '000') OR (retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(retrieved_at, 24, 3) != '000')) AND CAST(substr(retrieved_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(retrieved_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(retrieved_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(retrieved_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(retrieved_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(retrieved_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(retrieved_at) = substr(retrieved_at, 1, 10)),
     PRIMARY KEY (decision_id, evidence_id)
 );
 
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS overrides (
     modified_value TEXT CHECK (modified_value IS NULL OR json_valid(modified_value)),
     reason_code TEXT,
     free_text TEXT,
-    created_at TEXT NOT NULL CHECK (created_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at) IS NOT NULL),
+    created_at TEXT NOT NULL CHECK ((created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(created_at, 21, 3) != '000') OR (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(created_at, 24, 3) != '000')) AND CAST(substr(created_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(created_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(created_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(created_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(created_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(created_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(created_at) = substr(created_at, 1, 10)),
     supersedes_override_id TEXT REFERENCES overrides(override_id) ON DELETE RESTRICT,
     idempotency_key TEXT NOT NULL UNIQUE
 );
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
     ),
     decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
     outcome_type TEXT NOT NULL,
-    observed_at TEXT NOT NULL CHECK (observed_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', observed_at) IS NOT NULL),
+    observed_at TEXT NOT NULL CHECK ((observed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (observed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(observed_at, 21, 3) != '000') OR (observed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(observed_at, 24, 3) != '000')) AND CAST(substr(observed_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(observed_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(observed_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(observed_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(observed_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(observed_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(observed_at) = substr(observed_at, 1, 10)),
     horizon_days INTEGER NOT NULL CHECK (horizon_days >= 0),
     value TEXT NOT NULL CHECK (json_valid(value)),
     label TEXT CHECK (label IS NULL OR label IN ('tp', 'fp', 'tn', 'fn'))
@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     suite_id TEXT NOT NULL,
     suite_version TEXT NOT NULL,
     agent_version TEXT NOT NULL,
-    run_at TEXT NOT NULL CHECK (run_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', run_at) IS NOT NULL)
+    run_at TEXT NOT NULL CHECK ((run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(run_at, 21, 3) != '000') OR (run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(run_at, 24, 3) != '000')) AND CAST(substr(run_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(run_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(run_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(run_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(run_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(run_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(run_at) = substr(run_at, 1, 10))
 );
 
 CREATE TABLE IF NOT EXISTS eval_results (
@@ -130,5 +130,5 @@ CREATE TABLE IF NOT EXISTS eval_results (
     passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
     score REAL,
     judge_rationale TEXT,
-    run_at TEXT NOT NULL CHECK (run_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', run_at) IS NOT NULL)
+    run_at TEXT NOT NULL CHECK ((run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(run_at, 21, 3) != '000') OR (run_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(run_at, 24, 3) != '000')) AND CAST(substr(run_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(run_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(run_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(run_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(run_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(run_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(run_at) = substr(run_at, 1, 10))
 );
