@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from threading import RLock
 
 
 class Database:
@@ -11,6 +12,7 @@ class Database:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
+        self._operation_lock = RLock()
 
     @classmethod
     def open(cls, path: Path | str, *, busy_timeout_ms: int = 5_000) -> Database:
@@ -33,4 +35,5 @@ class Database:
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
-        self.connection.close()
+        with self._operation_lock:
+            self.connection.close()

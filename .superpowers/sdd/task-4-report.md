@@ -71,3 +71,38 @@ created by the existing `Database.open()` otherwise fails every worker-thread
 write. The collector still serializes its own writes; callers should avoid
 unsynchronized concurrent use of the same repository connection outside the
 collector worker.
+
+## Review remediation TDD evidence
+
+1. Added four behavioral regressions before changing production code:
+   linearized emit/shutdown admission, repository transaction coordination,
+   final-write partial marking, and the timed-out shutdown worker policy.
+2. RED command:
+
+   ```text
+   .venv/bin/python -m pytest tests/collector/test_writer.py \
+     -k 'in_progress_emit or serializes_foreground or final_repository_loss or timed_out_shutdown' -v
+   ```
+
+   Result: 4 failed as expected. The worker exited during a paused enqueue;
+   `mark_trace_partial` finished during the worker transaction; final write
+   loss did not produce a partial update; and the timed-out worker was
+   non-daemon.
+3. GREEN command:
+
+   ```text
+   .venv/bin/python -m pytest tests/collector/test_writer.py \
+     -k 'in_progress_emit or serializes_foreground or final_repository_loss or timed_out_shutdown' -v
+   ```
+
+   Result: 4 passed. The complete collector suite then passed (13 tests), as
+   did the store suite (76 tests).
+4. Final verification:
+
+   ```text
+   .venv/bin/python -m pytest -q       122 passed
+   .venv/bin/python -m ruff check .    All checks passed
+   .venv/bin/python -m mypy glassbox   Success: no issues found in 12 source files
+   .venv/bin/lint-imports              3 contracts kept, 0 broken
+   git diff --check                    passed
+   ```

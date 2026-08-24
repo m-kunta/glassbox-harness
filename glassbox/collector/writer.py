@@ -54,7 +54,9 @@ class Collector:
         self._failed_events = 0
         self._dropped_by_trace: Counter[str] = Counter()
         self._last_warning_at: float | None = None
-        self._thread = Thread(target=self._run, name="glassbox-collector", daemon=False)
+        # A repository call can block indefinitely. A timed-out shutdown reports
+        # failure, while this daemon may finish its best-effort drain later.
+        self._thread = Thread(target=self._run, name="glassbox-collector", daemon=True)
         self._thread.start()
 
     @property
@@ -87,7 +89,10 @@ class Collector:
                 if not self._accepting:
                     return False
                 self._remember_trace(event)
-            if self._buffer.put(event):
+                # Admission and enqueue share shutdown's lifecycle lock. This
+                # prevents a post-check enqueue after its worker has exited.
+                admitted = self._buffer.put(event)
+            if admitted:
                 return True
             self._record_loss(event, failed=False)
         except Exception:
@@ -136,6 +141,9 @@ class Collector:
             self._repository.write_event(persisted_event)
         except Exception:
             self._record_loss(event, failed=True)
+            # A failed final write must not depend on a later successful event
+            # to update an already-persisted trace.
+            self._mark_pending_partials()
             return
 
         if isinstance(event, TraceEvent):

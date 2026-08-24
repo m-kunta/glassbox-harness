@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from time import monotonic
 
 from glassbox.collector import Collector
@@ -176,3 +176,106 @@ def test_shutdown_stops_accepting_events_and_terminates_worker() -> None:
     assert collector.shutdown(timeout=1) is True
     assert collector.emit(_span(1)) is False
     assert collector.worker_alive is False
+
+
+def test_shutdown_waits_for_an_in_progress_emit_before_the_worker_can_exit(
+    monkeypatch: object,
+) -> None:
+    """An admission that started before shutdown must enqueue before worker exit."""
+    repository = RecordingRepository()
+    collector = Collector(repository)
+    admitted = Event()
+    release_admission = Event()
+    emit_result: list[bool] = []
+    shutdown_result: list[bool] = []
+    original_put = collector._buffer.put
+
+    def blocked_put(event: object) -> bool:
+        admitted.set()
+        assert release_admission.wait(timeout=1)
+        return original_put(event)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(collector._buffer, "put", blocked_put)  # type: ignore[union-attr]
+    emitter = Thread(target=lambda: emit_result.append(collector.emit(_span(1))))
+    emitter.start()
+    assert admitted.wait(timeout=1)
+
+    stopper = Thread(target=lambda: shutdown_result.append(collector.shutdown(timeout=1)))
+    stopper.start()
+    try:
+        # The old split check/put path lets shutdown see an empty queue and exit
+        # before this paused admission actually reaches the queue.
+        Event().wait(timeout=0.1)
+        assert collector.worker_alive is True
+    finally:
+        release_admission.set()
+        emitter.join(timeout=1)
+        stopper.join(timeout=1)
+        collector.shutdown(timeout=1)
+    assert emit_result == [True]
+    assert shutdown_result == [True]
+    assert repository.writes == [_span(1)]
+
+
+def test_repository_serializes_foreground_operation_with_collector_transaction(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """A foreground call cannot join the worker's transaction on a shared connection."""
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    repository.write_event(_trace())
+    collector = Collector(repository)
+    worker_started = Event()
+    release_worker = Event()
+    foreground_finished = Event()
+    original_write_span = repository._write_span
+
+    def blocked_write_span(event: SpanEvent) -> None:
+        worker_started.set()
+        assert release_worker.wait(timeout=1)
+        original_write_span(event)
+
+    monkeypatch.setattr(repository, "_write_span", blocked_write_span)  # type: ignore[union-attr]
+    assert collector.emit(_span(1)) is True
+    assert worker_started.wait(timeout=1)
+    foreground = Thread(
+        target=lambda: (repository.mark_trace_partial(TRACE_ID), foreground_finished.set())
+    )
+    foreground.start()
+    try:
+        assert foreground_finished.wait(timeout=0.05) is False
+    finally:
+        release_worker.set()
+        foreground.join(timeout=1)
+        collector.shutdown(timeout=1)
+    assert foreground_finished.is_set()
+
+
+def test_final_repository_loss_marks_an_already_persisted_trace_partial() -> None:
+    repository = RecordingRepository()
+    collector = Collector(repository)
+    assert collector.emit(_trace()) is True
+    assert collector.flush(timeout=1) is True
+
+    repository.fail_writes = True
+    assert collector.emit(_span(1)) is True
+    assert collector.flush(timeout=1) is True
+    assert collector.shutdown(timeout=1) is True
+
+    assert collector.failed_events == 1
+    assert repository.partial_traces == [TRACE_ID]
+
+
+def test_timed_out_shutdown_reports_failure_without_a_non_daemon_worker() -> None:
+    repository = RecordingRepository()
+    repository.block_spans = True
+    collector = Collector(repository)
+    assert collector.emit(_span(1)) is True
+    assert repository.started.wait(timeout=1)
+
+    try:
+        assert collector.shutdown(timeout=0.01) is False
+        assert collector.worker_alive is True
+        assert collector._thread.daemon is True
+    finally:
+        repository.release.set()
+        collector.shutdown(timeout=1)
