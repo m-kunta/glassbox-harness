@@ -18,8 +18,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.3 — Redaction and content-addressed blobs
 
-- [ ] Implement content-addressed, deduplicated blob persistence.
-- [ ] Run configured redaction hooks before hashing or persistence.
+- [x] Implement content-addressed, deduplicated blob persistence.
+- [x] Run configured redaction hooks before hashing or persistence.
 
 ### P0.4 — Bounded fail-open collector
 
