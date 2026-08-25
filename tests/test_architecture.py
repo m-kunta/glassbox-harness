@@ -21,9 +21,8 @@ def _events_import_violations(events_root: Path) -> list[str]:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 if node.module == "glassbox" or node.module.startswith("glassbox."):
                     violations.append(f"{source_path}: from {node.module} import ...")
-            elif (
-                isinstance(node, ast.ImportFrom)
-                and node.level - 1 > len(source_path.relative_to(events_root).parent.parts)
+            elif isinstance(node, ast.ImportFrom) and node.level - 1 > len(
+                source_path.relative_to(events_root).parent.parts
             ):
                 violations.append(f"{source_path}: relative import escapes glassbox.events")
 
@@ -47,9 +46,6 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
     contracts = config["tool"]["importlinter"]["contracts"]
 
-    # sdk-dependencies and web-dependencies are commented out in pyproject.toml
-    # until Task 5 / P2 create their source packages
-    # (import-linter requires a contract's source_modules to already exist).
     expected = {
         "events-dependency-neutral": {
             "source_modules": ["glassbox.events"],
@@ -72,6 +68,16 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval",
                 "glassbox.explain",
                 "glassbox.sdk",
+                "glassbox.web",
+            ],
+        },
+        "sdk-dependencies": {
+            "source_modules": ["glassbox.sdk"],
+            "forbidden_modules": [
+                "glassbox.collector",
+                "glassbox.eval",
+                "glassbox.explain",
+                "glassbox.store",
                 "glassbox.web",
             ],
         },
@@ -99,7 +105,7 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 3
+    assert len(user_options.contracts_options) == 4
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
 

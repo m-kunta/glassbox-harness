@@ -28,10 +28,10 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.5 — Public tracing SDK
 
-- [ ] Implement sync and async `@trace` with context propagation.
-- [ ] Implement spans, explicit decision contexts, evidence ownership, and structured citations.
-- [ ] Verify `GLASSBOX_ENABLED=0` produces zero writes.
-- [ ] Verify instrumentation failures never change agent returns or exceptions.
+- [x] Implement sync and async `@trace` with context propagation.
+- [x] Implement spans, explicit decision contexts, evidence ownership, and structured citations.
+- [x] Verify `GLASSBOX_ENABLED=0` produces zero writes.
+- [x] Verify instrumentation failures never change agent returns or exceptions.
 
 ### P0.6 — Agent integration and trace inspection
 

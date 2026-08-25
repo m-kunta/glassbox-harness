@@ -132,3 +132,18 @@ def test_mark_trace_partial_leaves_missing_trace_uncreated(tmp_path: Path) -> No
 
     assert repository.trace_tree(TRACE_ID) is None
     assert database.connection.execute("SELECT COUNT(*) FROM traces").fetchone()[0] == 0
+
+
+def test_final_trace_event_updates_the_open_trace_without_losing_children(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    trace, span, _, _ = _events()
+    final_trace = trace.model_copy(update={"ended_at": TIMESTAMP, "status": "error"})
+
+    repository.write_event(trace)
+    repository.write_event(span)
+    repository.write_event(final_trace)
+
+    tree = repository.trace_tree(TRACE_ID)
+    assert tree is not None
+    assert tree.trace == final_trace
+    assert tree.spans == (span,)

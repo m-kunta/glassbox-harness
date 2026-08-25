@@ -98,6 +98,14 @@ class Repository:
                 :environment,
                 :input_ref, :total_tokens, :total_cost_usd, :latency_ms, :attributes
             )
+            ON CONFLICT(trace_id) DO UPDATE SET
+                ended_at = excluded.ended_at,
+                status = excluded.status,
+                input_ref = excluded.input_ref,
+                total_tokens = excluded.total_tokens,
+                total_cost_usd = excluded.total_cost_usd,
+                latency_ms = excluded.latency_ms,
+                attributes = excluded.attributes
             """,
             payload | {"attributes": self._json(payload["attributes"])},
         )
