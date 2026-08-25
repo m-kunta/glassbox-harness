@@ -101,13 +101,32 @@ class Repository:
             ON CONFLICT(trace_id) DO UPDATE SET
                 ended_at = excluded.ended_at,
                 status = excluded.status,
-                input_ref = excluded.input_ref,
-                total_tokens = excluded.total_tokens,
-                total_cost_usd = excluded.total_cost_usd,
-                latency_ms = excluded.latency_ms,
-                attributes = excluded.attributes
+                input_ref = CASE
+                    WHEN :input_ref_is_set THEN excluded.input_ref ELSE traces.input_ref
+                END,
+                total_tokens = CASE
+                    WHEN :total_tokens_is_set THEN excluded.total_tokens ELSE traces.total_tokens
+                END,
+                total_cost_usd = CASE
+                    WHEN :total_cost_usd_is_set THEN excluded.total_cost_usd
+                    ELSE traces.total_cost_usd
+                END,
+                latency_ms = CASE
+                    WHEN :latency_ms_is_set THEN excluded.latency_ms ELSE traces.latency_ms
+                END,
+                attributes = CASE
+                    WHEN :attributes_is_set THEN excluded.attributes ELSE traces.attributes
+                END
             """,
-            payload | {"attributes": self._json(payload["attributes"])},
+            payload
+            | {
+                "attributes": self._json(payload["attributes"]),
+                "input_ref_is_set": "input_ref" in event.model_fields_set,
+                "total_tokens_is_set": "total_tokens" in event.model_fields_set,
+                "total_cost_usd_is_set": "total_cost_usd" in event.model_fields_set,
+                "latency_ms_is_set": "latency_ms" in event.model_fields_set,
+                "attributes_is_set": "attributes" in event.model_fields_set,
+            },
         )
 
     def _write_span(self, event: SpanEvent) -> None:

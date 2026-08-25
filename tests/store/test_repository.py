@@ -147,3 +147,39 @@ def test_final_trace_event_updates_the_open_trace_without_losing_children(tmp_pa
     assert tree is not None
     assert tree.trace == final_trace
     assert tree.spans == (span,)
+
+
+def test_final_trace_event_preserves_start_metadata_when_close_omits_it(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    trace, _, _, _ = _events()
+    started = trace.model_copy(
+        update={
+            "input_ref": "sha256:input",
+            "total_tokens": 123,
+            "total_cost_usd": 0.42,
+            "latency_ms": 17.5,
+            "attributes": {"batch": 4},
+        }
+    )
+    closing = TraceEvent(
+        trace_id=trace.trace_id,
+        agent_name=trace.agent_name,
+        agent_version=trace.agent_version,
+        started_at=trace.started_at,
+        environment=trace.environment,
+        ended_at=TIMESTAMP,
+        status="error",
+    )
+
+    repository.write_event(started)
+    repository.write_event(closing)
+
+    tree = repository.trace_tree(TRACE_ID)
+    assert tree is not None
+    assert tree.trace.ended_at == TIMESTAMP
+    assert tree.trace.status == "error"
+    assert tree.trace.input_ref == "sha256:input"
+    assert tree.trace.total_tokens == 123
+    assert tree.trace.total_cost_usd == 0.42
+    assert tree.trace.latency_ms == 17.5
+    assert tree.trace.attributes == {"batch": 4}

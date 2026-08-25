@@ -16,6 +16,7 @@ from glassbox.events import DecisionEvent, SpanEvent, TraceEvent
 from .config import emit, get_config, redact
 from .context import (
     DecisionState,
+    SpanState,
     TraceState,
     current_decision,
     current_span,
@@ -101,7 +102,8 @@ class SpanScope(AbstractContextManager[None]):
         self._name = name
         self._kind = kind
         self._span_id: str | None = None
-        self._parent_span_id: str | None = None
+        self._parent_span: SpanState | None = None
+        self._span_state: SpanState | None = None
         self._started_at: datetime | None = None
         self._started_clock: float | None = None
         self._token: object | None = None
@@ -116,8 +118,9 @@ class SpanScope(AbstractContextManager[None]):
         self._started_at = _now()
         self._started_clock = perf_counter()
         self._span_id = _new_ulid(self._started_at)
-        self._parent_span_id = current_span.get()
-        self._token = set_span(self._span_id)
+        self._parent_span = current_span.get()
+        self._span_state = SpanState(span_id=self._span_id)
+        self._token = set_span(self._span_state)
         return None
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -134,12 +137,23 @@ class SpanScope(AbstractContextManager[None]):
                     "ended_at": _now(),
                     "latency_ms": _elapsed_ms(self._started_clock),
                 }
-                if self._parent_span_id is not None:
-                    values["parent_span_id"] = self._parent_span_id
-                emit(SpanEvent(**values))
+                if self._parent_span is not None:
+                    values["parent_span_id"] = self._parent_span.span_id
+                event = SpanEvent(**values)
+                events = (event, *self._completed_descendants())
+                if self._parent_span is not None:
+                    self._parent_span.completed_descendants.extend(events)
+                else:
+                    for completed_event in events:
+                        emit(completed_event)
             except Exception:
                 pass
         return None
+
+    def _completed_descendants(self) -> tuple[SpanEvent, ...]:
+        if self._span_state is None:
+            return ()
+        return tuple(self._span_state.completed_descendants)
 
 
 class DecisionScope(AbstractContextManager["DecisionScope"]):

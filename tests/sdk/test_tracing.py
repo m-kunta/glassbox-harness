@@ -61,8 +61,8 @@ def test_nested_sync_traces_share_one_trace_and_spans_keep_parentage(
     assert traces[0].trace_id == traces[1].trace_id
     assert traces[0].ended_at is None
     assert traces[1].ended_at is not None
-    assert [span.name for span in spans] == ["child", "parent"]
-    assert spans[0].parent_span_id == spans[1].span_id
+    assert [span.name for span in spans] == ["parent", "child"]
+    assert spans[1].parent_span_id == spans[0].span_id
     assert all(span.trace_id == traces[0].trace_id for span in spans)
 
 
@@ -263,3 +263,30 @@ def test_sdk_persists_a_completed_trace_tree_through_the_collector(tmp_path: Pat
     assert len(tree.spans) == 1
     assert len(tree.decisions) == 1
     assert tree.decisions[0].evidence[0].evidence_id == "inventory"
+
+
+def test_nested_spans_persist_in_parent_before_child_order_through_the_collector(
+    tmp_path: Path,
+) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    collector = Collector(repository)
+    gb.init(agent="triage", version="test", env="dev", collector=collector)
+
+    @gb.trace
+    def traced() -> None:
+        with gb.span("parent", kind="compute"):
+            with gb.span("child", kind="compute"):
+                pass
+
+    traced()
+    assert gb.flush(timeout=1) is True
+    assert collector.shutdown(timeout=1) is True
+
+    trace_id = database.connection.execute("SELECT trace_id FROM traces").fetchone()[0]
+    tree = repository.trace_tree(trace_id)
+    assert tree is not None
+    assert tree.trace.status == "ok"
+    assert collector.dropped_events == collector.failed_events == 0
+    assert [span.name for span in tree.spans] == ["parent", "child"]
+    assert tree.spans[1].parent_span_id == tree.spans[0].span_id

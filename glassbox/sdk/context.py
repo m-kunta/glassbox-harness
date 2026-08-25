@@ -6,7 +6,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from glassbox.events import EvidenceEvent
+from glassbox.events import EvidenceEvent, SpanEvent
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,14 @@ class TraceState:
     version: str
     environment: str
     started_at: datetime
+
+
+@dataclass
+class SpanState:
+    """The active span and its completed descendants awaiting persistence."""
+
+    span_id: str
+    completed_descendants: list[SpanEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -34,7 +42,7 @@ class DecisionState:
 
 
 current_trace: ContextVar[TraceState | None] = ContextVar("glassbox_current_trace", default=None)
-current_span: ContextVar[str | None] = ContextVar("glassbox_current_span", default=None)
+current_span: ContextVar[SpanState | None] = ContextVar("glassbox_current_span", default=None)
 current_decision: ContextVar[DecisionState | None] = ContextVar(
     "glassbox_current_decision", default=None
 )
@@ -50,12 +58,12 @@ def reset_trace(token: Token[TraceState | None]) -> None:
     current_trace.reset(token)
 
 
-def set_span(span_id: str) -> Token[str | None]:
+def set_span(state: SpanState) -> Token[SpanState | None]:
     """Set the active span and return its restoration token."""
-    return current_span.set(span_id)
+    return current_span.set(state)
 
 
-def reset_span(token: Token[str | None]) -> None:
+def reset_span(token: Token[SpanState | None]) -> None:
     """Restore a previous span state."""
     current_span.reset(token)
 
