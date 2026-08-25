@@ -1,5 +1,18 @@
-"""Glassbox tracing contracts."""
+"""Glassbox's small public tracing API."""
 
-from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
+from .events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
+from .sdk import decision_context, evidence, flush, init, shutdown, span, trace
 
-__all__ = ["DecisionEvent", "EvidenceEvent", "SpanEvent", "TraceEvent"]
+__all__ = [
+    "DecisionEvent",
+    "EvidenceEvent",
+    "SpanEvent",
+    "TraceEvent",
+    "decision_context",
+    "evidence",
+    "flush",
+    "init",
+    "shutdown",
+    "span",
+    "trace",
+]
