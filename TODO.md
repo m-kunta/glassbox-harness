@@ -35,9 +35,10 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.6 — Agent integration and trace inspection
 
-- [ ] Integrate one replenishment-agent execution path.
-- [ ] Produce a redacted sample trace tree.
-- [ ] Add the read-only CLI trace inspection command.
+- [x] Integrate one replenishment-agent execution path.
+- [x] Produce a redacted sample trace tree.
+- [x] Add the read-only CLI trace inspection command.
+- [ ] Verify the replenishment agent's no-Glassbox fallback by executing a representative `TriageAgent.run` in an environment without Glassbox installed.
 
 ### P0.7 — Acceptance gate and approval
 
