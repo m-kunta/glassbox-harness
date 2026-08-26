@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = ["pydantic>=2.0"]
 
+[project.scripts]
+glassbox = "glassbox.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "import-linter>=2.0",
