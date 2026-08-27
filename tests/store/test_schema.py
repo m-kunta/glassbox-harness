@@ -239,6 +239,28 @@ def test_open_refuses_an_incomplete_pre_strict_schema(tmp_path: Path) -> None:
         Database.open(path)
 
 
+def test_open_refuses_a_view_named_as_a_glassbox_table(tmp_path: Path) -> None:
+    path = tmp_path / "view-collision.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE VIEW traces AS SELECT 'preserve me' AS note")
+    view_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'traces'"
+    ).fetchone()[0]
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'traces'"
+        ).fetchone()[0] == view_sql
+    finally:
+        unchanged.close()
+
+
 def test_open_refuses_legacy_schema_with_replaced_timestamp_checks(tmp_path: Path) -> None:
     path = tmp_path / "modified-timestamp-legacy.sqlite3"
     schema_sql = _legacy_schema_sql()

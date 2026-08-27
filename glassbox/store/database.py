@@ -86,7 +86,7 @@ def _glassbox_schema_sql(connection: sqlite3.Connection) -> dict[str, str]:
     rows = connection.execute(
         "SELECT name, sql FROM sqlite_master "
         "WHERE sql IS NOT NULL AND ("
-        f"(type = 'table' AND name IN ({table_placeholders})) "
+        f"(type IN ('table', 'view') AND name IN ({table_placeholders})) "
         "OR (type IN ('index', 'trigger') "
         f"AND tbl_name IN ({table_placeholders})))",
         _TABLES + _TABLES,
