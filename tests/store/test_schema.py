@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from glassbox.store import Database
+from glassbox.store.database import TimestampMigrationError
 
 STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
 
@@ -142,6 +143,255 @@ def _insert_required_parents(connection: sqlite3.Connection, table: str) -> None
         _insert_row(connection, "decisions", _valid_row("decisions"))
     if table == "eval_results":
         _insert_row(connection, "eval_runs", _valid_row("eval_runs"))
+
+
+def _legacy_timestamp_check(column: str) -> str:
+    return (
+        f"{column} GLOB '????-??-??T??:??:??*Z' AND "
+        f"strftime('%Y-%m-%dT%H:%M:%fZ', {column}) IS NOT NULL"
+    )
+
+
+_LEGACY_TIMESTAMP_CHECKS = {
+    "started_at": _legacy_timestamp_check("started_at"),
+    "ended_at": f"ended_at IS NULL OR ({_legacy_timestamp_check('ended_at')})",
+    "decided_at": _legacy_timestamp_check("decided_at"),
+    "retrieved_at": _legacy_timestamp_check("retrieved_at"),
+    "created_at": _legacy_timestamp_check("created_at"),
+    "observed_at": _legacy_timestamp_check("observed_at"),
+    "run_at": _legacy_timestamp_check("run_at"),
+}
+
+
+def _legacy_schema_sql() -> str:
+    """Return the pre-strict version of the released initial schema."""
+    strict_schema = (STORE_ROOT / "migrations" / "001_initial.sql").read_text(
+        encoding="utf-8"
+    )
+    legacy_lines: list[str] = []
+    for line in strict_schema.splitlines():
+        for column, check in _LEGACY_TIMESTAMP_CHECKS.items():
+            prefix = f"    {column} TEXT"
+            if line.startswith(prefix):
+                suffix = "," if line.endswith(",") else ""
+                line = f"{line[:line.index(' CHECK ')]} CHECK ({check}){suffix}"
+                break
+        legacy_lines.append(line)
+    return "\n".join(legacy_lines)
+
+
+def _create_pre_strict_database(
+    path: Path, schema_sql: str | None = None
+) -> sqlite3.Connection:
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(schema_sql or _legacy_schema_sql())
+    return connection
+
+
+def _seed_all_legacy_records(connection: sqlite3.Connection) -> None:
+    _insert_trace(connection)
+    _insert_row(connection, "spans", _valid_row("spans"))
+    child_span = _valid_row("spans")
+    child_span["span_id"] = CHILD_SPAN_ID
+    child_span["parent_span_id"] = SPAN_ID
+    _insert_row(connection, "spans", child_span)
+    _insert_row(connection, "decisions", _valid_row("decisions"))
+    _insert_row(connection, "evidence", _valid_row("evidence"))
+    _insert_row(connection, "overrides", _valid_row("overrides"))
+    _insert_row(connection, "outcomes", _valid_row("outcomes"))
+    _insert_row(connection, "eval_runs", _valid_row("eval_runs"))
+    _insert_row(connection, "eval_results", _valid_row("eval_results"))
+
+
+def test_open_reports_invalid_timestamps_in_a_pre_strict_database(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    legacy = _create_pre_strict_database(path)
+    invalid_trace = _valid_row("traces")
+    invalid_trace["started_at"] = INVALID_TIMESTAMP
+    _insert_row(legacy, "traces", invalid_trace)
+    legacy.commit()
+    legacy.close()
+
+    with pytest.raises(RuntimeError, match="strict UTC RFC3339"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute("SELECT started_at FROM traces").fetchone()[0] == INVALID_TIMESTAMP
+        schema = unchanged.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'traces'"
+        ).fetchone()[0]
+        assert "strftime('%Y-%m-%dT%H:%M:%fZ'" in schema
+    finally:
+        unchanged.close()
+
+
+def test_open_refuses_an_incomplete_pre_strict_schema(tmp_path: Path) -> None:
+    path = tmp_path / "partial-legacy.sqlite3"
+    legacy = _create_pre_strict_database(path)
+    legacy.execute("DROP TABLE eval_results")
+    legacy.executescript((STORE_ROOT / "migrations" / "001_initial.sql").read_text())
+    legacy.commit()
+    legacy.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+
+def test_open_refuses_a_view_named_as_a_glassbox_table(tmp_path: Path) -> None:
+    path = tmp_path / "view-collision.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE VIEW traces AS SELECT 'preserve me' AS note")
+    view_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'traces'"
+    ).fetchone()[0]
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'traces'"
+        ).fetchone()[0] == view_sql
+    finally:
+        unchanged.close()
+
+
+def test_open_refuses_legacy_schema_with_replaced_timestamp_checks(tmp_path: Path) -> None:
+    path = tmp_path / "modified-timestamp-legacy.sqlite3"
+    schema_sql = _legacy_schema_sql()
+    for column in _LEGACY_TIMESTAMP_CHECKS:
+        schema_sql = schema_sql.replace(
+            f"strftime('%Y-%m-%dT%H:%M:%fZ', {column})",
+            f"datetime({column})",
+        )
+    modified = _create_pre_strict_database(path, schema_sql)
+    _insert_row(modified, "traces", _valid_row("traces"))
+    expected_schema = dict(
+        modified.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+    )
+    modified.commit()
+    modified.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute("SELECT trace_id FROM traces").fetchone()[0] == TRACE_ID
+        assert dict(
+            unchanged.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+            ).fetchall()
+        ) == expected_schema
+    finally:
+        unchanged.close()
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            "status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'partial'))",
+            "status TEXT NOT NULL CHECK (status IN ('ok', 'partial'))",
+        ),
+        (
+            "attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes))\n);",
+            "attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes)),\n"
+            "    legacy_note TEXT\n);",
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_decisions_type_confidence "
+            "ON decisions(decision_type, confidence);",
+            "CREATE INDEX IF NOT EXISTS idx_decisions_type_confidence "
+            "ON decisions(decision_type, confidence);\n"
+            "CREATE INDEX idx_traces_agent_name ON traces(agent_name);",
+        ),
+    ],
+)
+def test_open_refuses_a_modified_complete_pre_strict_schema(
+    tmp_path: Path, original: str, replacement: str
+) -> None:
+    path = tmp_path / "modified-legacy.sqlite3"
+    schema_sql = _legacy_schema_sql().replace(original, replacement, 1)
+    modified = _create_pre_strict_database(path, schema_sql)
+    _insert_row(modified, "traces", _valid_row("traces"))
+    expected_schema = dict(
+        modified.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+    )
+    modified.commit()
+    modified.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute("SELECT trace_id FROM traces").fetchone()[0] == TRACE_ID
+        assert dict(
+            unchanged.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+            ).fetchall()
+        ) == expected_schema
+    finally:
+        unchanged.close()
+
+
+def test_open_rebuilds_pre_strict_database_without_losing_records(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    legacy = _create_pre_strict_database(path)
+    _seed_all_legacy_records(legacy)
+    legacy.commit()
+    legacy.close()
+
+    migrated = Database.open(path)
+    connection = migrated.connection
+
+    for table, count in {
+        "traces": 1,
+        "spans": 2,
+        "decisions": 1,
+        "evidence": 1,
+        "overrides": 1,
+        "outcomes": 1,
+        "eval_runs": 1,
+        "eval_results": 1,
+    }.items():
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == count
+    parent_span_id = connection.execute(
+        "SELECT parent_span_id FROM spans WHERE span_id = ?", (CHILD_SPAN_ID,)
+    ).fetchone()[0]
+    assert parent_span_id == SPAN_ID
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    invalid_trace = _valid_row("traces")
+    invalid_trace["trace_id"] = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+    invalid_trace["started_at"] = INVALID_TIMESTAMP
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(connection, "traces", invalid_trace)
+    migrated.close()
+
+    reopened = Database.open(path)
+    try:
+        assert reopened.connection.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 2
+        assert reopened.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert reopened.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
+    finally:
+        reopened.close()
 
 
 def test_open_creates_every_p0_table_and_required_indexes(tmp_path: Path) -> None:
