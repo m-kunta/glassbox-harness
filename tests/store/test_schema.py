@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from glassbox.store import Database
+from glassbox.store.database import TimestampMigrationError
 
 STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
 
@@ -234,8 +235,43 @@ def test_open_refuses_an_incomplete_pre_strict_schema(tmp_path: Path) -> None:
     legacy.commit()
     legacy.close()
 
-    with pytest.raises(RuntimeError, match="complete released pre-strict schema"):
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
         Database.open(path)
+
+
+def test_open_refuses_legacy_schema_with_replaced_timestamp_checks(tmp_path: Path) -> None:
+    path = tmp_path / "modified-timestamp-legacy.sqlite3"
+    schema_sql = _legacy_schema_sql()
+    for column in _LEGACY_TIMESTAMP_CHECKS:
+        schema_sql = schema_sql.replace(
+            f"strftime('%Y-%m-%dT%H:%M:%fZ', {column})",
+            f"datetime({column})",
+        )
+    modified = _create_pre_strict_database(path, schema_sql)
+    _insert_row(modified, "traces", _valid_row("traces"))
+    expected_schema = dict(
+        modified.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+    )
+    modified.commit()
+    modified.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute("SELECT trace_id FROM traces").fetchone()[0] == TRACE_ID
+        assert dict(
+            unchanged.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+            ).fetchall()
+        ) == expected_schema
+    finally:
+        unchanged.close()
 
 
 @pytest.mark.parametrize(
@@ -275,7 +311,7 @@ def test_open_refuses_a_modified_complete_pre_strict_schema(
     modified.commit()
     modified.close()
 
-    with pytest.raises(RuntimeError, match="complete released pre-strict schema"):
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
         Database.open(path)
 
     unchanged = sqlite3.connect(path)

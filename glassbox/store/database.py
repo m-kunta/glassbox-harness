@@ -23,7 +23,6 @@ _INDEXES = (
     "idx_decisions_type_confidence",
 )
 _SCHEMA_OBJECTS = _TABLES + _INDEXES
-_LEGACY_TIMESTAMP_CHECK = "strftime('%Y-%m-%dT%H:%M:%fZ'"
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 
 
@@ -67,16 +66,19 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
         encoding="utf-8"
     )
     schema_objects = _glassbox_schema_sql(connection)
+    if not schema_objects:
+        connection.executescript(schema_sql)
+        return
     if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
         return
-    if _contains_legacy_timestamp_checks(schema_objects):
-        raise TimestampMigrationError(
-            "Cannot migrate this Glassbox database because it is not the complete released "
-            "pre-strict schema. Restore a complete backup or export and repair the database "
-            "before reopening it."
-        )
-    connection.executescript(schema_sql)
+    if schema_objects == _strict_schema_objects():
+        return
+    raise TimestampMigrationError(
+        "Cannot open this existing Glassbox database because it has an unsupported schema. "
+        "Only the exact released pre-strict or current strict schema can be opened. Restore "
+        "a complete backup or export and repair the database before reopening it."
+    )
 
 
 def _glassbox_schema_sql(connection: sqlite3.Connection) -> dict[str, str]:
@@ -96,18 +98,22 @@ def _is_pre_strict_schema(schema_objects: dict[str, str]) -> bool:
     return schema_objects == _pre_strict_schema_objects()
 
 
-def _contains_legacy_timestamp_checks(schema_objects: dict[str, str]) -> bool:
-    return any(_LEGACY_TIMESTAMP_CHECK in schema for schema in schema_objects.values())
-
-
 @lru_cache
 def _pre_strict_schema_objects() -> dict[str, str]:
     """Return SQLite-normalized DDL for the complete released legacy schema."""
-    legacy_schema = (
-        Path(__file__).with_name("migrations") / "000_pre_strict_initial.sql"
-    ).read_text(encoding="utf-8")
+    return _released_schema_objects("000_pre_strict_initial.sql")
+
+
+@lru_cache
+def _strict_schema_objects() -> dict[str, str]:
+    """Return SQLite-normalized DDL for the complete released strict schema."""
+    return _released_schema_objects("001_initial.sql")
+
+
+def _released_schema_objects(filename: str) -> dict[str, str]:
+    schema = (Path(__file__).with_name("migrations") / filename).read_text(encoding="utf-8")
     expected: dict[str, str] = {}
-    for statement in legacy_schema.split(";"):
+    for statement in schema.split(";"):
         normalized = _normalize_schema_sql(statement)
         for name in _SCHEMA_OBJECTS:
             if normalized.startswith(_schema_prefix(name)):
