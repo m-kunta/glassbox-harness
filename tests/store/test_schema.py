@@ -179,10 +179,12 @@ def _legacy_schema_sql() -> str:
     return "\n".join(legacy_lines)
 
 
-def _create_pre_strict_database(path: Path) -> sqlite3.Connection:
+def _create_pre_strict_database(
+    path: Path, schema_sql: str | None = None
+) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.executescript(_legacy_schema_sql())
+    connection.executescript(schema_sql or _legacy_schema_sql())
     return connection
 
 
@@ -234,6 +236,59 @@ def test_open_refuses_an_incomplete_pre_strict_schema(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="complete released pre-strict schema"):
         Database.open(path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            "status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'partial'))",
+            "status TEXT NOT NULL CHECK (status IN ('ok', 'partial'))",
+        ),
+        (
+            "attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes))\n);",
+            "attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes)),\n"
+            "    legacy_note TEXT\n);",
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_decisions_type_confidence "
+            "ON decisions(decision_type, confidence);",
+            "CREATE INDEX IF NOT EXISTS idx_decisions_type_confidence "
+            "ON decisions(decision_type, confidence);\n"
+            "CREATE INDEX idx_traces_agent_name ON traces(agent_name);",
+        ),
+    ],
+)
+def test_open_refuses_a_modified_complete_pre_strict_schema(
+    tmp_path: Path, original: str, replacement: str
+) -> None:
+    path = tmp_path / "modified-legacy.sqlite3"
+    schema_sql = _legacy_schema_sql().replace(original, replacement, 1)
+    modified = _create_pre_strict_database(path, schema_sql)
+    _insert_row(modified, "traces", _valid_row("traces"))
+    expected_schema = dict(
+        modified.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+    )
+    modified.commit()
+    modified.close()
+
+    with pytest.raises(RuntimeError, match="complete released pre-strict schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert unchanged.execute("SELECT trace_id FROM traces").fetchone()[0] == TRACE_ID
+        assert dict(
+            unchanged.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+            ).fetchall()
+        ) == expected_schema
+    finally:
+        unchanged.close()
 
 
 def test_open_rebuilds_pre_strict_database_without_losing_records(tmp_path: Path) -> None:

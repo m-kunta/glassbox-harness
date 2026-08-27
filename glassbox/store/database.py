@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from threading import RLock
 
@@ -16,6 +17,12 @@ _TABLES = (
     "eval_runs",
     "eval_results",
 )
+_INDEXES = (
+    "idx_decisions_agent_decided_at",
+    "idx_decisions_entity",
+    "idx_decisions_type_confidence",
+)
+_SCHEMA_OBJECTS = _TABLES + _INDEXES
 _LEGACY_TIMESTAMP_CHECK = "strftime('%Y-%m-%dT%H:%M:%fZ'"
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 
@@ -59,11 +66,11 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
     schema_sql = (Path(__file__).with_name("migrations") / "001_initial.sql").read_text(
         encoding="utf-8"
     )
-    table_sql = _glassbox_table_sql(connection)
-    if _is_pre_strict_schema(table_sql):
+    schema_objects = _glassbox_schema_sql(connection)
+    if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
         return
-    if _contains_legacy_timestamp_checks(table_sql):
+    if _contains_legacy_timestamp_checks(schema_objects):
         raise TimestampMigrationError(
             "Cannot migrate this Glassbox database because it is not the complete released "
             "pre-strict schema. Restore a complete backup or export and repair the database "
@@ -72,23 +79,53 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(schema_sql)
 
 
-def _glassbox_table_sql(connection: sqlite3.Connection) -> dict[str, str]:
-    placeholders = ", ".join("?" for _ in _TABLES)
+def _glassbox_schema_sql(connection: sqlite3.Connection) -> dict[str, str]:
+    table_placeholders = ", ".join("?" for _ in _TABLES)
     rows = connection.execute(
-        f"SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ({placeholders})",
-        _TABLES,
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE sql IS NOT NULL AND ("
+        f"(type = 'table' AND name IN ({table_placeholders})) "
+        "OR (type IN ('index', 'trigger') "
+        f"AND tbl_name IN ({table_placeholders})))",
+        _TABLES + _TABLES,
     )
     return {name: sql for name, sql in rows if sql is not None}
 
 
-def _is_pre_strict_schema(table_sql: dict[str, str]) -> bool:
-    return set(table_sql) == set(_TABLES) and all(
-        _LEGACY_TIMESTAMP_CHECK in schema for schema in table_sql.values()
-    )
+def _is_pre_strict_schema(schema_objects: dict[str, str]) -> bool:
+    return schema_objects == _pre_strict_schema_objects()
 
 
-def _contains_legacy_timestamp_checks(table_sql: dict[str, str]) -> bool:
-    return any(_LEGACY_TIMESTAMP_CHECK in schema for schema in table_sql.values())
+def _contains_legacy_timestamp_checks(schema_objects: dict[str, str]) -> bool:
+    return any(_LEGACY_TIMESTAMP_CHECK in schema for schema in schema_objects.values())
+
+
+@lru_cache
+def _pre_strict_schema_objects() -> dict[str, str]:
+    """Return SQLite-normalized DDL for the complete released legacy schema."""
+    legacy_schema = (
+        Path(__file__).with_name("migrations") / "000_pre_strict_initial.sql"
+    ).read_text(encoding="utf-8")
+    expected: dict[str, str] = {}
+    for statement in legacy_schema.split(";"):
+        normalized = _normalize_schema_sql(statement)
+        for name in _SCHEMA_OBJECTS:
+            if normalized.startswith(_schema_prefix(name)):
+                expected[name] = normalized
+                break
+    if set(expected) != set(_SCHEMA_OBJECTS):
+        raise RuntimeError("The checked-in pre-strict schema fingerprint is incomplete.")
+    return expected
+
+
+def _normalize_schema_sql(schema_sql: str) -> str:
+    """Apply only SQLite's known DDL normalization to controlled SQL."""
+    return schema_sql.strip().replace(" IF NOT EXISTS", "", 1)
+
+
+def _schema_prefix(name: str) -> str:
+    object_type = "TABLE" if name in _TABLES else "INDEX"
+    return f"CREATE {object_type} {name} "
 
 
 def _rebuild_pre_strict_schema(connection: sqlite3.Connection, schema_sql: str) -> None:
