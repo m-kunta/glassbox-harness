@@ -42,9 +42,9 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P0.7 — Acceptance gate and approval
 
-- [ ] Run the P0 overhead benchmark.
-- [ ] Write the P0 ergonomics report.
-- [ ] Record validation results and stop for explicit P1 approval.
+- [x] Run the P0 overhead benchmark.
+- [x] Write the P0 ergonomics report.
+- [ ] P0 validation results are recorded; await explicit P1 approval before starting P1.
 
 ## P1 — Deterministic evaluation (blocked by P0 approval)
 
