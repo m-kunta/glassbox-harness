@@ -14,7 +14,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Create the complete forward-compatible SQLite schema and first migration.
 - [x] Enforce WAL, foreign keys, busy timeout, UTC timestamps, and deletion restrictions.
 - [x] Implement typed repository writes and trace-tree reads.
-- [ ] Add a rebuild migration for databases created before strict UTC RFC3339 storage validation.
+- [x] Add a rebuild migration for databases created before strict UTC RFC3339 storage validation.
 
 ### P0.3 — Redaction and content-addressed blobs
 
@@ -38,7 +38,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Integrate one replenishment-agent execution path.
 - [x] Produce a redacted sample trace tree.
 - [x] Add the read-only CLI trace inspection command.
-- [ ] Verify the replenishment agent's no-Glassbox fallback by executing a representative `TriageAgent.run` in an environment without Glassbox installed.
+- [x] Verify the replenishment agent's no-Glassbox fallback by executing a representative `TriageAgent.run` in an environment without Glassbox installed.
 
 ### P0.7 — Acceptance gate and approval
 

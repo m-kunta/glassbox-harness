@@ -1,7 +1,7 @@
 # P0 acceptance gate and SDK ergonomics report
 
-**Status: P1 is not approved.** This document records the P0 evidence and the
-remaining follow-ups; it is not an approval to begin P1.
+**Status: P0 evidence is complete; P1 is awaiting explicit approval.** This
+document records the P0 evidence; it is not an approval to begin P1.
 
 ## Benchmark evidence
 
@@ -16,17 +16,17 @@ which is reported separately as `flush_ms`.
 Command executed from the repository root on 2026-08-27:
 
 ```shell
-/opt/homebrew/bin/python3.11 benchmarks/p0_overhead.py
+.venv/bin/python benchmarks/p0_overhead.py
 ```
 
 Result:
 
 ```json
-{"accepted": true, "baseline_median_ms": 0.00008312053978443146, "baseline_p95_ms": 0.00020866282284259796, "baseline_runs": 30, "dropped_events": 0, "failed_events": 0, "flush_ms": 12.722958344966173, "instrumented_median_ms": 0.031854258850216866, "instrumented_p95_ms": 0.07286702748388052, "instrumented_runs": 30, "overhead_ms": 0.031771138310432434, "threshold_ms": 25}
+{"accepted": true, "baseline_median_ms": 8.381903171539307e-05, "baseline_p95_ms": 0.00021276064217090607, "baseline_runs": 30, "dropped_events": 0, "failed_events": 0, "flush_ms": 13.943416997790337, "instrumented_median_ms": 0.03070780076086521, "instrumented_p95_ms": 0.04467496182769537, "instrumented_runs": 30, "overhead_ms": 0.03062398172914982, "threshold_ms": 25}
 ```
 
 The acceptance rule is `overhead_ms < max(0.05 * baseline_ms, 25)`. The
-observed overhead is `0.031771138310432434 ms`; the threshold is `25 ms`, so
+observed overhead is `0.03062398172914982 ms`; the threshold is `25 ms`, so
 this run passes. The result also recorded zero queue drops and zero repository
 write failures. The small baseline makes the 25 ms floor decisive. This is a
 P0 SDK/persistence microbenchmark, not an end-to-end production triage latency
@@ -40,16 +40,16 @@ Repeat with `python benchmarks/p0_overhead.py`; `--runs` rejects values below
 Commands executed from the repository root on 2026-08-27:
 
 ```shell
-PATH=/Users/MKunta/Library/Python/3.11/bin:$PATH pytest -q
-PATH=/Users/MKunta/Library/Python/3.11/bin:$PATH ruff check .
-PATH=/Users/MKunta/Library/Python/3.11/bin:$PATH mypy glassbox
-PATH=/Users/MKunta/Library/Python/3.11/bin:$PATH lint-imports
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check .
+.venv/bin/mypy glassbox
+.venv/bin/lint-imports
 ```
 
 Results:
 
 ```text
-139 passed in 1.83s
+147 passed in 2.27s
 All checks passed!
 Success: no issues found in 17 source files
 Contracts: 4 kept, 0 broken.
@@ -89,22 +89,19 @@ Awkward points and recommended changes for a later approved phase:
    function after real-host lifecycle feedback.
 2. The host must retain the collector and explicitly flush/shutdown it. Consider
    a context-managed configuration helper that also owns database closure.
-3. The optional fallback is verified only at import/identity-decorator level;
-   add the required clean-environment representative `TriageAgent.run` test
-   before treating the integration as fully portable.
+3. The optional fallback is verified by a clean-environment subprocess that
+   executes a representative `TriageAgent.run` without resolving Glassbox.
 
 ## Remaining P0 follow-ups and approval decision
 
-The following TODO items remain unchecked and are P0 acceptance blockers:
+The former acceptance blockers are resolved and reviewed:
 
-1. **Database migration:** databases created before strict UTC RFC3339 storage
-   validation have no rebuild migration. Existing deployments could be unable
-   to upgrade safely; this needs a migration and test evidence.
-2. **No-Glassbox execution:** the agent repository only tests module import
-   fallback. It has not executed a representative `TriageAgent.run` in an
-   environment where Glassbox is unavailable, so runtime fallback behavior is
-   not yet evidenced.
+1. **Database migration:** complete databases created before strict UTC RFC3339
+   validation are rebuilt atomically only when they exactly match the released
+   pre-strict schema. Invalid or modified schemas fail closed with an actionable
+   error and retain their data.
+2. **No-Glassbox execution:** an isolated subprocess executes a representative
+   `TriageAgent.run` without resolving Glassbox and verifies the domain result.
 
-Consequently, P0 has benchmark and validation evidence but does **not** satisfy
-the approval gate. Obtain explicit P1 approval only after these follow-ups are
-resolved and reviewed; do not start P1 from this report.
+P0 now satisfies its evidence gate. Obtain **explicit P1 approval** before
+starting P1; this report itself is not that approval.
