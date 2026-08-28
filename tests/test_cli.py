@@ -138,15 +138,46 @@ def test_trace_command_emits_a_stable_trace_tree_json(tmp_path: Path, capsys) ->
     }
 
 
-def test_trace_command_does_not_create_sqlite_sidecars(tmp_path: Path, capsys) -> None:
+def test_trace_command_reads_committed_data_while_the_writer_connection_is_open(
+    tmp_path: Path, capsys
+) -> None:
+    """A trace is fully committed as soon as write_event() returns, but in WAL
+    mode that commit can still be sitting only in the -wal file until the last
+    connection closes or an auto-checkpoint fires. The CLI must see it anyway --
+    that's the normal case of inspecting a trace from a still-running agent."""
+    from glassbox.cli import main
+
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = _repository_with_trace(database_path)
+    try:
+        assert main(["--database", str(database_path), "trace", TRACE_ID]) == 0
+    finally:
+        database.close()
+
+    output = capsys.readouterr().out
+    assert json.loads(output)["trace"]["trace_id"] == TRACE_ID
+
+
+def test_trace_command_never_mutates_the_database(tmp_path: Path, capsys) -> None:
+    """Reading a WAL-mode database inherently needs a wal-index for any reader,
+    creating -wal/-shm sidecar files even for a read-only connection -- that is
+    expected and is what makes reading live, uncheckpointed data possible. What
+    must never happen is a mutation of the stored records."""
+    import sqlite3
+
     from glassbox.cli import main
 
     database_path = tmp_path / "glassbox.sqlite3"
     database = _repository_with_trace(database_path)
     database.close()
-    files_before = {path.name for path in tmp_path.iterdir()}
+    inspection = sqlite3.connect(database_path)
+    rows_before = inspection.execute("SELECT * FROM traces").fetchall()
+    inspection.close()
 
     assert main(["--database", str(database_path), "trace", TRACE_ID]) == 0
     capsys.readouterr()
 
-    assert {path.name for path in tmp_path.iterdir()} == files_before
+    inspection = sqlite3.connect(database_path)
+    rows_after = inspection.execute("SELECT * FROM traces").fetchall()
+    inspection.close()
+    assert rows_after == rows_before

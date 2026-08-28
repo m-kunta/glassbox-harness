@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     field_value_json TEXT NOT NULL CHECK (json_valid(field_value_json)),
     weight REAL NOT NULL,
     retrieved_at TEXT NOT NULL CHECK (retrieved_at GLOB '????-??-??T??:??:??*Z' AND strftime('%Y-%m-%dT%H:%M:%fZ', retrieved_at) IS NOT NULL),
-    PRIMARY KEY (decision_id, evidence_id)
+    PRIMARY KEY (decision_id, evidence_id, field_name)
 );
 
 CREATE TABLE IF NOT EXISTS overrides (

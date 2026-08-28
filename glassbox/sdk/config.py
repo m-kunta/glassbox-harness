@@ -13,6 +13,8 @@ from .redaction import RedactionHook, Redactor
 
 _LOGGER = logging.getLogger("glassbox.sdk")
 
+_ALLOWED_ENVIRONMENTS = frozenset({"dev", "shadow", "prod"})
+
 
 class EventSink(Protocol):
     """The collector operations the SDK needs, independent of its implementation."""
@@ -54,6 +56,8 @@ def init(
     """Configure tracing without allowing setup failures into agent code."""
     global _atexit_registered, _config
     try:
+        if env not in _ALLOWED_ENVIRONMENTS:
+            raise ValueError(f"env must be one of {sorted(_ALLOWED_ENVIRONMENTS)}, got {env!r}")
         _config = SDKConfig(
             agent=agent,
             version=version,

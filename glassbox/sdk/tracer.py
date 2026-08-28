@@ -119,7 +119,11 @@ class SpanScope(AbstractContextManager[None]):
         self._started_clock = perf_counter()
         self._span_id = _new_ulid(self._started_at)
         self._parent_span = current_span.get()
-        self._span_state = SpanState(span_id=self._span_id)
+        # All spans under one root span share a single accumulator list so each
+        # exit appends once instead of copying its descendants into its parent
+        # -- O(1) amortized per span instead of O(depth).
+        completed = self._parent_span.completed_descendants if self._parent_span is not None else []
+        self._span_state = SpanState(span_id=self._span_id, completed_descendants=completed)
         self._token = set_span(self._span_state)
         return None
 
@@ -140,20 +144,19 @@ class SpanScope(AbstractContextManager[None]):
                 if self._parent_span is not None:
                     values["parent_span_id"] = self._parent_span.span_id
                 event = SpanEvent(**values)
-                events = (event, *self._completed_descendants())
-                if self._parent_span is not None:
-                    self._parent_span.completed_descendants.extend(events)
-                else:
-                    for completed_event in events:
+                assert self._span_state is not None
+                self._span_state.completed_descendants.append(event)
+                if self._parent_span is None:
+                    # Each span appends itself only after all of its own
+                    # descendants already have (nested __exit__ order), so the
+                    # accumulator is a post-order traversal. Reversed, every
+                    # span precedes its descendants -- required so a span's
+                    # parent_span_id foreign key is always already persisted.
+                    for completed_event in reversed(self._span_state.completed_descendants):
                         emit(completed_event)
             except Exception:
                 pass
         return None
-
-    def _completed_descendants(self) -> tuple[SpanEvent, ...]:
-        if self._span_state is None:
-            return ()
-        return tuple(self._span_state.completed_descendants)
 
 
 class DecisionScope(AbstractContextManager["DecisionScope"]):

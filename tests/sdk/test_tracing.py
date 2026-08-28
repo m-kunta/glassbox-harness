@@ -66,6 +66,32 @@ def test_nested_sync_traces_share_one_trace_and_spans_keep_parentage(
     assert all(span.trace_id == traces[0].trace_id for span in spans)
 
 
+def test_deeply_nested_spans_each_emit_exactly_once(
+    configured_collector: RecordingCollector,
+) -> None:
+    """Each span exit merges its own event with its already-completed
+    descendants into its parent; a chain N levels deep must still emit exactly
+    N span events, correctly parented, however that merging is implemented."""
+
+    @gb.trace
+    def traced() -> None:
+        with gb.span("level-0", kind="compute"):
+            with gb.span("level-1", kind="compute"):
+                with gb.span("level-2", kind="compute"):
+                    with gb.span("level-3", kind="compute"):
+                        pass
+
+    traced()
+
+    spans = [event for event in configured_collector.events if isinstance(event, SpanEvent)]
+    assert sorted(span.name for span in spans) == ["level-0", "level-1", "level-2", "level-3"]
+    by_name = {span.name: span for span in spans}
+    assert by_name["level-0"].parent_span_id is None
+    assert by_name["level-1"].parent_span_id == by_name["level-0"].span_id
+    assert by_name["level-2"].parent_span_id == by_name["level-1"].span_id
+    assert by_name["level-3"].parent_span_id == by_name["level-2"].span_id
+
+
 def test_nested_async_traces_propagate_context_without_changing_return_value(
     configured_collector: RecordingCollector,
 ) -> None:

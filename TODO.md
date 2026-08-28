@@ -19,7 +19,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 ### P0.3 — Redaction and content-addressed blobs
 
 - [x] Implement content-addressed, deduplicated blob persistence.
-- [x] Run configured redaction hooks before hashing or persistence.
+- [x] Prove the redact-before-hash sequence is correct in isolation (`Redactor.apply` then `BlobStore.put`).
+- [ ] Wire blob capture into the tracer: `span()` has no content parameter, `BlobStore` has zero production call sites, and `prompt_ref`/`completion_ref`/`input_ref` are never populated. Configured redaction hooks currently protect trace/span/decision/evidence field values (via `sdk/config.py:redact`) but never reach prompt or completion content, because nothing captures that content yet.
 
 ### P0.4 — Bounded fail-open collector
 
@@ -109,3 +110,4 @@ Record approved scope changes before implementation changes them. Each entry mus
 | Date | Decision / scope change | Rationale | Affected phase | Approver |
 | --- | --- | --- | --- | --- |
 | 2026-08-22 | `EvidenceEvent.evidence_id` is a caller-defined string, unique within its owning `decision_id` (composite key), not a ULID. The spec's "ULIDs for all IDs" applies to system-generated identifiers (`trace_id`, `span_id`, `decision_id`, `override_id`, `outcome_id`, `eval_run_id`) only. | §5's own evidence table already scopes uniqueness "within its decision" — meaningless for a globally-unique ULID. §6's SDK example (`evidence_id="inventory_position"` reused literally in `rationale_citations`) only works ergonomically as a caller-chosen key, not a generated ID the caller would have to capture and thread through. | P0.1, P0.2 | Mohith Kunta |
+| 2026-08-28 | `evidence` table's composite key is `(decision_id, evidence_id, field_name)`, not `(decision_id, evidence_id)`. Widened in both `001_initial.sql` and `000_pre_strict_initial.sql` (the two have never differed on anything but timestamp-check strictness, and no external database has ever depended on the narrower key). | `gb.evidence(evidence_id=..., fields={...})` — §6's own canonical example — emits one row per field under one shared `evidence_id`. The 2-column key made every field after the first collide on insert and get silently dropped by the fail-open collector. `evidence_id` is a citation-group key (multiple fields cited together), not a single-row key. | P0.2 | Mohith Kunta |

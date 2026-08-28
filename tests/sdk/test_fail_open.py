@@ -64,3 +64,39 @@ def test_init_warns_and_never_raises_when_telemetry_setup_is_invalid(
         )
 
     assert any("initialization failed" in record.message for record in caplog.records)
+
+
+def test_init_disables_tracing_for_an_environment_the_store_would_reject(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The `environment` CHECK constraint only accepts dev/shadow/prod. A caller
+    passing anything else must be caught at init(), not discovered as a silently
+    dropped trace once the collector's write hits the database."""
+    collector = RecordingCollector()
+    with caplog.at_level(logging.WARNING, logger="glassbox.sdk"):
+        gb.init(agent="triage", version="test", env="staging", collector=collector)
+
+    @gb.trace
+    def returns_normally() -> str:
+        return "agent result"
+
+    assert returns_normally() == "agent result"
+    assert collector.events == []
+    assert any("initialization failed" in record.message for record in caplog.records)
+
+
+class RecordingCollector:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def emit(self, event: object) -> bool:
+        self.events.append(event)
+        return True
+
+    def flush(self, timeout: float | None = None) -> bool:
+        del timeout
+        return True
+
+    def shutdown(self, timeout: float | None = None) -> bool:
+        del timeout
+        return True

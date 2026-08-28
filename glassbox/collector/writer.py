@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable
 from threading import Lock, Thread
 from time import monotonic
@@ -49,7 +49,13 @@ class Collector:
         self._persisted_traces: set[str] = set()
         self._partial_traces: set[str] = set()
         self._marked_partial_traces: set[str] = set()
-        self._decision_traces: dict[str, str] = {}
+        # Evidence for a decision is always emitted in the same complete() call
+        # that emits the DecisionEvent, immediately after it (see DecisionScope
+        # .complete). An LRU cache bounded to the buffer's own capacity is far
+        # more than the lookup window this ever needs, while keeping a
+        # long-running process's memory use bounded.
+        self._decision_traces: OrderedDict[str, str] = OrderedDict()
+        self._decision_trace_capacity = max(capacity, 1)
         self._dropped_events = 0
         self._failed_events = 0
         self._dropped_by_trace: Counter[str] = Counter()
@@ -184,9 +190,7 @@ class Collector:
         with self._lock:
             trace_ids = tuple(
                 self._partial_traces
-                & self._persisted_traces
-                - self._closed_traces
-                - self._marked_partial_traces
+                & self._persisted_traces - self._closed_traces - self._marked_partial_traces
             )
         for trace_id in trace_ids:
             try:
@@ -200,6 +204,9 @@ class Collector:
     def _remember_trace(self, event: CanonicalEvent) -> None:
         if isinstance(event, DecisionEvent):
             self._decision_traces[event.decision_id] = event.trace_id
+            self._decision_traces.move_to_end(event.decision_id)
+            while len(self._decision_traces) > self._decision_trace_capacity:
+                self._decision_traces.popitem(last=False)
 
     def _trace_id(self, event: CanonicalEvent) -> str | None:
         if isinstance(event, EvidenceEvent):

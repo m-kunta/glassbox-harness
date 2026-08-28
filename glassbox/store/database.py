@@ -82,14 +82,23 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
 
 
 def _glassbox_schema_sql(connection: sqlite3.Connection) -> dict[str, str]:
+    """Return DDL for every sqlite_master object using a reserved Glassbox name.
+
+    An index or trigger shares SQLite's single schema-object namespace with
+    table names without necessarily being attached to one of our tables (its
+    tbl_name), so it is matched by its own name too. Any such collision ends
+    up with the wrong SQL text for its reserved key, which correctly falls
+    through _initialize_schema to the "unsupported schema" error instead of
+    letting CREATE TABLE/INDEX crash with a raw OperationalError.
+    """
     table_placeholders = ", ".join("?" for _ in _TABLES)
     rows = connection.execute(
         "SELECT name, sql FROM sqlite_master "
         "WHERE sql IS NOT NULL AND ("
         f"(type IN ('table', 'view') AND name IN ({table_placeholders})) "
         "OR (type IN ('index', 'trigger') "
-        f"AND tbl_name IN ({table_placeholders})))",
-        _TABLES + _TABLES,
+        f"AND (tbl_name IN ({table_placeholders}) OR name IN ({table_placeholders}))))",
+        _TABLES + _TABLES + _TABLES,
     )
     return {name: sql for name, sql in rows if sql is not None}
 
@@ -151,9 +160,7 @@ def _rebuild_pre_strict_schema(connection: sqlite3.Connection, schema_sql: str) 
         _execute_schema_statements(connection, schema_sql)
         for table in _TABLES:
             failed_table = table
-            connection.execute(
-                f"INSERT INTO {table} SELECT * FROM {_legacy_table_name(table)}"
-            )
+            connection.execute(f"INSERT INTO {table} SELECT * FROM {_legacy_table_name(table)}")
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_key_errors:
             raise TimestampMigrationError(

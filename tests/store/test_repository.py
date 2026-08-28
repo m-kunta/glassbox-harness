@@ -112,6 +112,27 @@ def test_duplicate_caller_evidence_key_is_rejected_without_replacing_prior_evide
     assert tree.decisions[0].evidence == (evidence,)
 
 
+def test_multiple_fields_under_one_evidence_id_all_persist(tmp_path: Path) -> None:
+    """The SDK's evidence(fields={...}) call emits one row per field, all sharing
+    one evidence_id (spec section 6's canonical example). They must not collide."""
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    trace, _, decision, evidence = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+    repository.write_event(evidence)
+    second_field = evidence.model_copy(update={"field_name": "lead_time_var", "field_value": 3.2})
+
+    repository.write_event(second_field)
+
+    tree = repository.trace_tree(TRACE_ID)
+    assert tree is not None
+    fields = {item.field_name: item.field_value for item in tree.decisions[0].evidence}
+    assert fields == {
+        "on_hand": {"units": 0, "is_estimated": False, "notes": None},
+        "lead_time_var": 3.2,
+    }
+
+
 def test_mark_trace_partial_updates_an_existing_trace(tmp_path: Path) -> None:
     repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
     trace, _, _, _ = _events()

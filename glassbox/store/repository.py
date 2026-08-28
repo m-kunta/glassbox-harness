@@ -15,6 +15,17 @@ from .database import Database
 
 Event: TypeAlias = TraceEvent | SpanEvent | DecisionEvent | EvidenceEvent
 
+# Fields the closing TraceEvent may omit; a close must not clobber them with
+# NULL when it does. Keep this in lockstep with any new optional TraceEvent
+# column -- a name missing here silently stops updating on close.
+_TRACE_OPTIONAL_COLUMNS = (
+    "input_ref",
+    "total_tokens",
+    "total_cost_usd",
+    "latency_ms",
+    "attributes",
+)
+
 
 @dataclass(frozen=True)
 class StoredDecision:
@@ -88,8 +99,15 @@ class Repository:
 
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
+        optional_set_clause = ", ".join(
+            f"{column} = CASE WHEN :{column}_is_set THEN excluded.{column} ELSE traces.{column} END"
+            for column in _TRACE_OPTIONAL_COLUMNS
+        )
+        params = payload | {"attributes": self._json(payload["attributes"])}
+        for column in _TRACE_OPTIONAL_COLUMNS:
+            params[f"{column}_is_set"] = column in event.model_fields_set
         self._connection.execute(
-            """
+            f"""
             INSERT INTO traces (
                 trace_id, agent_name, agent_version, started_at, ended_at, status, environment,
                 input_ref, total_tokens, total_cost_usd, latency_ms, attributes
@@ -101,32 +119,9 @@ class Repository:
             ON CONFLICT(trace_id) DO UPDATE SET
                 ended_at = excluded.ended_at,
                 status = excluded.status,
-                input_ref = CASE
-                    WHEN :input_ref_is_set THEN excluded.input_ref ELSE traces.input_ref
-                END,
-                total_tokens = CASE
-                    WHEN :total_tokens_is_set THEN excluded.total_tokens ELSE traces.total_tokens
-                END,
-                total_cost_usd = CASE
-                    WHEN :total_cost_usd_is_set THEN excluded.total_cost_usd
-                    ELSE traces.total_cost_usd
-                END,
-                latency_ms = CASE
-                    WHEN :latency_ms_is_set THEN excluded.latency_ms ELSE traces.latency_ms
-                END,
-                attributes = CASE
-                    WHEN :attributes_is_set THEN excluded.attributes ELSE traces.attributes
-                END
+                {optional_set_clause}
             """,
-            payload
-            | {
-                "attributes": self._json(payload["attributes"]),
-                "input_ref_is_set": "input_ref" in event.model_fields_set,
-                "total_tokens_is_set": "total_tokens" in event.model_fields_set,
-                "total_cost_usd_is_set": "total_cost_usd" in event.model_fields_set,
-                "latency_ms_is_set": "latency_ms" in event.model_fields_set,
-                "attributes_is_set": "attributes" in event.model_fields_set,
-            },
+            params,
         )
 
     def _write_span(self, event: SpanEvent) -> None:
@@ -189,7 +184,8 @@ class Repository:
             self._evidence_from_row(evidence_row)
             for evidence_row in self._connection.execute(
                 """
-                SELECT * FROM evidence WHERE decision_id = ? ORDER BY retrieved_at, evidence_id
+                SELECT * FROM evidence WHERE decision_id = ?
+                ORDER BY retrieved_at, evidence_id, field_name
                 """,
                 (decision_row["decision_id"],),
             )

@@ -261,6 +261,33 @@ def test_open_refuses_a_view_named_as_a_glassbox_table(tmp_path: Path) -> None:
         unchanged.close()
 
 
+def test_open_refuses_an_index_named_as_a_glassbox_table(tmp_path: Path) -> None:
+    """An index (or trigger) can share SQLite's single schema-object namespace
+    with a reserved table name without being attached to that table, so a
+    collision check keyed only on tbl_name misses it -- and CREATE TABLE then
+    fails with a raw, uncaught OperationalError instead of a clean error."""
+    path = tmp_path / "index-collision.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE unrelated (col TEXT)")
+    connection.execute("CREATE INDEX traces ON unrelated(col)")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(TimestampMigrationError, match="unsupported schema"):
+        Database.open(path)
+
+    unchanged = sqlite3.connect(path)
+    try:
+        assert (
+            unchanged.execute(
+                "SELECT type FROM sqlite_master WHERE name = 'traces'"
+            ).fetchone()[0]
+            == "index"
+        )
+    finally:
+        unchanged.close()
+
+
 def test_open_refuses_legacy_schema_with_replaced_timestamp_checks(tmp_path: Path) -> None:
     path = tmp_path / "modified-timestamp-legacy.sqlite3"
     schema_sql = _legacy_schema_sql()

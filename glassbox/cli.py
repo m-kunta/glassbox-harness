@@ -52,9 +52,9 @@ def _read_trace_tree(database_path: Path, trace_id: str) -> TraceTree | None:
     """Read a trace through the existing repository without mutating its SQLite file."""
     if not database_path.is_file():
         raise FileNotFoundError(database_path)
-    connection = sqlite3.connect(
-        f"{database_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True
-    )
+    # immutable=1 would make SQLite skip the WAL file entirely, hiding any
+    # trace committed but not yet checkpointed by a still-running writer.
+    connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         return Repository(Database(connection)).trace_tree(trace_id)

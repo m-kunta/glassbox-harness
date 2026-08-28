@@ -7,7 +7,7 @@ from threading import Event, Thread
 from time import monotonic
 
 from glassbox.collector import Collector
-from glassbox.events import SpanEvent, TraceEvent
+from glassbox.events import DecisionEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -34,6 +34,24 @@ def _span(number: int) -> SpanEvent:
         name=f"span-{number}",
         span_kind="compute",
         started_at=TIMESTAMP,
+    )
+
+
+def _decision(number: int) -> DecisionEvent:
+    return DecisionEvent(
+        decision_id=f"01ARZ3NDEKTSV{number:013d}",
+        trace_id=TRACE_ID,
+        agent_name="replenishment-triage-ai",
+        agent_version="abc123",
+        entity_type="sku_dc",
+        entity_id=f"item-{number}",
+        decision_type="flag_exception",
+        recommendation={"action": "review"},
+        rationale="test",
+        rationale_citations=(),
+        confidence=0.5,
+        alternatives_considered=(),
+        decided_at=TIMESTAMP,
     )
 
 
@@ -106,6 +124,7 @@ def test_collector_drops_newest_event_marks_trace_partial_and_counts_loss() -> N
 def test_collector_rate_limits_queue_drop_warnings(caplog: object) -> None:
     repository = RecordingRepository()
     repository.block_spans = True
+
     def clock() -> float:
         return 1.0
 
@@ -263,6 +282,21 @@ def test_final_repository_loss_marks_an_already_persisted_trace_partial() -> Non
 
     assert collector.failed_events == 1
     assert repository.partial_traces == [TRACE_ID]
+
+
+def test_decision_trace_lookup_state_is_bounded_in_a_long_running_process() -> None:
+    """_decision_traces maps decision_id -> trace_id purely to correlate a later
+    evidence write failure back to its trace for partial-trace bookkeeping.
+    Nothing ever removed entries, so a long-lived process accumulating many
+    decisions would grow this dict without bound. It must stay bounded."""
+    repository = RecordingRepository()
+    collector = Collector(repository, capacity=100)
+
+    for number in range(500):
+        collector.emit(_decision(number))
+
+    assert len(collector._decision_traces) <= 100
+    assert collector.shutdown(timeout=1) is True
 
 
 def test_timed_out_shutdown_reports_failure_without_a_non_daemon_worker() -> None:

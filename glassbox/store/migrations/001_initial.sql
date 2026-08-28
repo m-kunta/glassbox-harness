@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     field_value_json TEXT NOT NULL CHECK (json_valid(field_value_json)),
     weight REAL NOT NULL,
     retrieved_at TEXT NOT NULL CHECK ((retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR (retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' AND substr(retrieved_at, 21, 3) != '000') OR (retrieved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(retrieved_at, 24, 3) != '000')) AND CAST(substr(retrieved_at, 1, 4) AS INTEGER) BETWEEN 1 AND 9999 AND CAST(substr(retrieved_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12 AND CAST(substr(retrieved_at, 9, 2) AS INTEGER) BETWEEN 1 AND 31 AND CAST(substr(retrieved_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(retrieved_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59 AND CAST(substr(retrieved_at, 18, 2) AS INTEGER) BETWEEN 0 AND 59 AND date(retrieved_at) = substr(retrieved_at, 1, 10)),
-    PRIMARY KEY (decision_id, evidence_id)
+    PRIMARY KEY (decision_id, evidence_id, field_name)
 );
 
 CREATE TABLE IF NOT EXISTS overrides (
