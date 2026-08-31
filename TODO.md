@@ -45,9 +45,9 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [x] Run the P0 overhead benchmark.
 - [x] Write the P0 ergonomics report.
-- [ ] P0 validation results are recorded; await explicit P1 approval before starting P1.
+- [x] P0 validation results are recorded; P1 approved on 2026-08-30.
 
-## P1 — Deterministic evaluation (blocked by P0 approval)
+## P1 — Deterministic evaluation
 
 ### P1.1 — Evaluation contracts and integration
 
@@ -64,6 +64,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [ ] Create the 40-case balanced golden set.
 - [ ] Implement suite gates and CI-compatible exit codes.
+- [ ] Add a non-blocking live-provider smoke mode that reuses the scripted suite contract and cases; keep it outside the deterministic CI gate until its credentials, cost controls, and nondeterminism policy are approved.
 
 ## P2 — Decision Cards and feedback (blocked by P1)
 
@@ -111,3 +112,4 @@ Record approved scope changes before implementation changes them. Each entry mus
 | --- | --- | --- | --- | --- |
 | 2026-08-22 | `EvidenceEvent.evidence_id` is a caller-defined string, unique within its owning `decision_id` (composite key), not a ULID. The spec's "ULIDs for all IDs" applies to system-generated identifiers (`trace_id`, `span_id`, `decision_id`, `override_id`, `outcome_id`, `eval_run_id`) only. | §5's own evidence table already scopes uniqueness "within its decision" — meaningless for a globally-unique ULID. §6's SDK example (`evidence_id="inventory_position"` reused literally in `rationale_citations`) only works ergonomically as a caller-chosen key, not a generated ID the caller would have to capture and thread through. | P0.1, P0.2 | Mohith Kunta |
 | 2026-08-28 | `evidence` table's composite key is `(decision_id, evidence_id, field_name)`, not `(decision_id, evidence_id)`. Widened in both `001_initial.sql` and `000_pre_strict_initial.sql` (the two have never differed on anything but timestamp-check strictness, and no external database has ever depended on the narrower key). | `gb.evidence(evidence_id=..., fields={...})` — §6's own canonical example — emits one row per field under one shared `evidence_id`. The 2-column key made every field after the first collide on insert and get silently dropped by the fail-open collector. `evidence_id` is a citation-group key (multiple fields cited together), not a single-row key. | P0.2 | Mohith Kunta |
+| 2026-08-30 | P1 is approved. Its first adapter calls the real replenishment agent through a generic `EvaluationTarget` boundary, with a scripted provider for the deterministic gate. A live-provider smoke mode is deferred and must reuse that boundary and golden cases. | Exercises real agent orchestration without network, credential, cost, or model-variance dependencies; keeps Glassbox legible and reusable for future adapters. | P1 | Mohith Kunta |
