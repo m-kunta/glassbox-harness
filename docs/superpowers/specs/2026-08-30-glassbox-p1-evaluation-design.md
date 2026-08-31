@@ -26,6 +26,12 @@ provider credentials or cost. A live-provider smoke mode is deliberately
 deferred: it must reuse the same target and golden cases, and must remain
 outside the deterministic CI gate until its operational policy is approved.
 
+P1 also adds minimal `decision_context` and `evidence` calls at the real-agent
+boundary. The adapter reads the resulting persisted decision, evidence,
+citations, and alternatives; it does not manufacture an evaluation-only shadow
+record. A follow-up revisits the domain semantics of that mapping after the
+seed suite establishes end-to-end behavior.
+
 ## Contracts
 
 `glassbox.eval` defines these dependency-neutral types:
@@ -49,8 +55,10 @@ Each replenishment golden case represents **one exception**. Its fixture is a
 plain, readable record with the exception input, expected urgency label, and
 metadata describing the case category. The adapter maps that record to the
 agent's exception schema, constructs the real agent with a scripted provider,
-calls `run`, and maps the agent result and the trace's decision/evidence data
-back to a generic `DecisionResult`.
+calls `run`, and maps its persisted Glassbox decision/evidence data back to a
+generic `DecisionResult`. The real-agent integration maps the agent's
+recommendation, rationale, evidence identifiers, and alternatives explicitly;
+the adapter only translates those already-recorded values.
 
 One-case execution preserves an easy-to-audit relationship between a case's
 input, label, evidence, alternatives, and recommendation. The agent may batch
@@ -98,8 +106,9 @@ tests/integrations/
 
 Tests cover contract validation, target loading, each deterministic assertion,
 exception-to-failure conversion, weighted-kappa edge cases, gate exit behavior,
-and real-agent execution through the scripted provider. They also prove the
-runner itself never imports replenishment-specific types.
+and real-agent execution through the scripted provider, including persisted
+decision/evidence telemetry. They also prove the runner itself never imports
+replenishment-specific types.
 
 The README gains one short `glassbox eval` example. `TODO.md` records the P1
 approval and the deferred live-provider smoke mode.
