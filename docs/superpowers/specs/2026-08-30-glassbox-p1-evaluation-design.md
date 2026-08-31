@@ -86,6 +86,12 @@ P1 includes four blocking deterministic checks:
 3. the decision has at least three evidence items; and
 4. the decision has at least one considered alternative.
 
+These checks apply uniformly to every manifest category, including do-nothing
+cases. A no-action decision must show the evidence it weighed and an action it
+rejected. If P1.3 case authoring finds the floor causes invented evidence or
+token alternatives, strengthen the real agent's reasoning requirements; do not
+create a category exemption.
+
 It also compares predicted and expected urgency, reporting weighted kappa and
 an urgency confusion matrix. Operational reporting includes deterministic pass
 rate, p50/p95 latency, cost per decision, token efficiency, and error rate.
