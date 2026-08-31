@@ -16,15 +16,24 @@ leaves open.
 ## Scope and boundaries
 
 Glassbox owns generic evaluation contracts, suite loading, deterministic
-assertions, metrics, gates, and CLI reporting. The repository-level
-`integrations/replenishment_triage.py` adapter owns translation between those
-contracts and the external replenishment agent's input and result classes.
+assertions, metrics, gates, and CLI reporting. The independently versioned
+replenishment-agent repository owns `integrations/replenishment_triage.py`,
+which translates between those contracts and its own input and result classes.
+It also owns its `goldens/replenishment_triage/` cases and suite manifest, so
+the adapter, fixtures, and evaluation policy resolve from one project root.
 
 The adapter invokes the real `TriageAgent.run` orchestration path. P1 supplies
 a scripted LLM provider so this execution is repeatable, offline, and free of
 provider credentials or cost. A live-provider smoke mode is deliberately
 deferred: it must reuse the same target and golden cases, and must remain
 outside the deterministic CI gate until its operational policy is approved.
+
+The replenishment agent declares Glassbox in an evaluation-only dependency
+extra. Its production dependency set keeps Glassbox optional, including the
+existing no-op import fallback when Glassbox is absent. An evaluation command
+runs in the agent environment, where both `integrations.replenishment_triage`
+and the installed `glassbox` CLI are importable; Glassbox never appends a
+sibling checkout to `sys.path`.
 
 P1 also adds minimal `decision_context` and `evidence` calls at the real-agent
 boundary. The adapter reads the resulting persisted decision, evidence,
@@ -47,7 +56,9 @@ seed suite establishes end-to-end behavior.
 
 The runner imports a target by manifest path. It does not import the
 replenishment agent's types. A target exception becomes a failed
-`DecisionResult`, rather than aborting the suite.
+`DecisionResult`, rather than aborting the suite. Glassbox verifies this
+generic path with fake targets; the replenishment agent verifies its own
+adapter against its real `TriageAgent`.
 
 ## Case and adapter model
 
@@ -87,28 +98,32 @@ specified routine, ambiguous, adversarial, and do-nothing distribution.
 ## File layout
 
 ```text
-glassbox/eval/
-  models.py       # contracts and suite/result records
-  target.py       # EvaluationTarget and safe target loader
-  assertions.py   # deterministic checks
-  metrics.py      # urgency agreement and operational metrics
-  runner.py       # isolated execution and gate evaluation
-integrations/
-  replenishment_triage.py  # real-agent translation adapter
-goldens/replenishment_triage/
-  cases/          # readable case records
-  manifest.yaml   # target, checks, and gates
-tests/eval/
-tests/integrations/
+glassbox/
+  eval/
+    models.py       # contracts and suite/result records
+    target.py       # EvaluationTarget and safe target loader
+    assertions.py   # deterministic checks
+    metrics.py      # urgency agreement and operational metrics
+    runner.py       # isolated execution and gate evaluation
+  cli.py          # `glassbox eval` command
+tests/eval/       # generic contract, runner, assertion, metric, and CLI tests
+
+AI-driven-replenishment-exception-triage-agent/
+  integrations/replenishment_triage.py  # real-agent translation adapter
+  goldens/replenishment_triage/
+    cases/        # readable one-exception case records
+    manifest.yaml # target, checks, and gates
+  tests/test_replenishment_evaluation.py # scripted-provider integration test
 ```
 
 ## Verification
 
-Tests cover contract validation, target loading, each deterministic assertion,
-exception-to-failure conversion, weighted-kappa edge cases, gate exit behavior,
-and real-agent execution through the scripted provider, including persisted
-decision/evidence telemetry. They also prove the runner itself never imports
-replenishment-specific types.
+Glassbox tests cover contract validation, target loading, each deterministic
+assertion, exception-to-failure conversion, weighted-kappa edge cases, gate
+exit behavior, and generic fake targets. The replenishment-agent repository
+tests real-agent execution through the scripted provider, including persisted
+decision/evidence telemetry and the no-Glassbox production fallback. Glassbox
+tests also prove the runner itself never imports replenishment-specific types.
 
 The README gains one short `glassbox eval` example. `TODO.md` records the P1
 approval and the deferred live-provider smoke mode.
