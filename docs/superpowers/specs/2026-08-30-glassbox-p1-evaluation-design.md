@@ -35,6 +35,11 @@ runs in the agent environment, where both `integrations.replenishment_triage`
 and the installed `glassbox` CLI are importable; Glassbox never appends a
 sibling checkout to `sys.path`.
 
+The agent expands its existing optional Glassbox import block to include
+`decision_context` and `evidence` as well as `trace`. Its `ImportError`
+fallback provides no-op equivalents for all three public calls, preserving the
+already-tested behavior of production runs without Glassbox installed.
+
 P1 also adds minimal `decision_context` and `evidence` calls at the real-agent
 boundary. The adapter reads the resulting persisted decision, evidence,
 citations, and alternatives; it does not manufacture an evaluation-only shadow
@@ -59,6 +64,13 @@ replenishment agent's types. A target exception becomes a failed
 `DecisionResult`, rather than aborting the suite. Glassbox verifies this
 generic path with fake targets; the replenishment agent verifies its own
 adapter against its real `TriageAgent`.
+
+`pyproject.toml` adds an import-linter `eval-dependencies` contract, covered
+by `tests/test_architecture.py` and import-linter's real API regression test.
+`glassbox.eval` may import only the dependency-neutral events contracts and
+the read-only store boundary; it must not import `collector`, `sdk`, `explain`,
+or `web`. The existing `store-dependencies` contract continues to forbid the
+reverse `store → eval` edge.
 
 ## Case and adapter model
 
@@ -92,9 +104,14 @@ rejected. If P1.3 case authoring finds the floor causes invented evidence or
 token alternatives, strengthen the real agent's reasoning requirements; do not
 create a category exemption.
 
-It also compares predicted and expected urgency, reporting weighted kappa and
-an urgency confusion matrix. Operational reporting includes deterministic pass
-rate, p50/p95 latency, cost per decision, token efficiency, and error rate.
+It compares predicted and expected urgency on the ordered SLA scale
+`LOW < MEDIUM < HIGH < CRITICAL`, reporting **linear weighted kappa** and an
+urgency confusion matrix. Adjacent-level errors retain material weight because
+each tier changes the planner response window. The source-specification gate
+remains `urgency_agreement >= 0.6`; P1.3 must record the completed 40-case
+linear-kappa value before any threshold change. Operational reporting includes
+deterministic pass rate, p50/p95 latency, cost per decision, token efficiency,
+and error rate.
 
 The CLI emits a per-case and per-assertion breakdown and exits non-zero if any
 manifest gate fails. The first implementation supplies a small representative
@@ -126,10 +143,11 @@ AI-driven-replenishment-exception-triage-agent/
 
 Glassbox tests cover contract validation, target loading, each deterministic
 assertion, exception-to-failure conversion, weighted-kappa edge cases, gate
-exit behavior, and generic fake targets. The replenishment-agent repository
-tests real-agent execution through the scripted provider, including persisted
-decision/evidence telemetry and the no-Glassbox production fallback. Glassbox
-tests also prove the runner itself never imports replenishment-specific types.
+exit behavior, generic fake targets, and the import-linter `eval-dependencies`
+contract. The replenishment-agent repository tests real-agent execution through
+the scripted provider, including persisted decision/evidence telemetry and the
+expanded no-Glassbox production fallback. Glassbox tests also prove the runner
+itself never imports replenishment-specific types.
 
 The README gains one short `glassbox eval` example. `TODO.md` records the P1
 approval and the deferred live-provider smoke mode.
