@@ -27,6 +27,16 @@ class EvidenceRecord(BaseModel):
     fields: dict[str, Any]
 
 
+class AssertionResult(BaseModel):
+    """One named deterministic evaluation check."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    passed: bool
+    message: str = ""
+
+
 class DecisionResult(BaseModel):
     """Structured target outcome consumed by deterministic checks."""
 
@@ -35,5 +45,6 @@ class DecisionResult(BaseModel):
     decision: dict[str, Any]
     evidence: tuple[EvidenceRecord, ...]
     rationale_citations: tuple[str, ...]
+    alternatives_considered: tuple[Any, ...] = ()
     measurements: dict[str, float | int] = Field(default_factory=dict)
     error: dict[str, str] | None = None

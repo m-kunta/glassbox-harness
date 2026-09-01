@@ -9,7 +9,7 @@ description = "Local-first tracing contracts for supply-chain agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-dependencies = ["pydantic>=2.0", "PyYAML>=6.0"]
+dependencies = ["pydantic>=2.0", "PyYAML>=6.0", "jsonschema>=4.0"]
 
 [project.scripts]
 glassbox = "glassbox.cli:main"
@@ -20,6 +20,7 @@ dev = [
   "mypy>=1.0",
   "pytest>=8.0",
   "ruff>=0.6",
+  "types-jsonschema>=4.0",
 ]
 
 [tool.hatch.build.targets.wheel]
