@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from glassbox.eval.runner import run_suite
 from glassbox.store import Database, Repository, TraceTree
 
 
@@ -25,10 +26,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     trace_command = commands.add_parser("trace", help="print one persisted trace tree as JSON")
     trace_command.add_argument("trace_id")
+    eval_command = commands.add_parser("eval", help="run one deterministic evaluation suite")
+    eval_command.add_argument("--suite", required=True)
     arguments = parser.parse_args(argv)
 
-    if arguments.command != "trace":
-        return 2
+    if arguments.command == "eval":
+        try:
+            evaluation = run_suite(Path(arguments.suite))
+        except (OSError, ValueError) as exc:
+            print(f"glassbox: unable to evaluate suite: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(evaluation, sort_keys=True, separators=(",", ":")))
+        return 0 if evaluation["gates"]["passed"] else 1
 
     database_path = Path(arguments.database)
     try:

@@ -181,3 +181,28 @@ def test_trace_command_never_mutates_the_database(tmp_path: Path, capsys) -> Non
     rows_after = inspection.execute("SELECT * FROM traces").fetchall()
     inspection.close()
     assert rows_after == rows_before
+
+
+def test_eval_command_prints_result_and_returns_gate_status(tmp_path: Path, capsys) -> None:
+    import yaml
+
+    from glassbox.cli import main
+
+    (tmp_path / "schema.json").write_text('{"type":"object","required":["urgency","action"]}')
+    (tmp_path / "case.yaml").write_text(
+        yaml.safe_dump({"case_id": "case-001", "input": {}, "expected_labels": {"urgency": "HIGH"}})
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "target": "tests.eval.runner_target:run_case",
+                "schema": "schema.json",
+                "cases": ["case.yaml"],
+                "gates": {"deterministic_pass_rate": 1.0},
+            }
+        )
+    )
+
+    assert main(["eval", "--suite", str(manifest)]) == 0
+    assert json.loads(capsys.readouterr().out)["gates"]["passed"] is True
