@@ -60,10 +60,12 @@ seed suite establishes end-to-end behavior.
   location, assertions, metrics, gate thresholds, and reported outcomes.
 
 The runner imports a target by manifest path. It does not import the
-replenishment agent's types. A target exception becomes a failed
-`DecisionResult`, rather than aborting the suite. Glassbox verifies this
-generic path with fake targets; the replenishment agent verifies its own
-adapter against its real `TriageAgent`.
+replenishment agent's types or create tracing infrastructure. Each
+agent-owned target creates an isolated trace/collector context for its case,
+flushes it, and returns the persisted decision data as a `DecisionResult`. A
+target exception becomes a failed `DecisionResult`, rather than aborting the
+suite. Glassbox verifies this generic path with fake targets; the
+replenishment agent verifies its own adapter against its real `TriageAgent`.
 
 `pyproject.toml` adds an import-linter `eval-dependencies` contract, covered
 by `tests/test_architecture.py` and import-linter's real API regression test.

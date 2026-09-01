@@ -103,13 +103,13 @@ git commit -m "feat: add deterministic evaluation checks"
 - Consumes the Task 1 target and YAML suite manifest and Task 2 assertion/metric results.
 - Produces `run_suite(manifest_path: Path) -> SuiteEvaluation` and `glassbox eval --suite PATH`.
 
-- [ ] **Step 1: Write failing runner tests.** Supply a temporary manifest with a fake target and two YAML case files. Assert each case gets its own temporary SQLite database/collector and trace, a target exception becomes one failed result while the next case runs, and the reported assertion breakdown, linear kappa, operational metrics, and gates are deterministic.
+- [ ] **Step 1: Write failing runner tests.** Supply a temporary manifest with a fake target and two YAML case files. Assert the runner calls each case once, a target exception becomes one failed result while the next case runs, and the reported assertion breakdown, linear kappa, operational metrics, and gates are deterministic. The fake target returns generic results; it does not require tracing infrastructure.
 
 - [ ] **Step 2: Write failing CLI tests.** Assert `glassbox eval --suite path` prints canonical JSON containing `cases`, `assertions`, `metrics`, and `gates`; exits `0` for all passing gates; exits `1` for a gate failure; and exits `2` for unreadable or invalid suite configuration.
 
 - [ ] **Step 3: Run `pytest tests/eval/test_runner.py tests/test_cli.py -v`; expect failures.**
 
-- [ ] **Step 4: Implement YAML loading and runner behavior.** Resolve case paths relative to the manifest, reject duplicated `case_id`s, load the target only after validating the manifest, initialize/flush/shutdown a separate temporary Glassbox collector for each case, and read its persisted trace tree through `Repository`. Apply the four assertions to every returned result, aggregate metrics, then evaluate explicit gate expressions for deterministic pass rate, urgency agreement, and cost per decision. Keep command output machine-readable and sorted.
+- [ ] **Step 4: Implement YAML loading and runner behavior.** Resolve case paths relative to the manifest, reject duplicated `case_id`s, and load the target only after validating the manifest. Call it once per case, convert an exception to a failed generic result, apply the four assertions to every returned result, aggregate metrics, then evaluate explicit gate expressions for deterministic pass rate, urgency agreement, and cost per decision. Keep command output machine-readable and sorted. Do not import `glassbox.sdk` or `glassbox.collector`; each agent-owned target owns its case's temporary collector, trace lifecycle, flush, and persisted trace-tree read.
 
 - [ ] **Step 5: Run targeted tests plus `ruff check .`, `mypy glassbox`, and `lint-imports`; expect success. Commit:**
 
