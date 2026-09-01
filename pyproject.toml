@@ -9,7 +9,7 @@ description = "Local-first tracing contracts for supply-chain agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-dependencies = ["pydantic>=2.0"]
+dependencies = ["pydantic>=2.0", "PyYAML>=6.0"]
 
 [project.scripts]
 glassbox = "glassbox.cli:main"
@@ -77,6 +77,17 @@ forbidden_modules = [
   "glassbox.eval",
   "glassbox.explain",
   "glassbox.store",
+  "glassbox.web",
+]
+
+[[tool.importlinter.contracts]]
+name = "eval-dependencies"
+type = "forbidden"
+source_modules = ["glassbox.eval"]
+forbidden_modules = [
+  "glassbox.collector",
+  "glassbox.sdk",
+  "glassbox.explain",
   "glassbox.web",
 ]
 
