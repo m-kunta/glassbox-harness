@@ -6,7 +6,7 @@
 
 **Architecture:** `glassbox.eval` provides generic typed contracts, deterministic checks, metrics, a runner, and the `glassbox eval` CLI. The replenishment repository owns its adapter, manifest, and golden data, runs in an explicit evaluation environment, and returns a generic result assembled from the decision/evidence data it persisted.
 
-**Tech Stack:** Python 3.11+, Pydantic 2, PyYAML, SQLite, pytest, Ruff, mypy, import-linter.
+**Tech Stack:** Python 3.11+, Pydantic 2, PyYAML, jsonschema, SQLite, pytest, Ruff, mypy, import-linter.
 
 ## Global Constraints
 
@@ -79,9 +79,9 @@ git commit -m "feat: add evaluation contracts"
 
 - [ ] **Step 2: Write failing metric tests.** Assert perfect agreement is `1.0`, an adjacent `HIGH`/`MEDIUM` disagreement has more weight than no disagreement, a `CRITICAL`/`LOW` disagreement has three times the linear distance, and one-class inputs return `1.0` only when identical (otherwise `0.0`). Assert all four urgency rows and columns appear in the confusion matrix.
 
-- [ ] **Step 3: Run the targeted tests; expect missing-module failures.**
+- [ ] **Step 3: Add `jsonschema>=4.0` to Glassbox runtime dependencies, then run the targeted tests; expect missing-module failures.**
 
-- [ ] **Step 4: Implement the checks and metrics.** Validate recommendation data with the replenishment recommendation JSON schema supplied by the agent manifest; never accept a schema supplied by a result. Resolve citations against evidence IDs in the same `DecisionResult`. Use ordered indices `{LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3}` and linear disagreement weights `abs(i - j) / 3` in Cohen's weighted-kappa expected/observed disagreement calculation. Compute p50/p95 latency, total/mean cost, total tokens, tokens per decision, and error rate without third-party numeric libraries.
+- [ ] **Step 4: Implement the checks and metrics.** Validate recommendation data with `jsonschema` against the replenishment recommendation JSON schema supplied by the agent manifest; never accept a schema supplied by a result. Resolve citations against evidence IDs in the same `DecisionResult`. Use ordered indices `{LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3}` and linear disagreement weights `abs(i - j) / 3` in Cohen's weighted-kappa expected/observed disagreement calculation. Compute p50/p95 latency, total/mean cost, total tokens, tokens per decision, and error rate without third-party numeric libraries.
 
 - [ ] **Step 5: Run `pytest tests/eval/test_assertions.py tests/eval/test_metrics.py -v`; expect success. Commit:**
 
