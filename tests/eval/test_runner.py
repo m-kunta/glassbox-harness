@@ -51,3 +51,28 @@ def test_run_suite_records_target_exception_and_continues(tmp_path: Path) -> Non
 
     assert result["cases"][0]["error"]["type"] == "RuntimeError"
     assert result["gates"]["passed"] is False
+
+
+def test_run_suite_loads_an_agent_owned_target_from_the_invoking_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "integrations").mkdir()
+    (tmp_path / "integrations" / "__init__.py").write_text("")
+    (tmp_path / "integrations" / "target.py").write_text(
+        "from glassbox.eval.models import DecisionResult\n"
+        "def run_case(case):\n"
+        "    return DecisionResult(\n"
+        "        decision={'urgency': 'HIGH', 'action': 'review'},\n"
+        "        evidence=(),\n"
+        "        rationale_citations=(),\n"
+        "    )\n"
+    )
+    manifest = _write_suite(tmp_path)
+    data = yaml.safe_load(manifest.read_text())
+    data["target"] = "integrations.target:run_case"
+    manifest.write_text(yaml.safe_dump(data))
+    monkeypatch.chdir(tmp_path)
+
+    result = run_suite(manifest)
+
+    assert result["cases"][0]["case_id"] == "case-001"

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 import yaml
 
@@ -18,7 +20,8 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
     """Run one YAML suite and return a canonical JSON-compatible result."""
     manifest = _load_yaml(manifest_path)
     base = manifest_path.parent
-    target = load_target(_required_string(manifest, "target"))
+    with _invoking_project_on_import_path():
+        target = load_target(_required_string(manifest, "target"))
     schema = _load_json(base / _required_string(manifest, "schema"))
     cases = [_load_case(base / path) for path in _required_list(manifest, "cases")]
     if len({case.case_id for case in cases}) != len(cases):
@@ -52,6 +55,17 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
 
 
 _ASSERTION_NAMES = ("schema_valid", "citations_resolve", "evidence_present", "alternatives_present")
+
+
+@contextmanager
+def _invoking_project_on_import_path() -> Iterator[None]:
+    """Let a console invocation import an adapter owned by its project."""
+    project_root = str(Path.cwd())
+    sys.path.insert(0, project_root)
+    try:
+        yield
+    finally:
+        sys.path.remove(project_root)
 
 
 def _run_case(target: Any, case: GoldenCase) -> DecisionResult:
