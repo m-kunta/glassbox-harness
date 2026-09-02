@@ -11,7 +11,7 @@ from typing import Any, Iterator, cast
 import yaml
 
 from .assertions import evaluate_deterministic
-from .metrics import linear_weighted_kappa
+from .metrics import linear_weighted_kappa, operational_metrics, urgency_confusion_matrix
 from .models import DecisionResult, GoldenCase
 from .target import load_target
 
@@ -31,8 +31,12 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
     assertion_totals = {name: 0 for name in _ASSERTION_NAMES}
     expected: list[str] = []
     predicted: list[str] = []
+    measurements: list[dict[str, float | int]] = []
+    error_count = 0
     for case in cases:
         result = _run_case(target, case)
+        measurements.append(result.measurements)
+        error_count += int(result.error is not None)
         checks = evaluate_deterministic(result, schema)
         for check in checks:
             assertion_totals[check.name] += int(check.passed)
@@ -49,7 +53,11 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
     assertions = {
         name: passed / count if count else 1.0 for name, passed in assertion_totals.items()
     }
-    metrics = {"urgency_agreement": linear_weighted_kappa(expected, predicted)}
+    metrics: dict[str, Any] = {
+        "urgency_agreement": linear_weighted_kappa(expected, predicted),
+        "urgency_confusion_matrix": urgency_confusion_matrix(expected, predicted),
+        **operational_metrics(measurements, error_count=error_count),
+    }
     gates = _gates(manifest.get("gates", {}), assertions, metrics)
     return {"assertions": assertions, "cases": case_results, "gates": gates, "metrics": metrics}
 
@@ -84,11 +92,14 @@ def _gates(config: Any, assertions: dict[str, float], metrics: dict[str, float])
     if not isinstance(config, dict):
         raise ValueError("gates must be a mapping")
     values = {"deterministic_pass_rate": min(assertions.values()), **metrics}
-    failed = {
-        name: value
-        for name, threshold in config.items()
-        if (value := values.get(name, 0.0)) < threshold
-    }
+    failed = {}
+    for name, threshold in config.items():
+        value = values.get(name, 0.0)
+        if name == "cost_per_decision":
+            if value > threshold:
+                failed[name] = value
+        elif value < threshold:
+            failed[name] = value
     return {"failed": failed, "passed": not failed}
 
 

@@ -1,4 +1,8 @@
-from glassbox.eval.metrics import linear_weighted_kappa, urgency_confusion_matrix
+from glassbox.eval.metrics import (
+    linear_weighted_kappa,
+    operational_metrics,
+    urgency_confusion_matrix,
+)
 
 
 def test_linear_weighted_kappa_is_one_for_perfect_agreement() -> None:
@@ -23,3 +27,23 @@ def test_urgency_confusion_matrix_contains_all_sla_tiers() -> None:
     assert set(matrix) == {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     assert set(matrix["HIGH"]) == {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     assert matrix["HIGH"]["MEDIUM"] == 1
+
+
+def test_operational_metrics_aggregate_latency_cost_tokens_and_errors() -> None:
+    metrics = operational_metrics(
+        [
+            {"latency_ms": 10, "cost_usd": 0.02, "tokens": 20},
+            {"latency_ms": 30, "cost_usd": 0.04, "tokens": 40},
+        ],
+        error_count=1,
+    )
+
+    assert metrics == {
+        "cost_per_decision": 0.03,
+        "error_rate": 0.5,
+        "p50_latency_ms": 20.0,
+        "p95_latency_ms": 30.0,
+        "tokens_per_decision": 30.0,
+        "total_cost_usd": 0.06,
+        "total_tokens": 60,
+    }

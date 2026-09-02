@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
+from typing import Mapping
 
 _URGENCIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _INDEX = {urgency: index for index, urgency in enumerate(_URGENCIES)}
@@ -47,6 +48,37 @@ def linear_weighted_kappa(expected: Sequence[str], predicted: Sequence[str]) -> 
         for prediction in _URGENCIES
     )
     return 1.0 if chance == 0 else 1.0 - observed / chance
+
+
+def operational_metrics(
+    measurements: Sequence[Mapping[str, float | int]], *, error_count: int
+) -> dict[str, float | int]:
+    """Aggregate target-reported execution measurements across a suite."""
+    count = len(measurements)
+    latencies = sorted(float(item.get("latency_ms", 0.0)) for item in measurements)
+    costs = [float(item.get("cost_usd", 0.0)) for item in measurements]
+    tokens = [int(item.get("tokens", 0)) for item in measurements]
+    return {
+        "p50_latency_ms": _percentile(latencies, 0.5),
+        "p95_latency_ms": _percentile(latencies, 0.95),
+        "total_cost_usd": sum(costs),
+        "cost_per_decision": sum(costs) / count if count else 0.0,
+        "total_tokens": sum(tokens),
+        "tokens_per_decision": sum(tokens) / count if count else 0.0,
+        "error_rate": error_count / count if count else 0.0,
+    }
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if percentile >= 0.95:
+        return values[-1]
+    position = (len(values) - 1) * percentile
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    fraction = position - lower
+    return values[lower] + (values[upper] - values[lower]) * fraction
 
 
 def _weight(actual: str, prediction: str) -> float:
