@@ -13,7 +13,7 @@ from typing import Any, Callable, Literal, TypeVar, cast
 
 from glassbox.events import DecisionEvent, SpanEvent, TraceEvent
 
-from .config import emit, get_config, redact
+from .config import capture, emit, get_config, redact
 from .context import (
     DecisionState,
     SpanState,
@@ -57,15 +57,26 @@ def trace(function: Callable[..., _T]) -> Callable[..., _T]:
 
 
 def span(
-    name: str, *, kind: Literal["llm", "retrieval", "tool", "compute"] = "compute"
+    name: str,
+    *,
+    kind: Literal["llm", "retrieval", "tool", "compute"] = "compute",
+    prompt: str | None = None,
+    completion: str | None = None,
 ) -> SpanScope:
     """Return a context manager which emits a completed child span."""
-    return SpanScope(name=name, kind=kind)
+    return SpanScope(name=name, kind=kind, prompt=prompt, completion=completion)
 
 
 def decision_context(*, entity_type: str, entity_id: str, decision_type: str) -> DecisionScope:
     """Return a context which exclusively owns evidence for one decision."""
     return DecisionScope(entity_type=entity_type, entity_id=entity_id, decision_type=decision_type)
+
+
+def capture_input(content: str) -> None:
+    """Capture explicit trace input as a redacted content-addressed blob."""
+    trace_state = current_trace.get()
+    if trace_state is not None:
+        trace_state.input_ref = capture(content)
 
 
 class _TraceScope(AbstractContextManager[None]):
@@ -98,9 +109,18 @@ class _TraceScope(AbstractContextManager[None]):
 class SpanScope(AbstractContextManager[None]):
     """Emit one completed span while preserving its parent span context."""
 
-    def __init__(self, *, name: str, kind: Literal["llm", "retrieval", "tool", "compute"]) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        kind: Literal["llm", "retrieval", "tool", "compute"],
+        prompt: str | None,
+        completion: str | None,
+    ) -> None:
         self._name = name
         self._kind = kind
+        self._prompt = prompt
+        self._completion = completion
         self._span_id: str | None = None
         self._parent_span: SpanState | None = None
         self._span_state: SpanState | None = None
@@ -143,6 +163,10 @@ class SpanScope(AbstractContextManager[None]):
                 }
                 if self._parent_span is not None:
                     values["parent_span_id"] = self._parent_span.span_id
+                if self._prompt is not None:
+                    values["prompt_ref"] = capture(self._prompt)
+                if self._completion is not None:
+                    values["completion_ref"] = capture(self._completion)
                 event = SpanEvent(**values)
                 assert self._span_state is not None
                 self._span_state.completed_descendants.append(event)
@@ -257,6 +281,7 @@ def _emit_trace(
         }
         if ended_at is not None:
             values["ended_at"] = ended_at
+            values["input_ref"] = state.input_ref
         emit(TraceEvent(**values))
     except Exception:
         pass

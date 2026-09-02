@@ -12,6 +12,7 @@ from glassbox.collector import Collector
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.sdk.config import reset_for_testing
 from glassbox.store import Database, Repository
+from glassbox.store.blobs import BlobStore
 
 
 class RecordingCollector:
@@ -64,6 +65,76 @@ def test_nested_sync_traces_share_one_trace_and_spans_keep_parentage(
     assert [span.name for span in spans] == ["parent", "child"]
     assert spans[1].parent_span_id == spans[0].span_id
     assert all(span.trace_id == traces[0].trace_id for span in spans)
+
+
+def test_llm_span_redacts_and_captures_prompt_and_completion_content(
+    configured_collector: RecordingCollector, tmp_path: Path
+) -> None:
+    store = BlobStore(tmp_path / "blobs")
+    gb.init(
+        agent="triage",
+        version="test",
+        env="dev",
+        collector=configured_collector,
+        blob_store=store,
+        redaction_hooks=(
+            lambda value: value.replace("secret", "[redacted]")
+            if isinstance(value, str)
+            else value,
+        ),
+    )
+
+    @gb.trace
+    def traced() -> None:
+        with gb.span(
+            "llm.complete",
+            kind="llm",
+            prompt="prompt=secret",
+            completion="completion=secret",
+        ):
+            pass
+
+    traced()
+
+    span_event = next(
+        event for event in configured_collector.events if isinstance(event, SpanEvent)
+    )
+    assert span_event.prompt_ref is not None
+    assert span_event.completion_ref is not None
+    assert store.get(span_event.prompt_ref) == b"prompt=[redacted]"
+    assert store.get(span_event.completion_ref) == b"completion=[redacted]"
+
+
+def test_capture_input_redacts_and_sets_the_completed_trace_reference(
+    configured_collector: RecordingCollector, tmp_path: Path
+) -> None:
+    store = BlobStore(tmp_path / "blobs")
+    gb.init(
+        agent="triage",
+        version="test",
+        env="dev",
+        collector=configured_collector,
+        blob_store=store,
+        redaction_hooks=(
+            lambda value: value.replace("secret", "[redacted]")
+            if isinstance(value, str)
+            else value,
+        ),
+    )
+
+    @gb.trace
+    def traced() -> None:
+        gb.capture_input("input=secret")
+
+    traced()
+
+    completed_trace = [
+        event
+        for event in configured_collector.events
+        if isinstance(event, TraceEvent) and event.ended_at is not None
+    ][0]
+    assert completed_trace.input_ref is not None
+    assert store.get(completed_trace.input_ref) == b"input=[redacted]"
 
 
 def test_deeply_nested_spans_each_emit_exactly_once(

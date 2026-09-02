@@ -29,6 +29,13 @@ class EventSink(Protocol):
         """Stop accepting and drain events."""
 
 
+class BlobSink(Protocol):
+    """Content-addressed storage used by optional SDK content capture."""
+
+    def put(self, content: bytes) -> str:
+        """Persist content and return its stable reference."""
+
+
 @dataclass(frozen=True)
 class SDKConfig:
     """The active SDK configuration."""
@@ -38,6 +45,7 @@ class SDKConfig:
     environment: str = "dev"
     enabled: bool = False
     collector: EventSink | None = None
+    blob_store: BlobSink | None = None
     redactor: Redactor = Redactor()
 
 
@@ -51,6 +59,7 @@ def init(
     version: str,
     env: str = "dev",
     collector: EventSink | None = None,
+    blob_store: BlobSink | None = None,
     redaction_hooks: Iterable[RedactionHook] = (),
 ) -> None:
     """Configure tracing without allowing setup failures into agent code."""
@@ -64,6 +73,7 @@ def init(
             environment=env,
             enabled=os.environ.get("GLASSBOX_ENABLED", "1") != "0",
             collector=collector,
+            blob_store=blob_store,
             redactor=Redactor(redaction_hooks),
         )
         if not _atexit_registered:
@@ -131,6 +141,18 @@ def redact(value: Any) -> Any:
         raise ValueError("Glassbox redaction failed") from None
 
 
+def capture(content: str) -> str | None:
+    """Redact and persist optional content, never exposing failures to an agent."""
+    config = get_config()
+    if not config.enabled or config.blob_store is None:
+        return None
+    try:
+        return config.blob_store.put(redact(content).encode("utf-8"))
+    except Exception:
+        _LOGGER.warning("Glassbox blob capture failed", exc_info=True)
+        return None
+
+
 def reset_for_testing() -> None:
     """Restore the inert default configuration for isolated SDK tests."""
     global _config
@@ -144,4 +166,15 @@ def _shutdown_at_exit() -> None:
     shutdown(timeout=1.0)
 
 
-__all__ = ["EventSink", "SDKConfig", "emit", "flush", "get_config", "init", "redact", "shutdown"]
+__all__ = [
+    "BlobSink",
+    "EventSink",
+    "SDKConfig",
+    "capture",
+    "emit",
+    "flush",
+    "get_config",
+    "init",
+    "redact",
+    "shutdown",
+]

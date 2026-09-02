@@ -9,7 +9,7 @@ from datetime import datetime
 from glassbox.events import EvidenceEvent, SpanEvent
 
 
-@dataclass(frozen=True)
+@dataclass
 class TraceState:
     """Identity and timing data propagated through a trace."""
 
@@ -18,6 +18,7 @@ class TraceState:
     version: str
     environment: str
     started_at: datetime
+    input_ref: str | None = None
 
 
 @dataclass

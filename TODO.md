@@ -20,7 +20,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [x] Implement content-addressed, deduplicated blob persistence.
 - [x] Prove the redact-before-hash sequence is correct in isolation (`Redactor.apply` then `BlobStore.put`).
-- [ ] Wire blob capture into the tracer: `span()` has no content parameter, `BlobStore` has zero production call sites, and `prompt_ref`/`completion_ref`/`input_ref` are never populated. Configured redaction hooks currently protect trace/span/decision/evidence field values (via `sdk/config.py:redact`) but never reach prompt or completion content, because nothing captures that content yet.
+- [x] Wire opt-in blob capture into tracing: `span(prompt=..., completion=...)` stores redacted model content and emits `prompt_ref`/`completion_ref`; `capture_input(...)` stores explicit redacted trace input and emits `input_ref` on trace completion. Both operations are fail-open.
 
 ### P0.4 — Bounded fail-open collector
 
@@ -51,21 +51,21 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P1.1 — Evaluation contracts and integration
 
-- [ ] Refine P1 into a test-driven implementation plan after the P0 SDK review.
-- [ ] Add typed golden cases and the `EvaluationTarget` protocol.
-- [ ] Add the replenishment evaluation adapter under `integrations/`.
+- [x] Refine P1 into a test-driven implementation plan after the P0 SDK review.
+- [x] Add typed golden cases and the `EvaluationTarget` protocol.
+- [x] Add the replenishment evaluation adapter under `integrations/`.
 - [ ] Revisit the real replenishment agent's decision, evidence, citation, and alternatives mapping after the P1 seed suite establishes end-to-end behavior; refine the domain semantics from observed evaluation results rather than adding an evaluation-only shadow model.
 
 ### P1.2 — Deterministic checks and metrics
 
-- [ ] Build deterministic schema, evidence, citation, and alternatives assertions.
-- [ ] Add weighted-kappa agreement and operational metrics.
+- [x] Build deterministic schema, evidence, citation, and alternatives assertions.
+- [x] Add weighted-kappa agreement and operational metrics.
 
 ### P1.3 — Golden suite and CI gate
 
-- [ ] Create the 40-case balanced golden set.
-- [ ] Implement suite gates and CI-compatible exit codes.
-- [ ] Sanity-check the source-specification `urgency_agreement >= 0.6` gate against the completed 40-case suite using the approved linear weighted-kappa calculation; record the observed value before changing the threshold.
+- [x] Create the 40-case balanced golden set.
+- [x] Implement suite gates and CI-compatible exit codes.
+- [x] Sanity-check the source-specification `urgency_agreement >= 0.6` gate against the completed 40-case suite using the approved linear weighted-kappa calculation; the scripted suite observed `1.0`, so the `0.6` threshold remains unchanged pending live-provider calibration.
 - [ ] Add a non-blocking live-provider smoke mode that reuses the scripted suite contract and cases; keep it outside the deterministic CI gate until its credentials, cost controls, and nondeterminism policy are approved.
 - [ ] During P1.3 authoring, inspect the initial do-nothing cases for evidence or alternatives added only to satisfy the uniform evaluation floor; strengthen real-agent reasoning requirements if padding appears, without category exemptions.
 
