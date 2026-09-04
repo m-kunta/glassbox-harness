@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from time import perf_counter
 
 import pytest
 
@@ -11,6 +15,7 @@ import glassbox as gb
 from glassbox.collector import Collector
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.sdk.config import reset_for_testing
+from glassbox.sdk.context import TraceState
 from glassbox.store import Database, Repository
 from glassbox.store.blobs import BlobStore
 
@@ -95,6 +100,7 @@ def test_llm_span_redacts_and_captures_prompt_and_completion_content(
             pass
 
     traced()
+    assert gb.flush(timeout=1)
 
     span_event = next(
         event for event in configured_collector.events if isinstance(event, SpanEvent)
@@ -127,6 +133,7 @@ def test_capture_input_redacts_and_sets_the_completed_trace_reference(
         gb.capture_input("input=secret")
 
     traced()
+    assert gb.flush(timeout=1)
 
     completed_trace = [
         event
@@ -135,6 +142,52 @@ def test_capture_input_redacts_and_sets_the_completed_trace_reference(
     ][0]
     assert completed_trace.input_ref is not None
     assert store.get(completed_trace.input_ref) == b"input=[redacted]"
+
+
+def test_blob_capture_does_not_block_the_traced_agent(
+    configured_collector: RecordingCollector,
+) -> None:
+    class SlowBlobStore:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = Event()
+
+        def put(self, content: bytes) -> str:
+            del content
+            self.started.set()
+            self.release.wait(timeout=1)
+            return "a" * 64
+
+    store = SlowBlobStore()
+    gb.init(
+        agent="triage", version="test", env="dev", collector=configured_collector, blob_store=store
+    )
+
+    @gb.trace
+    def traced() -> None:
+        with gb.span("llm.complete", kind="llm", prompt="prompt"):
+            pass
+
+    started_at = perf_counter()
+    traced()
+
+    assert perf_counter() - started_at < 0.1
+    assert store.started.wait(timeout=1)
+    store.release.set()
+    assert gb.flush(timeout=1)
+
+
+def test_trace_state_identity_fields_are_immutable() -> None:
+    state = TraceState(
+        trace_id="trace",
+        agent="triage",
+        version="test",
+        environment="dev",
+        started_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        state.agent = "other"  # type: ignore[misc]
 
 
 def test_deeply_nested_spans_each_emit_exactly_once(

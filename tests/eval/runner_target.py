@@ -18,3 +18,13 @@ def run_case(case: GoldenCase) -> DecisionResult:
 def raise_error(case: GoldenCase) -> DecisionResult:
     del case
     raise RuntimeError("scripted target failure")
+
+
+def return_wrong_shape(case: GoldenCase) -> object:
+    del case
+    return {"decision": {"urgency": "HIGH"}}
+
+
+def return_invalid_urgency(case: GoldenCase) -> DecisionResult:
+    del case
+    return DecisionResult(decision={"urgency": "NOW"}, evidence=(), rationale_citations=())

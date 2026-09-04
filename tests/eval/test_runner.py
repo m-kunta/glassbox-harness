@@ -1,8 +1,9 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
-from glassbox.eval.runner import run_suite
+from glassbox.eval.runner import _gates, run_suite
 
 
 def _write_suite(tmp_path: Path) -> Path:
@@ -71,8 +72,58 @@ def test_run_suite_loads_an_agent_owned_target_from_the_invoking_project(
     data = yaml.safe_load(manifest.read_text())
     data["target"] = "integrations.target:run_case"
     manifest.write_text(yaml.safe_dump(data))
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(tmp_path.parent)
 
     result = run_suite(manifest)
 
     assert result["cases"][0]["case_id"] == "case-001"
+
+
+def test_gates_fail_when_a_ceiling_metric_exceeds_its_limit() -> None:
+    gates = _gates(
+        {"error_rate": 0.1, "p95_latency_ms": 100, "cost_per_decision": 1},
+        {"schema_valid": 1.0},
+        {"error_rate": 0.3, "p95_latency_ms": 120.0, "cost_per_decision": 0.5},
+    )
+
+    assert gates == {"failed": {"error_rate": 0.3, "p95_latency_ms": 120.0}, "passed": False}
+
+
+def test_run_suite_rejects_malformed_yaml_as_a_value_error(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("target: [unterminated")
+
+    with pytest.raises(ValueError, match="unable to parse YAML"):
+        run_suite(manifest)
+
+
+def test_run_suite_rejects_an_invalid_json_schema_as_a_value_error(tmp_path: Path) -> None:
+    manifest = _write_suite(tmp_path)
+    (tmp_path / "schema.json").write_text('{"type": 12}')
+
+    with pytest.raises(ValueError, match="invalid JSON schema"):
+        run_suite(manifest)
+
+
+def test_run_suite_records_non_result_target_return_as_a_case_error(tmp_path: Path) -> None:
+    manifest = _write_suite(tmp_path)
+    data = yaml.safe_load(manifest.read_text())
+    data["target"] = "tests.eval.runner_target:return_wrong_shape"
+    manifest.write_text(yaml.safe_dump(data))
+
+    result = run_suite(manifest)
+
+    assert result["cases"][0]["error"]["type"] == "TypeError"
+    assert result["gates"]["passed"] is False
+
+
+def test_run_suite_records_invalid_target_urgency_as_a_case_error(tmp_path: Path) -> None:
+    manifest = _write_suite(tmp_path)
+    data = yaml.safe_load(manifest.read_text())
+    data["target"] = "tests.eval.runner_target:return_invalid_urgency"
+    manifest.write_text(yaml.safe_dump(data))
+
+    result = run_suite(manifest)
+
+    assert result["cases"][0]["error"]["type"] == "ValueError"
+    assert result["metrics"]["error_rate"] == 1.0

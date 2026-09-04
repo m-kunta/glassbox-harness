@@ -6,6 +6,7 @@ import inspect
 import logging
 import secrets
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC, datetime
 from functools import wraps
 from time import perf_counter
@@ -13,7 +14,7 @@ from typing import Any, Callable, Literal, TypeVar, cast
 
 from glassbox.events import DecisionEvent, SpanEvent, TraceEvent
 
-from .config import capture, emit, get_config, redact
+from .config import capture, defer_capture, emit, get_config, redact
 from .context import (
     DecisionState,
     SpanState,
@@ -76,7 +77,7 @@ def capture_input(content: str) -> None:
     """Capture explicit trace input as a redacted content-addressed blob."""
     trace_state = current_trace.get()
     if trace_state is not None:
-        trace_state.input_ref = capture(content)
+        set_trace(replace(trace_state, input_capture=capture(content)))
 
 
 class _TraceScope(AbstractContextManager[None]):
@@ -100,7 +101,11 @@ class _TraceScope(AbstractContextManager[None]):
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         if self._state is not None:
-            _emit_trace(self._state, ended_at=_now(), status="error" if exc_type else "ok")
+            _emit_trace(
+                current_trace.get() or self._state,
+                ended_at=_now(),
+                status="error" if exc_type else "ok",
+            )
         if self._token is not None:
             reset_trace(cast(Any, self._token))
         return None
@@ -163,21 +168,33 @@ class SpanScope(AbstractContextManager[None]):
                 }
                 if self._parent_span is not None:
                     values["parent_span_id"] = self._parent_span.span_id
-                if self._prompt is not None:
-                    values["prompt_ref"] = capture(self._prompt)
-                if self._completion is not None:
-                    values["completion_ref"] = capture(self._completion)
-                event = SpanEvent(**values)
-                assert self._span_state is not None
-                self._span_state.completed_descendants.append(event)
-                if self._parent_span is None:
-                    # Each span appends itself only after all of its own
-                    # descendants already have (nested __exit__ order), so the
-                    # accumulator is a post-order traversal. Reversed, every
-                    # span precedes its descendants -- required so a span's
-                    # parent_span_id foreign key is always already persisted.
-                    for completed_event in reversed(self._span_state.completed_descendants):
-                        emit(completed_event)
+                prompt_capture = capture(self._prompt) if self._prompt is not None else None
+                completion_capture = (
+                    capture(self._completion) if self._completion is not None else None
+                )
+
+                def emit_span(prompt_ref: str | None, completion_ref: str | None) -> None:
+                    event_values = dict(values)
+                    if self._prompt is not None:
+                        event_values["prompt_ref"] = prompt_ref
+                    if self._completion is not None:
+                        event_values["completion_ref"] = completion_ref
+                    event = SpanEvent(**event_values)
+                    assert self._span_state is not None
+                    self._span_state.completed_descendants.append(event)
+                    if self._parent_span is None:
+                        # Each span appends itself only after all of its own
+                        # descendants already have (nested __exit__ order), so the
+                        # accumulator is a post-order traversal. Reversed, every
+                        # span precedes its descendants -- required so a span's
+                        # parent_span_id foreign key is always already persisted.
+                        for completed_event in reversed(self._span_state.completed_descendants):
+                            emit(completed_event)
+
+                if prompt_capture is None and completion_capture is None:
+                    emit_span(None, None)
+                else:
+                    defer_capture(emit_span, prompt_capture, completion_capture)
             except Exception:
                 pass
         return None
@@ -281,8 +298,18 @@ def _emit_trace(
         }
         if ended_at is not None:
             values["ended_at"] = ended_at
-            values["input_ref"] = state.input_ref
-        emit(TraceEvent(**values))
+            if state.input_capture is None:
+                emit(TraceEvent(**values))
+            else:
+                def emit_completed_trace(input_ref: str | None) -> None:
+                    emit(TraceEvent(**(values | {"input_ref": input_ref})))
+
+                defer_capture(
+                    emit_completed_trace,
+                    state.input_capture,
+                )
+        else:
+            emit(TraceEvent(**values))
     except Exception:
         pass
 

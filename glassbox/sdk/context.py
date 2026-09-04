@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,7 +10,7 @@ from datetime import datetime
 from glassbox.events import EvidenceEvent, SpanEvent
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceState:
     """Identity and timing data propagated through a trace."""
 
@@ -18,7 +19,7 @@ class TraceState:
     version: str
     environment: str
     started_at: datetime
-    input_ref: str | None = None
+    input_capture: Future[str | None] | None = None
 
 
 @dataclass

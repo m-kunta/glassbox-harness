@@ -72,8 +72,6 @@ def operational_metrics(
 def _percentile(values: Sequence[float], percentile: float) -> float:
     if not values:
         return 0.0
-    if percentile >= 0.95:
-        return values[-1]
     position = (len(values) - 1) * percentile
     lower = int(position)
     upper = min(lower + 1, len(values) - 1)

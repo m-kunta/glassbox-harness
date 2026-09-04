@@ -42,8 +42,16 @@ def test_operational_metrics_aggregate_latency_cost_tokens_and_errors() -> None:
         "cost_per_decision": 0.03,
         "error_rate": 0.5,
         "p50_latency_ms": 20.0,
-        "p95_latency_ms": 30.0,
+        "p95_latency_ms": 29.0,
         "tokens_per_decision": 30.0,
         "total_cost_usd": 0.06,
         "total_tokens": 60,
     }
+
+
+def test_operational_metrics_interpolates_p95_latency() -> None:
+    metrics = operational_metrics(
+        [{"latency_ms": value} for value in (0, 100, 200, 300)], error_count=0
+    )
+
+    assert metrics["p95_latency_ms"] == 285.0

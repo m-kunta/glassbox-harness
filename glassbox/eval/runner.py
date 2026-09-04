@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import sys
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any
 
 import yaml
+from jsonschema import Draft202012Validator, SchemaError
+from pydantic import ValidationError
 
 from .assertions import evaluate_deterministic
 from .metrics import linear_weighted_kappa, operational_metrics, urgency_confusion_matrix
@@ -20,8 +20,7 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
     """Run one YAML suite and return a canonical JSON-compatible result."""
     manifest = _load_yaml(manifest_path)
     base = manifest_path.parent
-    with _invoking_project_on_import_path():
-        target = load_target(_required_string(manifest, "target"))
+    target = load_target(_required_string(manifest, "target"), module_root=base)
     schema = _load_json(base / _required_string(manifest, "schema"))
     cases = [_load_case(base / path) for path in _required_list(manifest, "cases")]
     if len({case.case_id for case in cases}) != len(cases):
@@ -40,8 +39,11 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
         checks = evaluate_deterministic(result, schema)
         for check in checks:
             assertion_totals[check.name] += int(check.passed)
-        expected.append(str(case.expected_labels["urgency"]))
-        predicted.append(str(result.decision.get("urgency", "LOW")))
+        expected_urgency = _urgency(case.expected_labels.get("urgency"), source="expected")
+        predicted_urgency = _urgency(result.decision.get("urgency"), source="target")
+        if expected_urgency is not None and predicted_urgency is not None:
+            expected.append(expected_urgency)
+            predicted.append(predicted_urgency)
         case_results.append(
             {
                 "case_id": case.case_id,
@@ -63,22 +65,19 @@ def run_suite(manifest_path: Path) -> dict[str, Any]:
 
 
 _ASSERTION_NAMES = ("schema_valid", "citations_resolve", "evidence_present", "alternatives_present")
-
-
-@contextmanager
-def _invoking_project_on_import_path() -> Iterator[None]:
-    """Let a console invocation import an adapter owned by its project."""
-    project_root = str(Path.cwd())
-    sys.path.insert(0, project_root)
-    try:
-        yield
-    finally:
-        sys.path.remove(project_root)
+_FLOOR_GATES = frozenset({"deterministic_pass_rate", "urgency_agreement"})
+_URGENCIES = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
 
 
 def _run_case(target: Any, case: GoldenCase) -> DecisionResult:
     try:
-        return cast(DecisionResult, target(case))
+        result = target(case)
+        if not isinstance(result, DecisionResult):
+            raise TypeError("evaluation target must return a DecisionResult")
+        urgency = result.decision.get("urgency")
+        if urgency is not None and _urgency(urgency, source="target") is None:
+            raise ValueError(f"target returned unknown urgency {urgency!r}")
+        return result
     except Exception as exc:  # targets must not abort the remaining suite
         return DecisionResult(
             decision={},
@@ -88,23 +87,29 @@ def _run_case(target: Any, case: GoldenCase) -> DecisionResult:
         )
 
 
-def _gates(config: Any, assertions: dict[str, float], metrics: dict[str, float]) -> dict[str, Any]:
+def _gates(config: Any, assertions: dict[str, float], metrics: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("gates must be a mapping")
     values = {"deterministic_pass_rate": min(assertions.values()), **metrics}
     failed = {}
     for name, threshold in config.items():
-        value = values.get(name, 0.0)
-        if name == "cost_per_decision":
-            if value > threshold:
-                failed[name] = value
-        elif value < threshold:
+        if not isinstance(threshold, (int, float)):
+            raise ValueError(f"gate {name!r} must have a numeric threshold")
+        if name not in values or not isinstance(values[name], (int, float)):
+            raise ValueError(f"gate {name!r} does not name a numeric metric")
+        value = values[name]
+        if name in _FLOOR_GATES and value < threshold:
+            failed[name] = value
+        elif name not in _FLOOR_GATES and value > threshold:
             failed[name] = value
     return {"failed": failed, "passed": not failed}
 
 
 def _load_case(path: Path) -> GoldenCase:
-    return GoldenCase.model_validate(_load_yaml(path))
+    try:
+        return GoldenCase.model_validate(_load_yaml(path))
+    except ValidationError as exc:
+        raise ValueError(f"invalid case file {path}: {exc}") from exc
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -112,6 +117,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         value = yaml.safe_load(path.read_text())
     except OSError as exc:
         raise ValueError(f"unable to read {path}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"unable to parse YAML {path}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a mapping")
     return value
@@ -124,6 +131,10 @@ def _load_json(path: Path) -> dict[str, Any]:
         raise ValueError(f"unable to read JSON schema {path}") from exc
     if not isinstance(value, dict):
         raise ValueError("schema must be an object")
+    try:
+        Draft202012Validator.check_schema(value)
+    except SchemaError as exc:
+        raise ValueError(f"invalid JSON schema {path}: {exc.message}") from exc
     return value
 
 
@@ -138,4 +149,12 @@ def _required_list(mapping: dict[str, Any], name: str) -> list[str]:
     value = mapping.get(name)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"suite requires {name} as a list of paths")
+    return value
+
+
+def _urgency(value: Any, *, source: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _URGENCIES:
+        raise ValueError(f"{source} urgency must be one of {sorted(_URGENCIES)}")
     return value
