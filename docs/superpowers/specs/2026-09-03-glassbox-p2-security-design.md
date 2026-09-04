@@ -56,8 +56,11 @@ token-specific diagnostic.
   all persisted decision content as untrusted and rely on Jinja autoescaping.
 
 P2.1 adds explicit runtime dependencies: `fastapi` for routing,
-`uvicorn[standard]` for the local ASGI server, `jinja2` for templates, and
+plain `uvicorn` for the local ASGI server, `jinja2` for templates, and
 `python-multipart` for parsing the login form. No dotenv dependency is added.
+The dashboard deliberately does not install Uvicorn's `standard` extra: its
+reload and throughput-oriented components are outside this local, single-
+operator use case and that extra would otherwise add `python-dotenv`.
 
 The existing import-linter `web-dependencies` contract becomes active once
 `glassbox.web` exists: it may depend on `store` and `explain`, never `sdk`.
