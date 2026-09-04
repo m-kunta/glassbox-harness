@@ -19,17 +19,21 @@ accepts a host and port, but permits only IPv4 loopback (`127.0.0.1`) and IPv6
 loopback (`::1`). It rejects wildcard, unspecified, and all non-loopback hosts
 before a listener is opened. The default is `127.0.0.1`.
 
-Startup reads `GLASSBOX_LOCAL_ACCESS_TOKEN` from the project's `.env` through
-the existing configuration-loading convention. Missing, empty, and
-placeholder-looking tokens are startup errors. The token is never rendered,
-logged, stored in the database, or included in a URL.
+Startup reads `GLASSBOX_LOCAL_ACCESS_TOKEN` only from the process environment,
+using the same `os.environ.get` pattern as `GLASSBOX_ENABLED` and
+`GLASSBOX_DATABASE`. Glassbox does not load `.env` files, locate secret files,
+or add dotenv parsing. Missing tokens and tokens shorter than 32 characters are
+startup errors. The token is never rendered, logged, stored in the database,
+or included in a URL.
 
 `GET /login` renders a local token form. `POST /login` compares the submitted
 token with the configured token using a constant-time comparison. A successful
 login creates a random server-side session and returns an `HttpOnly`,
 `SameSite=Strict`, path-scoped cookie. Sessions expire after 30 minutes of
 inactivity and are kept only in process memory; server restart invalidates all
-sessions.
+sessions. `Secure` is intentionally omitted because the local service uses
+plain HTTP on loopback; setting it would prevent normal browser cookie
+delivery.
 
 All application routes require a valid session except `/login` and an
 unauthenticated `/health` endpoint that returns only service status. The route
@@ -51,15 +55,20 @@ token-specific diagnostic.
 - `glassbox.web.templates`: login and later planner templates. Templates treat
   all persisted decision content as untrusted and rely on Jinja autoescaping.
 
+P2.1 adds explicit runtime dependencies: `fastapi` for routing,
+`uvicorn[standard]` for the local ASGI server, `jinja2` for templates, and
+`python-multipart` for parsing the login form. No dotenv dependency is added.
+
 The existing import-linter `web-dependencies` contract becomes active once
 `glassbox.web` exists: it may depend on `store` and `explain`, never `sdk`.
 
 ## Error handling
 
-Invalid host, missing token, or invalid timeout produces a clear startup error
-before binding a port. Bad credentials do not reveal whether a configured token
-exists. Expired, missing, or malformed sessions are removed and treated as
-unauthenticated. Session-store failures deny access rather than granting it.
+Invalid host, a missing or too-short token, or invalid timeout produces a clear
+startup error before binding a port. Bad credentials do not reveal whether a
+configured token exists. Expired, missing, or malformed sessions are removed
+and treated as unauthenticated. Session-store failures deny access rather than
+granting it.
 
 ## Verification
 
@@ -67,7 +76,7 @@ Tests must prove:
 
 1. startup accepts only `127.0.0.1` and `::1`, and rejects non-loopback and
    wildcard addresses before any bind;
-2. missing or placeholder tokens fail startup;
+2. missing and fewer-than-32-character tokens fail startup;
 3. failed login creates no session or cookie;
 4. successful login creates a server-side session with `HttpOnly` and
    `SameSite=Strict` cookie attributes;
