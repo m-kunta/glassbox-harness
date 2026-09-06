@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Glassbox local access</title></head>
+  <body>
+    <main>
+      <h1>Glassbox local access</h1>
+      {% if error %}<p role="alert">Access denied.</p>{% endif %}
+      <form action="/login" method="post">
+        <label for="access-token">Local access token</label>
+        <input id="access-token" name="access_token" type="password" autocomplete="current-password" required>
+        <button type="submit">Continue</button>
+      </form>
+    </main>
+  </body>
+</html>

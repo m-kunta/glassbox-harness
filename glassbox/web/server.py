@@ -6,9 +6,16 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import RequestResponseEndpoint
+
+from .auth import SESSION_COOKIE_NAME, SessionStore, token_matches
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _MIN_TOKEN_LENGTH = 32
@@ -51,9 +58,55 @@ def load_server_config(
 
 
 def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now) -> FastAPI:
-    """Create the P2.1 application shell; routes arrive with authentication."""
-    del config, clock
-    return FastAPI()
+    """Create the authenticated P2.1 application shell."""
+    templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
+    sessions = SessionStore(config.session_idle_timeout, clock=clock)
+    app = FastAPI()
+    app.state.sessions = sessions
+
+    @app.middleware("http")
+    async def require_session(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path in {"/login", "/health"}:
+            return await call_next(request)
+        session_id = request.cookies.get(SESSION_COOKIE_NAME, "")
+        session = sessions.get(session_id)
+        if session is None:
+            return RedirectResponse("/login", status_code=303)
+        request.state.csrf_token = session.csrf_token
+        sessions.touch(session_id)
+        response = await call_next(request)
+        return response
+
+    @app.get("/login")
+    def login_form(request: Request) -> Response:
+        return templates.TemplateResponse(request, "login.html", {"error": False})
+
+    @app.post("/login")
+    def login(request: Request, access_token: Annotated[str, Form()]) -> Response:
+        if not token_matches(access_token, config.access_token):
+            return templates.TemplateResponse(
+                request, "login.html", {"error": True}, status_code=401
+            )
+        session = sessions.create()
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            session.session_id,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @app.get("/health")
+    def health() -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    @app.get("/")
+    def root() -> PlainTextResponse:
+        return PlainTextResponse("Planner views are not available yet.", status_code=503)
+
+    return app
 
 
 def run_server(
