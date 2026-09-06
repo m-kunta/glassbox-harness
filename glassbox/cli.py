@@ -13,6 +13,7 @@ from typing import Any
 
 from glassbox.eval.runner import run_suite
 from glassbox.store import Database, Repository, TraceTree
+from glassbox.web.server import run_server
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -28,6 +29,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     trace_command.add_argument("trace_id")
     eval_command = commands.add_parser("eval", help="run one deterministic evaluation suite")
     eval_command.add_argument("--suite", required=True)
+    serve_command = commands.add_parser("serve", help="run the local Glassbox web server")
+    serve_command.add_argument("--host", default="127.0.0.1")
+    serve_command.add_argument("--port", type=int, default=8787)
     arguments = parser.parse_args(argv)
 
     if arguments.command == "eval":
@@ -38,6 +42,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         print(json.dumps(evaluation, sort_keys=True, separators=(",", ":")))
         return 0 if evaluation["gates"]["passed"] else 1
+
+    if arguments.command == "serve":
+        try:
+            run_server(host=arguments.host, port=arguments.port)
+        except ValueError as exc:
+            print(f"glassbox: unable to start server: {exc}", file=sys.stderr)
+            return 2
+        return 0
 
     database_path = Path(arguments.database)
     try:

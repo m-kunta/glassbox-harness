@@ -35,7 +35,11 @@ def test_package_metadata_declares_required_quality_tools() -> None:
     assert config["build-system"]["build-backend"] == "hatchling.build"
     assert set(config["project"]["dependencies"]) >= {"pydantic>=2.0"}
     assert "PyYAML>=6.0" in config["project"]["dependencies"]
+    assert {"fastapi>=0.110", "uvicorn>=0.27", "jinja2>=3.1", "python-multipart>=0.0.9"} <= set(
+        config["project"]["dependencies"]
+    )
     assert set(config["project"]["optional-dependencies"]["dev"]) >= {
+        "httpx>=0.27",
         "import-linter>=2.0",
         "mypy>=1.0",
         "pytest>=8.0",
@@ -91,6 +95,10 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.web",
             ],
         },
+        "web-dependencies": {
+            "source_modules": ["glassbox.web"],
+            "forbidden_modules": ["glassbox.sdk"],
+        },
     }
 
     actual = {
@@ -115,7 +123,7 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 5
+    assert len(user_options.contracts_options) == 6
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
 
