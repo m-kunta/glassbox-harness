@@ -23,9 +23,12 @@ directory or database file, changes journal mode, initializes schema, runs a
 migration, commits, or writes application data.
 
 The factory validates the schema objects against Glassbox's current strict
-released schema. A pre-strict database raises a clear error telling the
-operator to run a writer-capable Glassbox session first; an unknown schema
-raises a clear unsupported-schema error. `glassbox serve` preflights this
+released schema. It normalizes SQLite open and schema-introspection failures
+(including a non-SQLite or corrupted target) to the same clear
+unsupported-schema read-only error, without exposing SQLite's raw message. A
+pre-strict database raises a clear error telling the operator to run a
+writer-capable Glassbox session first; an unknown schema raises a clear
+unsupported-schema error. `glassbox serve` preflights this
 factory and closes the result before opening its listener, so a missing,
 legacy, or unsupported database is a startup error.
 
@@ -71,9 +74,11 @@ values are `none`, `accepted`, `modified`, `rejected`, and `inconsistent`.
 
 Cursor pagination preserves all active filters. A cursor is a base64url-encoded
 JSON object containing the selected sort value and `decision_id` tie-breaker.
-The service validates its exact keys and value types, then passes both as bound
-values; malformed cursors are validation errors. This makes each page boundary
-stable when several decisions share one timestamp or confidence value.
+For timestamp sorting, its value is the canonical `decided_at` text read from
+SQLite verbatim—not a newly formatted Python `datetime`. The service validates
+its exact keys and value types, then passes both as bound values; malformed
+cursors are validation errors. This makes each page boundary stable when
+several decisions share one timestamp or confidence value.
 
 Request values are always bound parameters. Sort input is never interpolated:
 the only accepted values are `timestamp` mapped to the literal SQL identifier
@@ -118,10 +123,11 @@ self-referencing and branching histories observable instead of choosing an
 arbitrary timestamp winner.
 
 The trace view converts spans to a stable, time-ordered tree. A span whose
-parent is absent from the trace or whose parent relationship cannot be placed
-is displayed as an orphan diagnostic rather than silently removed. It shows
-span name, kind, timing, model/token/cost fields when present, and prompt or
-completion blob references only; it never opens blob contents.
+parent is absent from the trace, whose relationship forms a cycle, or whose
+parent relationship otherwise cannot be placed is displayed as an orphan
+diagnostic rather than silently removed or recursively rendered forever. It
+shows span name, kind, timing, model/token/cost fields when present, and prompt
+or completion blob references only; it never opens blob contents.
 
 ## Routes and templates
 
@@ -149,18 +155,21 @@ Tests must prove:
 
 1. a read-only open neither creates a missing database nor attempts DDL,
    migration, journal-mode changes, or data writes;
-2. strict schema opens read-only; pre-strict and unknown schemas fail with
-   actionable errors;
+2. strict schema opens read-only; pre-strict, unknown, and non-SQLite schemas
+   fail with actionable errors rather than raw SQLite exceptions;
 3. a separate writer process and read-only reader process exchange committed
    WAL records before checkpoint and after a later writer commit;
 4. queue filters bind values, sort choices use only the two fixed columns, and
    unknown sort/filter syntax fails validation;
 5. all confidence-boundary values have one band and produce matching filter
-   bounds;
+   bounds; pagination retains every tied timestamp/confidence row using the
+   stored canonical timestamp text for timestamp cursors;
 6. evidence groups contain every field under one citation key, dangling
    citations are visible, and anchors do not derive from caller-defined IDs;
 7. normal override chains show one head, while multiple heads and a
-   self-referencing zero-head history show an inconsistency diagnostic;
+   self-referencing zero-head history show an inconsistency diagnostic; queue
+   and Decision Card statuses agree; and cyclic span relationships render a
+   diagnostic without recursive failure;
 8. authenticated queue/card/trace routes render escaped persisted content,
    empty state, and generic `404`/`503` behavior; and
 9. `lint-imports` keeps `web-dependencies` enforced with no `web -> sdk`

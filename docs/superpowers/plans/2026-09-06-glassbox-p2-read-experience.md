@@ -13,7 +13,7 @@
 - Require Python `>=3.11`; Glassbox remains local-first with no external service or network egress.
 - Read `GLASSBOX_DATABASE` only from the process environment, defaulting to `glassbox.sqlite3`; P2.2 opens it read-only.
 - `Database.open_read_only()` uses SQLite URI `mode=ro`, requires an existing file, never creates directories/files, changes journal mode, initializes/migrates schema, commits, or writes application data.
-- Preflight the strict schema before binding `glassbox serve`; a legacy or unknown schema is a clear startup failure.
+- Preflight the strict schema before binding `glassbox serve`; a legacy, unknown, corrupted, or non-SQLite target is a clear startup failure without raw SQLite error text.
 - A web request opens and closes its own read-only `Database`/`Repository`; never share a SQLite connection in `app.state`.
 - Preserve committed WAL visibility for a writer in another process. Do not use `immutable=1`, because it hides uncheckpointed WAL data.
 - Keep all persisted recommendations, rationale, evidence, alternatives, overrides, agent fields, and blob references autoescaped. Show blob references only; never load blob content.
@@ -21,6 +21,7 @@
 - Every query value is bound. The only sort aliases are `timestamp -> decided_at` and `confidence -> confidence`; raw query text is never SQL.
 - Define confidence once in `web.read_models`: Low `[0.00, 0.50)`, Medium `[0.50, 0.80)`, High `[0.80, 1.00]`.
 - A citation key identifies every evidence field in its group. Dangling citations and malformed override/span history render diagnostics rather than disappearing or crashing a page.
+- Timestamp cursors carry the canonical `decided_at` text read from SQLite verbatim; never reformat a `datetime` for a SQLite TEXT equality predicate.
 - P2.2 is read-only: do not add feedback submission, CSRF POST enforcement, HTMX behavior, static export, blob-content display, or planner usability testing.
 
 ---
@@ -95,7 +96,7 @@
           Database.open_read_only(path)
   ```
 
-  Add a test that creates a SQLite database containing a conflicting `traces` table and asserts `ReadOnlyDatabaseError` mentions `unsupported schema`. Test `busy_timeout_ms=-1` raises the same `ValueError` contract as `Database.open()`.
+  Add a test that creates a SQLite database containing a conflicting `traces` table and asserts `ReadOnlyDatabaseError` mentions `unsupported schema`. Add another that writes arbitrary non-SQLite bytes to an existing file and asserts the same public exception without exposing the SQLite error text. Test `busy_timeout_ms=-1` raises the same `ValueError` contract as `Database.open()`.
 
 - [ ] **Step 2: Run the new factory tests to verify they fail.**
 
@@ -121,12 +122,21 @@
           raise ReadOnlyDatabaseError(
               f"Glassbox database does not exist: {database_path}"
           )
-      connection = sqlite3.connect(
-          f"{database_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
-      )
-      connection.row_factory = sqlite3.Row
-      connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-      schema_objects = _glassbox_schema_sql(connection)
+      connection: sqlite3.Connection | None = None
+      try:
+          connection = sqlite3.connect(
+              f"{database_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+          )
+          connection.row_factory = sqlite3.Row
+          connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+          schema_objects = _glassbox_schema_sql(connection)
+      except sqlite3.Error as error:
+          if connection is not None:
+              connection.close()
+          raise ReadOnlyDatabaseError(
+              "Glassbox database cannot be opened read-only or has an unsupported schema."
+          ) from error
+      assert connection is not None
       if schema_objects == _strict_schema_objects():
           return cls(connection)
       connection.close()
@@ -138,7 +148,7 @@
       raise ReadOnlyDatabaseError("Glassbox database has an unsupported schema.")
   ```
 
-  Ensure errors after opening close the connection with `try`/`except`, export `ReadOnlyDatabaseError` from `glassbox/store/__init__.py`, and never call `_initialize_schema()` from this method.
+  Initialize `connection: sqlite3.Connection | None = None` before the open. Wrap both `sqlite3.connect(...)` and `_glassbox_schema_sql(connection)` in `except sqlite3.Error`; close a successfully opened connection and re-raise `ReadOnlyDatabaseError("Glassbox database cannot be opened read-only or has an unsupported schema.")` without including `str(error)`. Export `ReadOnlyDatabaseError` from `glassbox/store/__init__.py`, and never call `_initialize_schema()` from this method.
 
 - [ ] **Step 4: Add a separate-process WAL regression test.**
 
@@ -193,7 +203,7 @@
 
 **Interfaces:**
 - Produces `QueueSort = Literal["decided_at", "confidence"]` and `OverrideStatus = Literal["none", "accepted", "modified", "rejected", "inconsistent"]`.
-- Produces immutable `QueueCursor(sort_value: str | float, decision_id: str)`, `QueueQuery(...)`, `OverrideRecord(...)`, `QueueDecision(event, override_status)`, and `DecisionDetail(stored_decision, overrides)` records.
+- Produces immutable `QueueCursor(sort_value: str | float, decision_id: str)`, `QueueQuery(...)`, `OverrideRecord(...)`, `QueueDecision(event, override_status, sort_value)`, and `DecisionDetail(stored_decision, overrides)` records. `QueueDecision.sort_value` is the exact selected value read from SQLite.
 - Produces `Repository.queue(query: QueueQuery) -> tuple[QueueDecision, ...]`, `Repository.decision_detail(decision_id: str) -> DecisionDetail | None`, and reuses `trace_tree(trace_id)`.
 
 - [ ] **Step 1: Write failing repository tests for filters, fixed sorts, pagination, and override heads.**
@@ -206,13 +216,13 @@
           repository.queue(QueueQuery(sort_column="decided_at; DROP TABLE decisions"))  # type: ignore[arg-type]
 
 
-  def test_queue_cursor_breaks_timestamp_ties(repository: Repository) -> None:
+  def test_queue_cursor_retains_every_tied_canonical_timestamp(repository: Repository) -> None:
+      # Seed two decisions with the identical stored `...Z` timestamp.
       first_page = repository.queue(QueueQuery(limit=1, sort_column="decided_at"))
-      cursor = QueueCursor(first_page[0].event.decided_at.isoformat(), first_page[0].event.decision_id)
+      cursor = QueueCursor(first_page[0].sort_value, first_page[0].event.decision_id)
       second_page = repository.queue(QueueQuery(limit=10, sort_column="decided_at", cursor=cursor))
-      assert {row.event.decision_id for row in second_page}.isdisjoint(
-          {row.event.decision_id for row in first_page}
-      )
+      seen = {row.event.decision_id for row in first_page + second_page}
+      assert seen == {FIRST_DECISION_ID, SECOND_DECISION_ID}
 
 
   def test_effective_override_is_the_unique_unsuperseded_head(repository: Repository) -> None:
@@ -273,7 +283,7 @@
   }
   ```
 
-  Always append `d.decision_id DESC` as tie-breaker. For a descending cursor, add `(column < :cursor_value OR (column = :cursor_value AND d.decision_id < :cursor_decision_id))`. The caller supplies ISO UTC strings for timestamp cursors and floats for confidence cursors; reject a mismatched type rather than coercing it into SQL.
+  Always append `d.decision_id DESC` as tie-breaker. For a descending cursor, add `(column < :cursor_value OR (column = :cursor_value AND d.decision_id < :cursor_decision_id))`. Populate each `QueueDecision.sort_value` directly from the selected database row: for `decided_at`, retain the schema's canonical `...Z` TEXT exactly; for `confidence`, retain the numeric value. The service must use that field when encoding a cursor, never `event.decided_at.isoformat()`. The caller supplies those stored strings for timestamp cursors and floats for confidence cursors; reject a mismatched type rather than coercing it into SQL.
 
   Compute override status in a read-only CTE/`CASE`: no rows is `none`; one override row with no child is its `action`; any other nonzero head count is `inconsistent`. Fetch all override rows for `decision_detail` ordered by `created_at, override_id`; do not select an arbitrary current row for malformed history.
 
@@ -306,7 +316,7 @@
 
 **Interfaces:**
 - Produces `ConfidenceBand(str, Enum)` with `LOW`, `MEDIUM`, `HIGH`; `confidence_band(confidence: float) -> ConfidenceBand`; and `confidence_bounds(band: ConfidenceBand) -> tuple[float, float | None]`.
-- Produces `QueuePage`, `QueueRow`, `DecisionCard`, `EvidenceGroupView`, `CitationView`, `OverrideView`, `TraceView`, `SpanView`, and `Diagnostic` frozen models.
+- Produces `QueuePage`, `QueueRow(sort_value: str | float, ...)`, `DecisionCard`, `EvidenceGroupView`, `CitationView`, `OverrideView`, `TraceView`, `SpanView`, and `Diagnostic` frozen models.
 - Produces `decode_cursor(value: str | None, sort_column: QueueSort) -> QueueCursor | None`, `encode_cursor(row: QueueRow, sort_column: QueueSort) -> str`, and `ReadService(database_path: Path)` methods `queue(...)`, `decision_card(decision_id)`, `trace(trace_id)`.
 
 - [ ] **Step 1: Write failing pure-model tests.**
@@ -338,7 +348,7 @@
       assert card.citations[0].anchor == "evidence-0"
   ```
 
-  Add tests that a normal override chain yields its head, while independent heads and a self-reference yield `OverrideView(status="inconsistent")`; add span fixtures where a missing parent creates an orphan diagnostic.
+  Add tests that a normal override chain yields its head, while independent heads and a self-reference yield `OverrideView(status="inconsistent")`; add span fixtures where a missing parent creates an orphan diagnostic and where two present spans mutually name each other as parents. The latter must produce a cycle diagnostic and no cyclic `SpanView.children` graph.
 
 - [ ] **Step 2: Run model tests to verify the missing module fails.**
 
@@ -350,7 +360,7 @@
 
   Keep all models in `read_models.py` frozen dataclasses. Implement recommendation formatting through existing `canonical_dumps`, truncate after a character count without breaking escaped template rendering, and format a Decision Card verdict as `"{summary} — High (0.80)"`.
 
-  `build_decision_card()` must group stored evidence by caller-defined `evidence_id` in repository order, retain every field, and create positional anchors `evidence-0`, `evidence-1`, not caller text. Preserve citation order and use a `Diagnostic` for each missing group. Build span roots/children by `parent_span_id`, order siblings by `(started_at, span_id)`, and retain malformed-parent spans as orphan rows with a diagnostic.
+  `build_decision_card()` must group stored evidence by caller-defined `evidence_id` in repository order, retain every field, and create positional anchors `evidence-0`, `evidence-1`, not caller text. Preserve citation order and use a `Diagnostic` for each missing group. Build span roots/children by `parent_span_id`, order siblings by `(started_at, span_id)`, and retain malformed-parent spans as orphan rows with a diagnostic. Track an active ancestry set while placing spans; if adding a present-parent relationship closes a cycle, emit its members as diagnostic/orphan rows and never place the cyclic edge into `SpanView.children`.
 
 - [ ] **Step 4: Write failing service tests for per-call connections and request parsing.**
 
@@ -380,13 +390,13 @@
           decode_cursor(_encode({"value": "not-a-float", "decision_id": DECISION_ID}), "confidence")
   ```
 
-  Add service tests mapping `from`/`to` `YYYY-MM-DD` values to UTC `[start, next-midnight)` bounds, mapping only `timestamp`/`confidence` aliases, and returning `None` for missing card/trace data.
+  Add service tests mapping `from`/`to` `YYYY-MM-DD` values to UTC `[start, next-midnight)` bounds, mapping only `timestamp`/`confidence` aliases, and returning `None` for missing card/trace data. For each seeded normal, branched, and self-referencing override history, assert the queue row's `override_status` equals `ReadService.decision_card(decision_id).override.status`; this cross-layer regression test prevents the SQL classification and card derivation from drifting.
 
 - [ ] **Step 5: Implement the service and run all web-model/service checks.**
 
   `ReadService` must create `Database.open_read_only(self._database_path)` inside each public method, wrap it in `try/finally`, construct `Repository(database)`, and close it before returning. It must never retain the database, connection, or repository on `self`.
 
-  Parse public query values into a `QueueRequest` in the service: exact strings for agent/type; dates only through `date.fromisoformat`; confidence only through `ConfidenceBand`; and sort aliases only through `{"timestamp": "decided_at", "confidence": "confidence"}`. Encode cursors as unpadded base64url JSON exactly `{"decision_id": str, "value": str|float}`; restore required padding before decoding and reject any other keys.
+  Parse public query values into a `QueueRequest` in the service: exact strings for agent/type; dates only through `date.fromisoformat`; confidence only through `ConfidenceBand`; and sort aliases only through `{"timestamp": "decided_at", "confidence": "confidence"}`. Encode cursors as unpadded base64url JSON exactly `{"decision_id": str, "value": str|float}`, sourcing `value` from `QueueRow.sort_value` passed through from `QueueDecision.sort_value`; restore required padding before decoding and reject any other keys.
 
   Run:
 
@@ -469,7 +479,7 @@
 
   Add `database_path: Path` to `ServerConfig`. At the top of `create_app`, call `Database.open_read_only(config.database_path).close()` before constructing the app. Mount `StaticFiles` at `/static`, pass only page models to `TemplateResponse`, and replace the P2.1 root endpoint with the queue route. Catch only `ReadOnlyDatabaseError` and `sqlite3.Error` around service calls; render `error.html` at `503` with fixed title/body text, never `str(exc)`.
 
-  Implement the templates with Jinja inheritance from `base.html`. The queue's GET form uses `agent`, `decision_type`, `from`, `to`, `confidence`, `override_status`, `sort`, and `cursor`. It renders an explicit “No decisions match these filters.” state. The card renders a `<table>` of each evidence group, anchor IDs from `CitationView.anchor`, unresolved diagnostics, alternatives, and a non-submit feedback-deferred notice. The trace recursively renders `SpanView.children`; render orphan diagnostics as text. `glassbox.css` contains only local, readable typography/table/layout rules and no external URL or script.
+  Implement the templates with Jinja inheritance from `base.html`. The queue's GET form uses `agent`, `decision_type`, `from`, `to`, `confidence`, `override_status`, `sort`, and `cursor`. It renders an explicit “No decisions match these filters.” state. The card renders a `<table>` of each evidence group, anchor IDs from `CitationView.anchor`, unresolved diagnostics, alternatives, and a non-submit feedback-deferred notice. The trace recursively renders only the cycle-free `SpanView.children` tree and renders orphan/cycle diagnostics as text. `glassbox.css` contains only local, readable typography/table/layout rules and no external URL or script.
 
 - [ ] **Step 4: Run route, quality, and architecture checks.**
 
@@ -546,6 +556,6 @@
 
 ## Self-review
 
-- **Spec coverage:** Task 1 implements read-only strict-schema access and target-OS WAL proof. Task 2 implements bound filters, fixed sorts, stable cursors, queue pages, and effective override classification. Task 3 implements one-source confidence, generic JSON display, evidence groups, dangling citations, span diagnostics, and per-request connections. Task 4 implements all authenticated read routes/templates, escaping, 404/503 behavior, and no blob content. Task 5 records operator guidance, P2.2 completion, and final evidence.
+- **Spec coverage:** Task 1 implements read-only strict-schema access, normalized SQLite failures, and target-OS WAL proof. Task 2 implements bound filters, fixed sorts, stable cursors based on stored canonical values, queue pages, and effective override classification. Task 3 implements one-source confidence, generic JSON display, evidence groups, dangling citations, override cross-checking, cycle-safe span diagnostics, and per-request connections. Task 4 implements all authenticated read routes/templates, escaping, 404/503 behavior, and no blob content. Task 5 records operator guidance, P2.2 completion, and final evidence.
 - **Placeholder scan:** Every task specifies its files, interfaces, red test, command, expected outcome, implementation behavior, and commit. Deferred P2.3/P2.4 functionality is deliberately excluded rather than represented as a stub.
 - **Type consistency:** `Database.open_read_only`, `ReadOnlyDatabaseError`, `QueueQuery`, `QueueCursor`, `QueueSort`, `OverrideStatus`, `ReadService`, `ConfidenceBand`, `QueuePage`, `DecisionCard`, `TraceView`, and `ServerConfig.database_path` are introduced before consuming tasks with the same names and roles.
