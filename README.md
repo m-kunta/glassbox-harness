@@ -64,6 +64,21 @@ python -m pip install -r requirements-eval.txt
 glassbox eval --suite goldens/replenishment_triage/manifest.yaml
 ```
 
+## Run the local planner server
+
+The P2.1 server is a loopback-only security foundation. Set
+`GLASSBOX_LOCAL_ACCESS_TOKEN` in the process environment to a secret of at
+least 32 characters, then start it:
+
+```shell
+export GLASSBOX_LOCAL_ACCESS_TOKEN='replace-with-a-secret-from-your-existing-secret-tool'
+glassbox serve --port 8787
+```
+
+Open `http://127.0.0.1:8787/login` and enter the same token. Glassbox does not
+load `.env` files or bind the server to a network interface. Planner views and
+feedback are introduced in later P2 work.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:

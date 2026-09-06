@@ -73,8 +73,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P2.1 — Security baseline and plan
 
-- [ ] Verify loopback port binding before implementation.
-- [ ] Refine P2 into a security- and usability-tested implementation plan.
+- [x] Verify loopback port binding before implementation (both `127.0.0.1` and `::1` bound successfully on 2026-09-06).
+- [x] Refine P2 into a security- and usability-tested implementation plan (approved design: `docs/superpowers/specs/2026-09-03-glassbox-p2-security-design.md`; implementation plan: `docs/superpowers/plans/2026-09-04-glassbox-p2-security-baseline.md`).
 
 ### P2.2 — Read experience
 
