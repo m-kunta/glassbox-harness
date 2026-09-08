@@ -206,7 +206,7 @@
 - Produces immutable `QueueCursor(sort_value: str | float, decision_id: str)`, `QueueQuery(...)`, `OverrideRecord(...)`, `QueueDecision(event, override_status, sort_value)`, and `DecisionDetail(stored_decision, overrides)` records. `QueueDecision.sort_value` is the exact selected value read from SQLite.
 - Produces `Repository.queue(query: QueueQuery) -> tuple[QueueDecision, ...]`, `Repository.decision_detail(decision_id: str) -> DecisionDetail | None`, and reuses `trace_tree(trace_id)`.
 
-- [ ] **Step 1: Write failing repository tests for filters, fixed sorts, pagination, and override heads.**
+- [x] **Step 1: Write failing repository tests for filters, fixed sorts, pagination, and override heads.**
 
   Use three decisions with controlled timestamps/confidence and write raw valid override rows through the test connection. Add assertions like:
 
@@ -241,13 +241,13 @@
 
   Add rows for: no override (`none`), two independent heads (`inconsistent`), and a self-referencing valid ULID row (`inconsistent`). Assert agent/type/date/confidence bounds are honored and all strings containing SQL punctuation are treated as values, not SQL.
 
-- [ ] **Step 2: Run the focused repository tests to verify missing interfaces fail.**
+- [x] **Step 2: Run the focused repository tests to verify missing interfaces fail.**
 
   Run: `.venv/bin/python -m pytest --import-mode=importlib tests/store/test_repository.py -q`
 
   Expected: import errors for the new query records/methods or assertion failures.
 
-- [ ] **Step 3: Implement store-owned query records and a fixed SQL builder.**
+- [x] **Step 3: Implement store-owned query records and a fixed SQL builder.**
 
   Define records near `TraceTree`:
 
@@ -287,7 +287,7 @@
 
   Compute override status in a read-only CTE/`CASE`: no rows is `none`; one override row with no child is its `action`; any other nonzero head count is `inconsistent`. Fetch all override rows for `decision_detail` ordered by `created_at, override_id`; do not select an arbitrary current row for malformed history.
 
-- [ ] **Step 4: Run focused repository tests and quality checks.**
+- [x] **Step 4: Run focused repository tests and quality checks.**
 
   Run:
 
@@ -299,7 +299,7 @@
 
   Expected: all pass; injection-shaped filter/sort values never alter schema or result shape.
 
-- [ ] **Step 5: Commit typed read queries.**
+- [x] **Step 5: Commit typed read queries.**
 
   ```shell
   git add glassbox/store/repository.py tests/store/test_repository.py

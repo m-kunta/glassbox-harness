@@ -1,18 +1,37 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
+from glassbox.store.repository import QueueCursor, QueueQuery
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 TIMESTAMP = datetime(2026, 8, 22, 14, 30, 45, 123000, tzinfo=UTC)
+QUEUE_TRACE_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB3",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB4",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB5",
+)
+QUEUE_DECISION_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FB6",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB7",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB8",
+    "01ARZ3NDEKTSV4RRFFQ69G5FB9",
+)
+OVERRIDE_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FBA",
+    "01ARZ3NDEKTSV4RRFFQ69G5FBB",
+    "01ARZ3NDEKTSV4RRFFQ69G5FBC",
+    "01ARZ3NDEKTSV4RRFFQ69G5FBD",
+)
 
 
 def _events() -> tuple[TraceEvent, SpanEvent, DecisionEvent, EvidenceEvent]:
@@ -58,6 +77,58 @@ def _events() -> tuple[TraceEvent, SpanEvent, DecisionEvent, EvidenceEvent]:
         retrieved_at=TIMESTAMP,
     )
     return trace, span, decision, evidence
+
+
+def _seed_queue_decision(
+    repository: Repository,
+    *,
+    index: int,
+    decided_at: datetime,
+    confidence: float,
+    agent_name: str = "replenishment-triage-ai",
+    decision_type: str = "flag_exception",
+) -> DecisionEvent:
+    trace, _, decision, _ = _events()
+    trace = trace.model_copy(
+        update={
+            "trace_id": QUEUE_TRACE_IDS[index],
+            "agent_name": agent_name,
+            "started_at": decided_at,
+        }
+    )
+    decision = decision.model_copy(
+        update={
+            "decision_id": QUEUE_DECISION_IDS[index],
+            "trace_id": trace.trace_id,
+            "agent_name": agent_name,
+            "decision_type": decision_type,
+            "confidence": confidence,
+            "decided_at": decided_at,
+        }
+    )
+    repository.write_event(trace)
+    repository.write_event(decision)
+    return decision
+
+
+def _insert_override(
+    database: Database,
+    *,
+    override_id: str,
+    decision_id: str,
+    action: str,
+    supersedes_override_id: str | None = None,
+) -> None:
+    database.connection.execute(
+        """
+        INSERT INTO overrides (
+            override_id, decision_id, actor, action, created_at,
+            supersedes_override_id, idempotency_key
+        ) VALUES (?, ?, 'planner', ?, '2026-08-22T14:30:45.123Z', ?, ?)
+        """,
+        (override_id, decision_id, action, supersedes_override_id, f"request-{override_id}"),
+    )
+    database.connection.commit()
 
 
 def test_write_event_round_trips_typed_json_in_trace_tree(tmp_path: Path) -> None:
@@ -204,3 +275,120 @@ def test_final_trace_event_preserves_start_metadata_when_close_omits_it(tmp_path
     assert tree.trace.total_cost_usd == 0.42
     assert tree.trace.latency_ms == 17.5
     assert tree.trace.attributes == {"batch": 4}
+
+
+def test_queue_uses_only_fixed_sort_columns(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+
+    with pytest.raises(ValueError, match="sort column"):
+        repository.queue(QueueQuery(sort_column="decided_at; DROP TABLE decisions"))  # type: ignore[arg-type]
+
+    decision_table = database.connection.execute(
+        "SELECT name FROM sqlite_master WHERE name = 'decisions'"
+    ).fetchone()
+    assert decision_table is not None
+
+
+def test_queue_cursor_retains_every_tied_canonical_timestamp(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    _seed_queue_decision(repository, index=0, decided_at=TIMESTAMP, confidence=0.5)
+    _seed_queue_decision(repository, index=1, decided_at=TIMESTAMP, confidence=0.8)
+
+    first_page = repository.queue(QueueQuery(limit=1, sort_column="decided_at"))
+    cursor = QueueCursor(first_page[0].sort_value, first_page[0].event.decision_id)
+    second_page = repository.queue(QueueQuery(limit=10, sort_column="decided_at", cursor=cursor))
+
+    seen = {row.event.decision_id for row in first_page + second_page}
+    assert seen == {QUEUE_DECISION_IDS[0], QUEUE_DECISION_IDS[1]}
+
+
+def test_queue_applies_bound_filters_and_confidence_ordering(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    _seed_queue_decision(repository, index=0, decided_at=TIMESTAMP, confidence=0.5)
+    _seed_queue_decision(
+        repository,
+        index=1,
+        decided_at=TIMESTAMP + timedelta(days=1),
+        confidence=0.8,
+        agent_name="other-agent",
+    )
+    _seed_queue_decision(
+        repository,
+        index=2,
+        decided_at=TIMESTAMP + timedelta(days=2),
+        confidence=0.9,
+        decision_type="reorder",
+    )
+
+    rows = repository.queue(
+        QueueQuery(
+            agent_name="replenishment-triage-ai",
+            decided_from=TIMESTAMP,
+            decided_before=TIMESTAMP + timedelta(days=3),
+            confidence_min=0.5,
+            confidence_max=1.0,
+            sort_column="confidence",
+        )
+    )
+
+    assert [row.event.decision_id for row in rows] == [QUEUE_DECISION_IDS[2], QUEUE_DECISION_IDS[0]]
+    assert repository.queue(QueueQuery(agent_name="'; DROP TABLE decisions; --")) == ()
+
+
+def test_queue_and_detail_identify_override_heads_and_inconsistency(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    first = _seed_queue_decision(repository, index=0, decided_at=TIMESTAMP, confidence=0.5)
+    second = _seed_queue_decision(repository, index=1, decided_at=TIMESTAMP, confidence=0.5)
+    third = _seed_queue_decision(repository, index=2, decided_at=TIMESTAMP, confidence=0.5)
+
+    _insert_override(
+        database,
+        override_id=OVERRIDE_IDS[0],
+        decision_id=first.decision_id,
+        action="accepted",
+    )
+    _insert_override(
+        database,
+        override_id=OVERRIDE_IDS[1],
+        decision_id=first.decision_id,
+        action="modified",
+        supersedes_override_id=OVERRIDE_IDS[0],
+    )
+    _insert_override(
+        database,
+        override_id=OVERRIDE_IDS[2],
+        decision_id=second.decision_id,
+        action="accepted",
+    )
+    _insert_override(
+        database,
+        override_id=OVERRIDE_IDS[3],
+        decision_id=second.decision_id,
+        action="rejected",
+    )
+    _insert_override(
+        database,
+        override_id="01ARZ3NDEKTSV4RRFFQ69G5FBE",
+        decision_id=third.decision_id,
+        action="accepted",
+        supersedes_override_id="01ARZ3NDEKTSV4RRFFQ69G5FBE",
+    )
+
+    rows = {row.event.decision_id: row for row in repository.queue(QueueQuery())}
+    assert rows[first.decision_id].override_status == "modified"
+    assert rows[second.decision_id].override_status == "inconsistent"
+    assert rows[third.decision_id].override_status == "inconsistent"
+    assert [
+        row.event.decision_id for row in repository.queue(QueueQuery(override_status="modified"))
+    ] == [first.decision_id]
+
+    detail = repository.decision_detail(first.decision_id)
+    assert detail is not None
+    assert [override.override_id for override in detail.overrides] == [
+        OVERRIDE_IDS[0],
+        OVERRIDE_IDS[1],
+    ]

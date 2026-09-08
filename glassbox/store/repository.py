@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from threading import RLock
-from typing import Any, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.events.models import canonical_dumps
@@ -14,6 +16,15 @@ from glassbox.events.models import canonical_dumps
 from .database import Database
 
 Event: TypeAlias = TraceEvent | SpanEvent | DecisionEvent | EvidenceEvent
+QueueSort: TypeAlias = Literal["decided_at", "confidence"]
+OverrideStatus: TypeAlias = Literal["none", "accepted", "modified", "rejected", "inconsistent"]
+
+_SORT_COLUMNS: dict[QueueSort, str] = {
+    "decided_at": "d.decided_at",
+    "confidence": "d.confidence",
+}
+_OVERRIDE_STATUSES = frozenset(("none", "accepted", "modified", "rejected", "inconsistent"))
+_UTC_OFFSET = timedelta(0)
 
 # Fields the closing TraceEvent may omit; a close must not clobber them with
 # NULL when it does. Keep this in lockstep with any new optional TraceEvent
@@ -42,6 +53,62 @@ class TraceTree:
     trace: TraceEvent
     spans: tuple[SpanEvent, ...]
     decisions: tuple[StoredDecision, ...]
+
+
+@dataclass(frozen=True)
+class QueueCursor:
+    """A stable boundary for one descending queue sort order."""
+
+    sort_value: str | float
+    decision_id: str
+
+
+@dataclass(frozen=True)
+class QueueQuery:
+    """Bound filters and a fixed sort choice for the decision queue."""
+
+    agent_name: str | None = None
+    decision_type: str | None = None
+    decided_from: datetime | None = None
+    decided_before: datetime | None = None
+    confidence_min: float | None = None
+    confidence_max: float | None = None
+    override_status: OverrideStatus | None = None
+    sort_column: QueueSort = "decided_at"
+    cursor: QueueCursor | None = None
+    limit: int = 25
+
+
+@dataclass(frozen=True)
+class OverrideRecord:
+    """A persisted override row for read-only display."""
+
+    override_id: str
+    decision_id: str
+    actor: str
+    action: Literal["accepted", "modified", "rejected"]
+    modified_value: Any | None
+    reason_code: str | None
+    free_text: str | None
+    created_at: datetime
+    supersedes_override_id: str | None
+
+
+@dataclass(frozen=True)
+class QueueDecision:
+    """A decision plus its effective override status and raw queue key."""
+
+    event: DecisionEvent
+    override_status: OverrideStatus
+    sort_value: str | float
+
+
+@dataclass(frozen=True)
+class DecisionDetail:
+    """A complete decision with its persisted override history."""
+
+    stored_decision: StoredDecision
+    overrides: tuple[OverrideRecord, ...]
 
 
 class Repository:
@@ -96,6 +163,100 @@ class Repository:
                 )
             )
             return TraceTree(self._trace_from_row(trace_row), spans, decisions)
+
+    def queue(self, query: QueueQuery) -> tuple[QueueDecision, ...]:
+        """Return decisions matching *query* with a stable, fixed-column order."""
+        self._validate_queue_query(query)
+        sort_column = _SORT_COLUMNS[query.sort_column]
+        conditions: list[str] = []
+        params: dict[str, Any] = {"limit": query.limit}
+
+        if query.agent_name is not None:
+            conditions.append("d.agent_name = :agent_name")
+            params["agent_name"] = query.agent_name
+        if query.decision_type is not None:
+            conditions.append("d.decision_type = :decision_type")
+            params["decision_type"] = query.decision_type
+        if query.decided_from is not None:
+            conditions.append("d.decided_at >= :decided_from")
+            params["decided_from"] = self._timestamp_text(query.decided_from)
+        if query.decided_before is not None:
+            conditions.append("d.decided_at < :decided_before")
+            params["decided_before"] = self._timestamp_text(query.decided_before)
+        if query.confidence_min is not None:
+            conditions.append("d.confidence >= :confidence_min")
+            params["confidence_min"] = query.confidence_min
+        if query.confidence_max is not None:
+            conditions.append("d.confidence < :confidence_max")
+            params["confidence_max"] = query.confidence_max
+        if query.override_status is not None:
+            conditions.append("state.override_status = :override_status")
+            params["override_status"] = query.override_status
+        if query.cursor is not None:
+            conditions.append(
+                f"({sort_column} < :cursor_value OR "
+                f"({sort_column} = :cursor_value AND d.decision_id < :cursor_decision_id))"
+            )
+            params["cursor_value"] = query.cursor.sort_value
+            params["cursor_decision_id"] = query.cursor.decision_id
+
+        where_clause = " AND ".join(conditions) if conditions else "1 = 1"
+        with self._operation_lock:
+            rows = self._connection.execute(
+                f"""
+                WITH override_state AS (
+                    SELECT
+                        d.decision_id,
+                        CASE
+                            WHEN COUNT(o.override_id) = 0 THEN 'none'
+                            WHEN SUM(
+                                CASE WHEN o.override_id IS NOT NULL AND NOT EXISTS (
+                                    SELECT 1 FROM overrides AS child
+                                    WHERE child.supersedes_override_id = o.override_id
+                                ) THEN 1 ELSE 0 END
+                            ) = 1 THEN MAX(
+                                CASE WHEN o.override_id IS NOT NULL AND NOT EXISTS (
+                                    SELECT 1 FROM overrides AS child
+                                    WHERE child.supersedes_override_id = o.override_id
+                                ) THEN o.action END
+                            )
+                            ELSE 'inconsistent'
+                        END AS override_status
+                    FROM decisions AS d
+                    LEFT JOIN overrides AS o ON o.decision_id = d.decision_id
+                    GROUP BY d.decision_id
+                )
+                SELECT d.*, state.override_status, {sort_column} AS sort_value
+                FROM decisions AS d
+                JOIN override_state AS state ON state.decision_id = d.decision_id
+                WHERE {where_clause}
+                ORDER BY {sort_column} DESC, d.decision_id DESC
+                LIMIT :limit
+                """,
+                params,
+            ).fetchall()
+            return tuple(self._queue_decision_from_row(row) for row in rows)
+
+    def decision_detail(self, decision_id: str) -> DecisionDetail | None:
+        """Return one persisted decision and all of its override records."""
+        with self._operation_lock:
+            row = self._connection.execute(
+                "SELECT * FROM decisions WHERE decision_id = ?", (decision_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            stored_decision = self._stored_decision_from_row(row)
+            overrides = tuple(
+                self._override_from_row(override_row)
+                for override_row in self._connection.execute(
+                    """
+                    SELECT * FROM overrides WHERE decision_id = ?
+                    ORDER BY created_at, override_id
+                    """,
+                    (decision_id,),
+                )
+            )
+            return DecisionDetail(stored_decision, overrides)
 
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
@@ -191,6 +352,82 @@ class Repository:
             )
         )
         return StoredDecision(self._decision_from_row(row), evidence)
+
+    @staticmethod
+    def _queue_decision_from_row(row: sqlite3.Row) -> QueueDecision:
+        status = row["override_status"]
+        sort_value = row["sort_value"]
+        if status not in _OVERRIDE_STATUSES:
+            raise RuntimeError("database returned an invalid override status")
+        if not isinstance(sort_value, (str, float)):
+            raise RuntimeError("database returned an invalid queue sort value")
+        return QueueDecision(
+            Repository._decision_from_row(row),
+            cast(OverrideStatus, status),
+            sort_value,
+        )
+
+    @staticmethod
+    def _override_from_row(row: sqlite3.Row) -> OverrideRecord:
+        values = dict(row)
+        modified_value = values["modified_value"]
+        return OverrideRecord(
+            override_id=values["override_id"],
+            decision_id=values["decision_id"],
+            actor=values["actor"],
+            action=cast(Literal["accepted", "modified", "rejected"], values["action"]),
+            modified_value=None if modified_value is None else json.loads(modified_value),
+            reason_code=values["reason_code"],
+            free_text=values["free_text"],
+            created_at=datetime.fromisoformat(values["created_at"].replace("Z", "+00:00")),
+            supersedes_override_id=values["supersedes_override_id"],
+        )
+
+    @staticmethod
+    def _validate_queue_query(query: QueueQuery) -> None:
+        if not 1 <= query.limit <= 100:
+            raise ValueError("queue limit must be between 1 and 100")
+        if query.sort_column not in _SORT_COLUMNS:
+            raise ValueError("queue sort column is not supported")
+        if query.override_status is not None and query.override_status not in _OVERRIDE_STATUSES:
+            raise ValueError("queue override status is not supported")
+        for bound in (query.confidence_min, query.confidence_max):
+            if bound is not None and (
+                isinstance(bound, bool)
+                or not isinstance(bound, (int, float))
+                or not math.isfinite(bound)
+                or not 0 <= bound <= 1
+            ):
+                raise ValueError("queue confidence bounds must be finite values between 0 and 1")
+        if (
+            query.confidence_min is not None
+            and query.confidence_max is not None
+            and query.confidence_min > query.confidence_max
+        ):
+            raise ValueError("queue confidence bounds must be ordered")
+        if query.cursor is not None:
+            if not isinstance(query.cursor.decision_id, str):
+                raise ValueError("queue cursor decision ID must be a string")
+            if query.sort_column == "decided_at" and not isinstance(query.cursor.sort_value, str):
+                raise ValueError("timestamp queue cursor value must be a string")
+            if query.sort_column == "confidence" and (
+                isinstance(query.cursor.sort_value, bool)
+                or not isinstance(query.cursor.sort_value, float)
+            ):
+                raise ValueError("confidence queue cursor value must be a float")
+
+    @staticmethod
+    def _timestamp_text(value: datetime) -> str:
+        if value.tzinfo is None or value.utcoffset() != _UTC_OFFSET:
+            raise ValueError("queue timestamp bounds must be timezone-aware UTC")
+        value = value.astimezone(UTC)
+        if value.microsecond == 0:
+            value_text = value.isoformat(timespec="seconds")
+        elif value.microsecond % 1_000 == 0:
+            value_text = value.isoformat(timespec="milliseconds")
+        else:
+            value_text = value.isoformat(timespec="microseconds")
+        return value_text.replace("+00:00", "Z")
 
     @staticmethod
     def _trace_from_row(row: sqlite3.Row) -> TraceEvent:
