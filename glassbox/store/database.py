@@ -30,6 +30,10 @@ class TimestampMigrationError(RuntimeError):
     """A pre-strict database cannot be upgraded without changing stored data."""
 
 
+class ReadOnlyDatabaseError(RuntimeError):
+    """A database cannot safely serve Glassbox's strict read-only contract."""
+
+
 class Database:
     """An initialized SQLite database with required connection pragmas."""
 
@@ -54,6 +58,45 @@ class Database:
         _initialize_schema(connection)
         connection.commit()
         return cls(connection)
+
+    @classmethod
+    def open_read_only(cls, path: Path | str, *, busy_timeout_ms: int = 5_000) -> Database:
+        """Open an existing, current-schema database without modifying it."""
+        if busy_timeout_ms < 0:
+            raise ValueError("busy_timeout_ms must be non-negative")
+
+        database_path = Path(path)
+        if not database_path.is_file():
+            raise ReadOnlyDatabaseError(f"Glassbox database does not exist: {database_path}")
+
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                f"{database_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            schema_objects = _glassbox_schema_sql(connection)
+        except sqlite3.Error as error:
+            if connection is not None:
+                connection.close()
+            raise ReadOnlyDatabaseError(
+                "Glassbox database cannot be opened read-only or has an unsupported schema."
+            ) from error
+
+        assert connection is not None
+        if schema_objects == _strict_schema_objects():
+            return cls(connection)
+
+        connection.close()
+        if _is_pre_strict_schema(schema_objects):
+            raise ReadOnlyDatabaseError(
+                "Glassbox database uses the pre-strict schema; run a writer-capable "
+                "Glassbox session first to migrate it."
+            )
+        raise ReadOnlyDatabaseError("Glassbox database has an unsupported schema.")
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

@@ -60,7 +60,7 @@
 - Produces `Database.open_read_only(path: Path | str, *, busy_timeout_ms: int = 5_000) -> Database`.
 - `Database.open()` remains the only factory that can create/migrate/write a database.
 
-- [ ] **Step 1: Write failing read-only factory tests.**
+- [x] **Step 1: Write failing read-only factory tests.**
 
   Create `tests/store/test_database.py`. Define compact local helpers that create a current strict database with `Database.open()` and a released pre-strict database by executing `000_pre_strict_initial.sql`; do not depend on fixtures from another test module.
 
@@ -98,13 +98,13 @@
 
   Add a test that creates a SQLite database containing a conflicting `traces` table and asserts `ReadOnlyDatabaseError` mentions `unsupported schema`. Add another that writes arbitrary non-SQLite bytes to an existing file and asserts the same public exception without exposing the SQLite error text. Test `busy_timeout_ms=-1` raises the same `ValueError` contract as `Database.open()`.
 
-- [ ] **Step 2: Run the new factory tests to verify they fail.**
+- [x] **Step 2: Run the new factory tests to verify they fail.**
 
   Run: `.venv/bin/python -m pytest --import-mode=importlib tests/store/test_database.py -q`
 
   Expected: failure because `Database.open_read_only` and `ReadOnlyDatabaseError` do not exist.
 
-- [ ] **Step 3: Implement the factory without sharing write initialization.**
+- [x] **Step 3: Implement the factory without sharing write initialization.**
 
   In `glassbox/store/database.py`, add:
 
@@ -150,7 +150,7 @@
 
   Initialize `connection: sqlite3.Connection | None = None` before the open. Wrap both `sqlite3.connect(...)` and `_glassbox_schema_sql(connection)` in `except sqlite3.Error`; close a successfully opened connection and re-raise `ReadOnlyDatabaseError("Glassbox database cannot be opened read-only or has an unsupported schema.")` without including `str(error)`. Export `ReadOnlyDatabaseError` from `glassbox/store/__init__.py`, and never call `_initialize_schema()` from this method.
 
-- [ ] **Step 4: Add a separate-process WAL regression test.**
+- [x] **Step 4: Add a separate-process WAL regression test.**
 
   Add a `multiprocessing` test whose writer child opens `Database.open(path)`, writes a strict `TraceEvent`, and remains alive on an `Event`. The parent opens `Database.open_read_only(path)` while the writer connection remains open and asserts the first trace is readable. Signal the child to write a second trace, then poll fresh `Database.open_read_only(path)` connections until the second trace is visible before permitting the child to close.
 
@@ -176,7 +176,7 @@
 
   The child must call `Database.open`, use `Repository.write_event` for valid `TraceEvent` fixtures, and not close its connection until the parent has proved the first uncheckpointed read. This is the target-OS preflight specified by P2.2.
 
-- [ ] **Step 5: Run the full database test module and static checks.**
+- [x] **Step 5: Run the full database test module and static checks.**
 
   Run:
 
@@ -188,7 +188,7 @@
 
   Expected: all pass, including the separate-process live-WAL case.
 
-- [ ] **Step 6: Commit the isolated read-only contract.**
+- [x] **Step 6: Commit the isolated read-only contract.**
 
   ```shell
   git add glassbox/store/database.py glassbox/store/__init__.py tests/store/test_database.py
