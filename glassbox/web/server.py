@@ -130,6 +130,14 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             status_code=503,
         )
 
+    def invalid_request(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"title": "Invalid request", "message": "One or more queue filters are invalid."},
+            status_code=400,
+        )
+
     @app.get("/")
     def root(request: Request) -> Response:
         try:
@@ -145,6 +153,8 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
                     cursor=request.query_params.get("cursor"),
                 )
             )
+        except ValueError:
+            return invalid_request(request)
         except (ReadOnlyDatabaseError, sqlite3.Error):
             return unavailable(request)
         return templates.TemplateResponse(request, "queue.html", {"page": page})

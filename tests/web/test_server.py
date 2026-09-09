@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from glassbox.store import Database
+from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
+from glassbox.store import Database, Repository
 from glassbox.web.server import create_app, load_server_config, run_server
 
 TOKEN = "t" * 32
@@ -20,16 +21,78 @@ class Clock:
         return self.value
 
 
-def app_for(clock: Clock, tmp_path: Path):
-    database_path = tmp_path / "glassbox.sqlite3"
-    database = Database.open(database_path)
-    database.close()
+def app_for(clock: Clock, tmp_path: Path, database_path: Path | None = None):
+    database_path = database_path or tmp_path / "glassbox.sqlite3"
+    if not database_path.exists():
+        database = Database.open(database_path)
+        database.close()
     config = load_server_config(
         environ={"GLASSBOX_LOCAL_ACCESS_TOKEN": TOKEN, "GLASSBOX_DATABASE": str(database_path)},
         host="127.0.0.1",
         port=8787,
     )
     return create_app(config, clock=clock)
+
+
+def seeded_database(tmp_path: Path) -> tuple[Path, str, str]:
+    database_path = tmp_path / "seeded.sqlite3"
+    database = Database.open(database_path)
+    trace_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    span_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    decision_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+    timestamp = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    try:
+        repository = Repository(database)
+        repository.write_event(
+            TraceEvent(
+                trace_id=trace_id,
+                agent_name="planner",
+                agent_version="v1",
+                started_at=timestamp,
+                environment="dev",
+            )
+        )
+        repository.write_event(
+            SpanEvent(
+                span_id=span_id,
+                trace_id=trace_id,
+                name="recommendation model",
+                span_kind="llm",
+                started_at=timestamp,
+            )
+        )
+        repository.write_event(
+            DecisionEvent(
+                decision_id=decision_id,
+                trace_id=trace_id,
+                agent_name="planner",
+                agent_version="v1",
+                entity_type="sku",
+                entity_id="sku-1",
+                decision_type="replenish",
+                recommendation={"action": "order"},
+                rationale="Inventory is low.",
+                rationale_citations=("inventory",),
+                confidence=0.8,
+                alternatives_considered=("hold",),
+                decided_at=timestamp,
+            )
+        )
+        repository.write_event(
+            EvidenceEvent(
+                evidence_id="inventory",
+                decision_id=decision_id,
+                source_system="erp",
+                source_ref="inventory/sku-1",
+                field_name="available_units",
+                field_value=2,
+                weight=1.0,
+                retrieved_at=timestamp,
+            )
+        )
+    finally:
+        database.close()
+    return database_path, decision_id, trace_id
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
@@ -146,3 +209,41 @@ def test_idle_session_is_rejected_after_its_timeout(tmp_path: Path) -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+
+
+def test_authenticated_decision_and_trace_routes_render_persisted_telemetry(tmp_path: Path) -> None:
+    database_path, decision_id, trace_id = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+
+    decision = client.get(f"/decision/{decision_id}")
+    trace = client.get(f"/trace/{trace_id}")
+
+    assert decision.status_code == 200
+    assert "Inventory is low." in decision.text
+    assert trace.status_code == 200
+    assert "recommendation model" in trace.text
+
+
+def test_missing_decision_and_trace_render_generic_not_found(tmp_path: Path) -> None:
+    client = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1")
+    client.post("/login", data={"access_token": TOKEN})
+
+    assert client.get("/decision/not-a-real-decision").status_code == 404
+    assert client.get("/trace/not-a-real-trace").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["?sort=bogus", "?from=not-a-date", "?confidence=bogus", "?cursor=not-valid-base64!!"],
+)
+def test_queue_rejects_malformed_filters_without_a_server_error(tmp_path: Path, query: str) -> None:
+    client = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1")
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get(f"/{query}", follow_redirects=False)
+
+    assert response.status_code == 400
+    assert "Traceback" not in response.text

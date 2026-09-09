@@ -89,3 +89,44 @@ def test_read_service_parses_dates_bands_and_fixed_sort_aliases(tmp_path: Path) 
 def test_decode_cursor_rejects_unknown_keys_and_wrong_sort_value_type() -> None:
     with pytest.raises(ValueError, match="cursor"):
         decode_cursor("eyJ2YWx1ZSI6Im5vdC1hLWZsb2F0IiwiZGVjaXNpb25faWQiOiJ4In0", "confidence")
+
+
+@pytest.mark.parametrize(
+    ("supersedes_self", "expected_status"),
+    [(False, "accepted"), (True, "inconsistent")],
+)
+def test_queue_and_card_agree_on_override_status(
+    tmp_path: Path, supersedes_self: bool, expected_status: str
+) -> None:
+    path = _strict_database_with_decision(tmp_path)
+    override_id = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+    database = Database.open(path)
+    try:
+        with database.connection:
+            database.connection.execute(
+                """
+                INSERT INTO overrides (
+                    override_id, decision_id, actor, action, modified_value, reason_code,
+                    free_text, created_at, supersedes_override_id, idempotency_key
+                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+                """,
+                (
+                    override_id,
+                    DECISION_ID,
+                    "planner",
+                    "accepted",
+                    "2026-09-08T12:00:00Z",
+                    override_id if supersedes_self else None,
+                    f"request-{override_id}",
+                ),
+            )
+    finally:
+        database.close()
+
+    service = ReadService(path)
+    queue_status = service.queue(QueueRequest()).rows[0].override_status
+    card = service.decision_card(DECISION_ID)
+
+    assert queue_status == expected_status
+    assert card is not None
+    assert card.override.status == queue_status
