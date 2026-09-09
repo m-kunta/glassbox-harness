@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -17,13 +19,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 
-from glassbox.store import Database, ReadOnlyDatabaseError
+from glassbox.store import Database, ReadOnlyDatabaseError, Repository
+from glassbox.store.repository import FeedbackSubmission
 
 from .auth import SESSION_COOKIE_NAME, SessionStore, token_matches
 from .read_service import QueueRequest, ReadService
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _MIN_TOKEN_LENGTH = 32
+_MAX_VERDICT_LENGTH = 16
+_MAX_REASON_CODE_LENGTH = 64
+_MAX_FREE_TEXT_LENGTH = 4 * 1024
+_MAX_CORRECTED_RECOMMENDATION_LENGTH = 16 * 1024
 
 
 def utc_now() -> datetime:
@@ -138,6 +145,14 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             status_code=400,
         )
 
+    def feedback_error(request: Request, status_code: int = 400) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"title": "Feedback not saved", "message": "The feedback request could not be saved."},
+            status_code=status_code,
+        )
+
     @app.get("/")
     def root(request: Request) -> Response:
         try:
@@ -172,7 +187,68 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
                 {"title": "Not found", "message": "The requested decision was not found."},
                 status_code=404,
             )
-        return templates.TemplateResponse(request, "decision_card.html", {"card": card})
+        return templates.TemplateResponse(
+            request,
+            "decision_card.html",
+            {
+                "card": card,
+                "csrf_token": request.state.csrf_token,
+                "idempotency_key": secrets.token_urlsafe(32),
+            },
+        )
+
+    @app.post("/decision/{decision_id}/feedback")
+    def feedback(
+        request: Request,
+        decision_id: str,
+        csrf_token: Annotated[str, Form()],
+        idempotency_key: Annotated[str, Form()],
+        verdict: Annotated[str, Form()],
+        reason_code: Annotated[str | None, Form()] = None,
+        free_text: Annotated[str | None, Form()] = None,
+        corrected_recommendation: Annotated[str | None, Form()] = None,
+    ) -> Response:
+        if not _valid_feedback_origin(request, config):
+            return feedback_error(request)
+        if not token_matches(csrf_token, request.state.csrf_token):
+            return feedback_error(request)
+        try:
+            submission = _feedback_submission(
+                decision_id,
+                verdict,
+                reason_code,
+                free_text,
+                corrected_recommendation,
+                idempotency_key,
+                clock(),
+            )
+        except ValueError:
+            return feedback_error(request)
+        database: Database | None = None
+        try:
+            database = Database.open(config.database_path)
+            repository = Repository(database)
+            if repository.decision_detail(decision_id) is None:
+                return templates.TemplateResponse(
+                    request,
+                    "error.html",
+                    {"title": "Not found", "message": "The requested decision was not found."},
+                    status_code=404,
+                )
+            repository.record_feedback(submission)
+        except sqlite3.OperationalError:
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {"title": "Feedback not saved", "message": "Please retry the feedback request."},
+                status_code=503,
+            )
+        except (ValueError, sqlite3.IntegrityError):
+            return feedback_error(request)
+        finally:
+            if database is not None:
+                database.close()
+        return RedirectResponse(f"/decision/{decision_id}", status_code=303)
 
     @app.get("/trace/{trace_id}")
     def trace(request: Request, trace_id: str) -> Response:
@@ -201,3 +277,58 @@ def run_server(
     """Start the validated, local Uvicorn server."""
     config = load_server_config(host=host, port=port, environ=environ)
     uvicorn.run(create_app(config), host=config.host, port=config.port)
+
+
+def _valid_feedback_origin(request: Request, config: ServerConfig) -> bool:
+    host = _configured_host(config)
+    if request.headers.get("host") != host:
+        return False
+    origin = request.headers.get("origin")
+    return origin is None or origin == f"http://{host}"
+
+
+def _configured_host(config: ServerConfig) -> str:
+    host = f"[{config.host}]" if config.host == "::1" else config.host
+    return f"{host}:{config.port}"
+
+
+def _feedback_submission(
+    decision_id: str,
+    verdict: str,
+    reason_code: str | None,
+    free_text: str | None,
+    corrected_recommendation: str | None,
+    idempotency_key: str,
+    created_at: datetime,
+) -> FeedbackSubmission:
+    if (
+        len(verdict) > _MAX_VERDICT_LENGTH
+        or verdict not in {"agree", "disagree", "uncertain"}
+        or not idempotency_key
+        or (reason_code is not None and len(reason_code) > _MAX_REASON_CODE_LENGTH)
+        or (free_text is not None and len(free_text) > _MAX_FREE_TEXT_LENGTH)
+        or (
+            corrected_recommendation is not None
+            and len(corrected_recommendation) > _MAX_CORRECTED_RECOMMENDATION_LENGTH
+        )
+    ):
+        raise ValueError("invalid feedback form")
+    parsed_recommendation: object | None = None
+    if corrected_recommendation:
+        try:
+            parsed_recommendation = json.loads(corrected_recommendation)
+        except json.JSONDecodeError as error:
+            raise ValueError("invalid corrected recommendation") from error
+    value = (int(created_at.timestamp() * 1_000) << 80) | secrets.randbits(80)
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    feedback_id = "".join(alphabet[(value >> (5 * index)) & 31] for index in range(25, -1, -1))
+    return FeedbackSubmission(
+        feedback_id,
+        decision_id,
+        verdict,  # type: ignore[arg-type]
+        reason_code or None,
+        free_text or None,
+        parsed_recommendation,
+        created_at,
+        idempotency_key,
+    )

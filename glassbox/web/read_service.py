@@ -95,11 +95,12 @@ class ReadService:
         database = Database.open_read_only(self._database_path)
         try:
             detail = Repository(database).decision_detail(decision_id)
+            feedback = Repository(database).feedback_for_decision(decision_id)
         finally:
             database.close()
         if detail is None:
             return None
-        return build_decision_card(detail.stored_decision, detail.overrides)
+        return build_decision_card(detail.stored_decision, detail.overrides, feedback)
 
     def trace(self, trace_id: str) -> TraceView | None:
         """Return one display-ready trace view, if it exists."""

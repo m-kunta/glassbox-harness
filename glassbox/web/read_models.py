@@ -8,7 +8,13 @@ from enum import Enum
 
 from glassbox.events import EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.events.models import canonical_dumps
-from glassbox.store.repository import OverrideRecord, OverrideStatus, StoredDecision, TraceTree
+from glassbox.store.repository import (
+    FeedbackRecord,
+    OverrideRecord,
+    OverrideStatus,
+    StoredDecision,
+    TraceTree,
+)
 
 
 class ConfidenceBand(str, Enum):
@@ -44,6 +50,16 @@ class OverrideView:
 
 
 @dataclass(frozen=True)
+class FeedbackView:
+    feedback_id: str
+    verdict: str
+    reason_code: str | None
+    free_text: str | None
+    corrected_recommendation: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
 class DecisionCard:
     decision: StoredDecision
     recommendation_summary: str
@@ -52,6 +68,7 @@ class DecisionCard:
     evidence_groups: tuple[EvidenceGroupView, ...]
     citations: tuple[CitationView, ...]
     override: OverrideView
+    feedback: tuple[FeedbackView, ...]
     diagnostics: tuple[Diagnostic, ...]
 
 
@@ -118,7 +135,9 @@ def recommendation_summary(recommendation: object, *, limit: int = 160) -> str:
 
 
 def build_decision_card(
-    decision: StoredDecision, overrides: tuple[OverrideRecord, ...]
+    decision: StoredDecision,
+    overrides: tuple[OverrideRecord, ...],
+    feedback: tuple[FeedbackRecord, ...] = (),
 ) -> DecisionCard:
     """Convert a stored decision and override history into a stable card."""
     groups_by_id: dict[str, list[EvidenceEvent]] = {}
@@ -150,6 +169,19 @@ def build_decision_card(
         groups,
         citations,
         _override_view(overrides),
+        tuple(
+            FeedbackView(
+                item.feedback_id,
+                item.verdict,
+                item.reason_code,
+                item.free_text,
+                None
+                if item.corrected_recommendation is None
+                else canonical_dumps(item.corrected_recommendation),
+                item.created_at.isoformat().replace("+00:00", "Z"),
+            )
+            for item in feedback
+        ),
         diagnostics,
     )
 

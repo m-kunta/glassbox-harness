@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -233,6 +234,48 @@ def test_missing_decision_and_trace_render_generic_not_found(tmp_path: Path) -> 
 
     assert client.get("/decision/not-a-real-decision").status_code == 404
     assert client.get("/trace/not-a-real-trace").status_code == 404
+
+
+def test_feedback_form_enforces_request_guards_and_uses_prg(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    idempotency_key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf_token is not None
+    assert idempotency_key is not None
+    payload = {
+        "csrf_token": csrf_token.group(1),
+        "idempotency_key": idempotency_key.group(1),
+        "verdict": "agree",
+        "free_text": "<script>not executable</script>",
+        "corrected_recommendation": '{"action":"order"}',
+    }
+    url = f"/decision/{decision_id}/feedback"
+
+    assert client.post(url, data=payload, headers={"host": "wrong"}).status_code == 400
+    assert client.post(
+        url,
+        data=payload | {"csrf_token": "wrong"},
+        headers={"host": "127.0.0.1:8787"},
+    ).status_code == 400
+    assert client.post(
+        url,
+        data=payload,
+        headers={"host": "127.0.0.1:8787", "origin": "http://evil.example"},
+    ).status_code == 400
+
+    response = client.post(url, data=payload, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/decision/{decision_id}"
+    card = client.get(response.headers["location"])
+    assert "agree" in card.text
+    assert "&lt;script&gt;not executable&lt;/script&gt;" in card.text
+    assert "<script>not executable</script>" not in card.text
 
 
 @pytest.mark.parametrize(
