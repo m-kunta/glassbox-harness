@@ -319,7 +319,7 @@
 - Produces `QueuePage`, `QueueRow(sort_value: str | float, ...)`, `DecisionCard`, `EvidenceGroupView`, `CitationView`, `OverrideView`, `TraceView`, `SpanView`, and `Diagnostic` frozen models.
 - Produces `decode_cursor(value: str | None, sort_column: QueueSort) -> QueueCursor | None`, `encode_cursor(row: QueueRow, sort_column: QueueSort) -> str`, and `ReadService(database_path: Path)` methods `queue(...)`, `decision_card(decision_id)`, `trace(trace_id)`.
 
-- [ ] **Step 1: Write failing pure-model tests.**
+- [x] **Step 1: Write failing pure-model tests.**
 
   Create `tests/web/test_read_models.py` with boundary and grouping coverage:
 
@@ -350,19 +350,19 @@
 
   Add tests that a normal override chain yields its head, while independent heads and a self-reference yield `OverrideView(status="inconsistent")`; add span fixtures where a missing parent creates an orphan diagnostic and where two present spans mutually name each other as parents. The latter must produce a cycle diagnostic and no cyclic `SpanView.children` graph.
 
-- [ ] **Step 2: Run model tests to verify the missing module fails.**
+- [x] **Step 2: Run model tests to verify the missing module fails.**
 
   Run: `.venv/bin/python -m pytest --import-mode=importlib tests/web/test_read_models.py -q`
 
   Expected: `ModuleNotFoundError: No module named 'glassbox.web.read_models'`.
 
-- [ ] **Step 3: Implement immutable web models and conversion helpers.**
+- [x] **Step 3: Implement immutable web models and conversion helpers.**
 
   Keep all models in `read_models.py` frozen dataclasses. Implement recommendation formatting through existing `canonical_dumps`, truncate after a character count without breaking escaped template rendering, and format a Decision Card verdict as `"{summary} — High (0.80)"`.
 
   `build_decision_card()` must group stored evidence by caller-defined `evidence_id` in repository order, retain every field, and create positional anchors `evidence-0`, `evidence-1`, not caller text. Preserve citation order and use a `Diagnostic` for each missing group. Build span roots/children by `parent_span_id`, order siblings by `(started_at, span_id)`, and retain malformed-parent spans as orphan rows with a diagnostic. Track an active ancestry set while placing spans; if adding a present-parent relationship closes a cycle, emit its members as diagnostic/orphan rows and never place the cyclic edge into `SpanView.children`.
 
-- [ ] **Step 4: Write failing service tests for per-call connections and request parsing.**
+- [x] **Step 4: Write failing service tests for per-call connections and request parsing.**
 
   Create `tests/web/test_read_service.py`:
 
@@ -392,7 +392,7 @@
 
   Add service tests mapping `from`/`to` `YYYY-MM-DD` values to UTC `[start, next-midnight)` bounds, mapping only `timestamp`/`confidence` aliases, and returning `None` for missing card/trace data. For each seeded normal, branched, and self-referencing override history, assert the queue row's `override_status` equals `ReadService.decision_card(decision_id).override.status`; this cross-layer regression test prevents the SQL classification and card derivation from drifting.
 
-- [ ] **Step 5: Implement the service and run all web-model/service checks.**
+- [x] **Step 5: Implement the service and run all web-model/service checks.**
 
   `ReadService` must create `Database.open_read_only(self._database_path)` inside each public method, wrap it in `try/finally`, construct `Repository(database)`, and close it before returning. It must never retain the database, connection, or repository on `self`.
 
@@ -406,7 +406,7 @@
   .venv/bin/mypy glassbox/web
   ```
 
-- [ ] **Step 6: Commit presentation conversion.**
+- [x] **Step 6: Commit presentation conversion.**
 
   ```shell
   git add glassbox/web/read_models.py glassbox/web/read_service.py tests/web/test_read_models.py tests/web/test_read_service.py
