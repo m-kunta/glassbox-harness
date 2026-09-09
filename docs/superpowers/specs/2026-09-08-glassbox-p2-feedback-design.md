@@ -23,6 +23,13 @@ payload matches; a key reused with different payload is rejected as a generic
 client error. The write uses one SQLite transaction so no partial feedback row
 can appear.
 
+Idempotency covers an exact replay of the same rendered form and its opaque
+key—for example, a browser retry after a busy-timeout failure or duplicate POST
+delivery. A reload after a committed but unseen response renders a new form and
+new key, so a resubmission is a distinct visible append-only feedback row. P2.3
+does not add a durable browser/server pending-submission protocol for that
+response-loss recovery case.
+
 Each POST opens a short-lived writer through `Database.open()` using the same
 configured database path and its bounded busy timeout, then closes it after the
 single feedback transaction. The collector and web server are concurrent SQLite
