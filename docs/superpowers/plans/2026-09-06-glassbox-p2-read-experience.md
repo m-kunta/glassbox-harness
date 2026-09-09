@@ -511,7 +511,7 @@
 - Documents the required existing Glassbox database and the authenticated queue/card/trace URLs.
 - Does not claim feedback submission, static export, prompt/completion display, or remote serving.
 
-- [ ] **Step 1: Update the README with P2.2's actual capabilities.**
+- [x] **Step 1: Update the README with P2.2's actual capabilities.**
 
   Add a short paragraph to `## Run the local planner server`:
 
@@ -523,7 +523,7 @@
   data. This phase is read-only: feedback and static export are not available.
   ```
 
-- [ ] **Step 2: Mark only P2.2 complete in `TODO.md`.**
+- [x] **Step 2: Mark only P2.2 complete in `TODO.md`.**
 
   Replace its checkbox with:
 
@@ -533,7 +533,7 @@
 
   Do not alter P2.3 or P2.4 status.
 
-- [ ] **Step 3: Run the full verification suite.**
+- [x] **Step 3: Run the full verification suite.**
 
   Run:
 
@@ -547,7 +547,7 @@
 
   Expected: all quality commands pass; `lint-imports` reports six kept contracts; the final command exits `2` before binding and mentions loopback-only hosting. Then seed a temporary strict database, start the server on loopback, authenticate, and verify `/`, one card, and one trace return `200` before stopping the server.
 
-- [ ] **Step 4: Commit documentation and completion evidence.**
+- [x] **Step 4: Commit documentation and completion evidence.**
 
   ```shell
   git add README.md TODO.md

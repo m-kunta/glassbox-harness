@@ -76,8 +76,12 @@ glassbox serve --port 8787
 ```
 
 Open `http://127.0.0.1:8787/login` and enter the same token. Glassbox does not
-load `.env` files or bind the server to a network interface. Planner views and
-feedback are introduced in later P2 work.
+load `.env` files or bind the server to a network interface. Set
+`GLASSBOX_DATABASE` when the database is not `glassbox.sqlite3` in the current
+directory. The server verifies that an existing database has the current schema
+before it binds. After login, `/` lists decisions, `/decision/<id>` shows a
+Decision Card, and `/trace/<id>` shows trace timing data. This phase is
+read-only: feedback and static export are not available.
 
 ## Development
 

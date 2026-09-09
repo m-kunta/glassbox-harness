@@ -78,7 +78,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P2.2 — Read experience
 
-- [ ] Build queue, Decision Card, and trace-view models and templates.
+- [x] Build queue, Decision Card, and trace-view models and templates.
 
 ### P2.3 — Feedback workflow
 
