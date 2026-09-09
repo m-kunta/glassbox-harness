@@ -79,11 +79,11 @@ This is the living project backlog. Refine an item when new evidence changes its
 ### P2.2 — Read experience
 
 - [x] Build queue, Decision Card, and trace-view models and templates.
-- [ ] Repair the trace-template syntax error, validate malformed queue query parameters as HTTP 400 responses, and add the missing seeded HTTP route and override-status cross-layer regression tests before treating P2.2 as fully verified.
+- [x] Repair the trace-template syntax error, validate malformed queue query parameters as HTTP 400 responses, and add the missing seeded HTTP route and override-status cross-layer regression tests before treating P2.2 as fully verified.
 
 ### P2.3 — Feedback workflow
 
-- [ ] Add secure synchronous, append-only, idempotent feedback.
+- [x] Add secure synchronous, append-only, idempotent feedback.
 
 ### P2.4 — Export and usability gate
 

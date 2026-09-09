@@ -80,8 +80,11 @@ load `.env` files or bind the server to a network interface. Set
 `GLASSBOX_DATABASE` when the database is not `glassbox.sqlite3` in the current
 directory. The server verifies that an existing database has the current schema
 before it binds. After login, `/` lists decisions, `/decision/<id>` shows a
-Decision Card, and `/trace/<id>` shows trace timing data. This phase is
-read-only: feedback and static export are not available.
+Decision Card, and `/trace/<id>` shows trace timing data. Each Decision Card
+includes an authenticated append-only feedback ledger. Feedback
+records planner assessment (`agree`, `disagree`, or `uncertain`) for later P3
+calibration; it does not modify a decision or create an operational override.
+Static export remains planned work.
 
 ## Development
 
