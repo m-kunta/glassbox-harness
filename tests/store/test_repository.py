@@ -8,7 +8,7 @@ import pytest
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
-from glassbox.store.repository import QueueCursor, QueueQuery
+from glassbox.store.repository import FeedbackSubmission, QueueCursor, QueueQuery
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -32,6 +32,25 @@ OVERRIDE_IDS = (
     "01ARZ3NDEKTSV4RRFFQ69G5FBC",
     "01ARZ3NDEKTSV4RRFFQ69G5FBD",
 )
+FEEDBACK_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBF"
+
+
+def _feedback_submission(
+    *,
+    feedback_id: str = FEEDBACK_ID,
+    idempotency_key: str = "feedback-request-1",
+    verdict: str = "agree",
+) -> FeedbackSubmission:
+    return FeedbackSubmission(
+        feedback_id=feedback_id,
+        decision_id=DECISION_ID,
+        verdict=verdict,
+        reason_code="inventory-confirmed",
+        free_text="The recommendation matches the current inventory position.",
+        corrected_recommendation={"action": "order"},
+        created_at=TIMESTAMP,
+        idempotency_key=idempotency_key,
+    )
 
 
 def _events() -> tuple[TraceEvent, SpanEvent, DecisionEvent, EvidenceEvent]:
@@ -163,6 +182,42 @@ def test_write_event_is_atomic_when_database_rejects_a_foreign_key(tmp_path: Pat
         repository.write_event(span)
 
     assert database.connection.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 0
+
+
+def test_feedback_is_append_only_idempotent_and_decision_scoped(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    trace, _, decision, _ = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+    submission = _feedback_submission()
+
+    stored = repository.record_feedback(submission)
+    replay = repository.record_feedback(submission)
+    second = repository.record_feedback(
+        _feedback_submission(
+            feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBG",
+            idempotency_key="feedback-request-2",
+        )
+    )
+
+    assert replay == stored
+    assert repository.feedback_for_decision(DECISION_ID) == (second, stored)
+    with pytest.raises(ValueError, match="idempotency"):
+        repository.record_feedback(_feedback_submission(verdict="disagree"))
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.record_feedback(
+            FeedbackSubmission(
+                feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBH",
+                decision_id="01ARZ3NDEKTSV4RRFFQ69G5FBJ",
+                verdict="agree",
+                reason_code=None,
+                free_text=None,
+                corrected_recommendation=None,
+                created_at=TIMESTAMP,
+                idempotency_key="missing-decision",
+            )
+        )
 
 
 def test_duplicate_caller_evidence_key_is_rejected_without_replacing_prior_evidence(

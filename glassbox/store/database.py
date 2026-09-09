@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import RLock
 
-_TABLES = (
+_BASE_TABLES = (
     "traces",
     "spans",
     "decisions",
@@ -17,11 +17,13 @@ _TABLES = (
     "eval_runs",
     "eval_results",
 )
+_TABLES = _BASE_TABLES + ("feedback",)
 _INDEXES = (
     "idx_decisions_agent_decided_at",
     "idx_decisions_entity",
     "idx_decisions_type_confidence",
 )
+_BASE_SCHEMA_OBJECTS = _BASE_TABLES + _INDEXES
 _SCHEMA_OBJECTS = _TABLES + _INDEXES
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 
@@ -87,7 +89,7 @@ class Database:
             ) from error
 
         assert connection is not None
-        if schema_objects == _strict_schema_objects():
+        if schema_objects == _current_schema_objects():
             return cls(connection)
 
         connection.close()
@@ -105,17 +107,20 @@ class Database:
 
 
 def _initialize_schema(connection: sqlite3.Connection) -> None:
-    schema_sql = (Path(__file__).with_name("migrations") / "001_initial.sql").read_text(
-        encoding="utf-8"
-    )
+    schema_sql = _migration_sql("001_initial.sql")
     schema_objects = _glassbox_schema_sql(connection)
     if not schema_objects:
         connection.executescript(schema_sql)
+        _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         return
     if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
+        _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         return
     if schema_objects == _strict_schema_objects():
+        _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
+        return
+    if schema_objects == _current_schema_objects():
         return
     raise TimestampMigrationError(
         "Cannot open this existing Glassbox database because it has an unsupported schema. "
@@ -159,21 +164,33 @@ def _pre_strict_schema_objects() -> dict[str, str]:
 @lru_cache
 def _strict_schema_objects() -> dict[str, str]:
     """Return SQLite-normalized DDL for the complete released strict schema."""
-    return _released_schema_objects("001_initial.sql")
+    return _released_schema_objects("001_initial.sql", _BASE_SCHEMA_OBJECTS)
 
 
-def _released_schema_objects(filename: str) -> dict[str, str]:
-    schema = (Path(__file__).with_name("migrations") / filename).read_text(encoding="utf-8")
+@lru_cache
+def _current_schema_objects() -> dict[str, str]:
+    """Return the current strict schema, including append-only feedback."""
+    return _strict_schema_objects() | _released_schema_objects("002_feedback.sql", ("feedback",))
+
+
+def _released_schema_objects(
+    filename: str, object_names: tuple[str, ...] = _BASE_SCHEMA_OBJECTS
+) -> dict[str, str]:
+    schema = _migration_sql(filename)
     expected: dict[str, str] = {}
     for statement in schema.split(";"):
         normalized = _normalize_schema_sql(statement)
-        for name in _SCHEMA_OBJECTS:
+        for name in object_names:
             if normalized.startswith(_schema_prefix(name)):
                 expected[name] = normalized
                 break
-    if set(expected) != set(_SCHEMA_OBJECTS):
+    if set(expected) != set(object_names):
         raise RuntimeError("The checked-in pre-strict schema fingerprint is incomplete.")
     return expected
+
+
+def _migration_sql(filename: str) -> str:
+    return (Path(__file__).with_name("migrations") / filename).read_text(encoding="utf-8")
 
 
 def _normalize_schema_sql(schema_sql: str) -> str:
@@ -198,10 +215,10 @@ def _rebuild_pre_strict_schema(connection: sqlite3.Connection, schema_sql: str) 
     connection.execute("PRAGMA foreign_keys = OFF")
     try:
         connection.execute("BEGIN IMMEDIATE")
-        for table in _TABLES:
+        for table in _BASE_TABLES:
             connection.execute(f"ALTER TABLE {table} RENAME TO {_legacy_table_name(table)}")
         _execute_schema_statements(connection, schema_sql)
-        for table in _TABLES:
+        for table in _BASE_TABLES:
             failed_table = table
             connection.execute(f"INSERT INTO {table} SELECT * FROM {_legacy_table_name(table)}")
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
@@ -210,7 +227,7 @@ def _rebuild_pre_strict_schema(connection: sqlite3.Connection, schema_sql: str) 
                 "Cannot migrate the pre-strict Glassbox database because it contains "
                 "foreign-key violations. Repair the legacy database before reopening it."
             )
-        for table in _TABLES:
+        for table in _BASE_TABLES:
             connection.execute(f"DROP TABLE {_legacy_table_name(table)}")
         _execute_schema_statements(connection, schema_sql)
         connection.execute("COMMIT")

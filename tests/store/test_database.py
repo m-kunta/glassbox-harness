@@ -32,6 +32,17 @@ def _create_pre_strict_database(path: Path) -> None:
         connection.close()
 
 
+def _create_released_strict_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            (STORE_ROOT / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def test_open_read_only_requires_an_existing_database(tmp_path: Path) -> None:
     missing = tmp_path / "missing.sqlite3"
 
@@ -53,6 +64,20 @@ def test_open_read_only_accepts_the_current_strict_schema(tmp_path: Path) -> Non
             readonly.connection.execute("UPDATE traces SET status = 'error'")
     finally:
         readonly.close()
+
+
+def test_open_upgrades_the_released_strict_schema_with_feedback(tmp_path: Path) -> None:
+    path = tmp_path / "released.sqlite3"
+    _create_released_strict_database(path)
+
+    writable = Database.open(path)
+    try:
+        assert writable.connection.execute("SELECT count(*) FROM feedback").fetchone()[0] == 0
+    finally:
+        writable.close()
+
+    readonly = Database.open_read_only(path)
+    readonly.close()
 
 
 def test_open_read_only_rejects_pre_strict_schema(tmp_path: Path) -> None:

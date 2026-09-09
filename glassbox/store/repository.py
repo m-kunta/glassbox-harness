@@ -18,6 +18,7 @@ from .database import Database
 Event: TypeAlias = TraceEvent | SpanEvent | DecisionEvent | EvidenceEvent
 QueueSort: TypeAlias = Literal["decided_at", "confidence"]
 OverrideStatus: TypeAlias = Literal["none", "accepted", "modified", "rejected", "inconsistent"]
+FeedbackVerdict: TypeAlias = Literal["agree", "disagree", "uncertain"]
 
 _SORT_COLUMNS: dict[QueueSort, str] = {
     "decided_at": "d.decided_at",
@@ -109,6 +110,34 @@ class DecisionDetail:
 
     stored_decision: StoredDecision
     overrides: tuple[OverrideRecord, ...]
+
+
+@dataclass(frozen=True)
+class FeedbackSubmission:
+    """An immutable, caller-complete feedback write request."""
+
+    feedback_id: str
+    decision_id: str
+    verdict: FeedbackVerdict
+    reason_code: str | None
+    free_text: str | None
+    corrected_recommendation: Any | None
+    created_at: datetime
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class FeedbackRecord:
+    """One append-only planner assessment stored for a decision."""
+
+    feedback_id: str
+    decision_id: str
+    verdict: FeedbackVerdict
+    reason_code: str | None
+    free_text: str | None
+    corrected_recommendation: Any | None
+    created_at: datetime
+    idempotency_key: str
 
 
 class Repository:
@@ -258,6 +287,72 @@ class Repository:
             )
             return DecisionDetail(stored_decision, overrides)
 
+    def record_feedback(self, submission: FeedbackSubmission) -> FeedbackRecord:
+        """Append feedback, or return the original row for an exact replay."""
+        self._validate_feedback_submission(submission)
+        corrected_recommendation = (
+            None
+            if submission.corrected_recommendation is None
+            else self._json(submission.corrected_recommendation)
+        )
+        created_at = self._timestamp_text(submission.created_at)
+        with self._operation_lock:
+            with self._connection:
+                existing_row = self._connection.execute(
+                    "SELECT * FROM feedback WHERE idempotency_key = ?",
+                    (submission.idempotency_key,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._feedback_from_row(existing_row)
+                    if (
+                        existing.feedback_id == submission.feedback_id
+                        and existing.decision_id == submission.decision_id
+                        and existing.verdict == submission.verdict
+                        and existing.reason_code == submission.reason_code
+                        and existing.free_text == submission.free_text
+                        and existing.corrected_recommendation == submission.corrected_recommendation
+                        and existing.created_at == submission.created_at
+                    ):
+                        return existing
+                    raise ValueError("feedback idempotency key was reused with a different payload")
+                self._connection.execute(
+                    """
+                    INSERT INTO feedback (
+                        feedback_id, decision_id, verdict, reason_code, free_text,
+                        corrected_recommendation, created_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        submission.feedback_id,
+                        submission.decision_id,
+                        submission.verdict,
+                        submission.reason_code,
+                        submission.free_text,
+                        corrected_recommendation,
+                        created_at,
+                        submission.idempotency_key,
+                    ),
+                )
+                row = self._connection.execute(
+                    "SELECT * FROM feedback WHERE feedback_id = ?", (submission.feedback_id,)
+                ).fetchone()
+                assert row is not None
+                return self._feedback_from_row(row)
+
+    def feedback_for_decision(self, decision_id: str) -> tuple[FeedbackRecord, ...]:
+        """Return feedback newest first for one existing or missing decision."""
+        with self._operation_lock:
+            return tuple(
+                self._feedback_from_row(row)
+                for row in self._connection.execute(
+                    """
+                    SELECT * FROM feedback WHERE decision_id = ?
+                    ORDER BY created_at DESC, feedback_id DESC
+                    """,
+                    (decision_id,),
+                )
+            )
+
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
         optional_set_clause = ", ".join(
@@ -382,6 +477,37 @@ class Repository:
             created_at=datetime.fromisoformat(values["created_at"].replace("Z", "+00:00")),
             supersedes_override_id=values["supersedes_override_id"],
         )
+
+    @staticmethod
+    def _feedback_from_row(row: sqlite3.Row) -> FeedbackRecord:
+        values = dict(row)
+        corrected_recommendation = values["corrected_recommendation"]
+        return FeedbackRecord(
+            feedback_id=values["feedback_id"],
+            decision_id=values["decision_id"],
+            verdict=cast(FeedbackVerdict, values["verdict"]),
+            reason_code=values["reason_code"],
+            free_text=values["free_text"],
+            corrected_recommendation=(
+                None if corrected_recommendation is None else json.loads(corrected_recommendation)
+            ),
+            created_at=datetime.fromisoformat(values["created_at"].replace("Z", "+00:00")),
+            idempotency_key=values["idempotency_key"],
+        )
+
+    @staticmethod
+    def _validate_feedback_submission(submission: FeedbackSubmission) -> None:
+        if submission.verdict not in {"agree", "disagree", "uncertain"}:
+            raise ValueError("feedback verdict is not supported")
+        if not (
+            submission.feedback_id and submission.decision_id and submission.idempotency_key
+        ):
+            raise ValueError("feedback identifiers must be non-empty")
+        if submission.created_at.tzinfo is None or submission.created_at.utcoffset() != _UTC_OFFSET:
+            raise ValueError("feedback timestamp must be timezone-aware UTC")
+        for value in (submission.reason_code, submission.free_text):
+            if value is not None and not isinstance(value, str):
+                raise ValueError("feedback text values must be strings")
 
     @staticmethod
     def _validate_queue_query(query: QueueQuery) -> None:

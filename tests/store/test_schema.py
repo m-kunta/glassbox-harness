@@ -450,15 +450,16 @@ def test_open_creates_every_p0_table_and_required_indexes(tmp_path: Path) -> Non
     } <= indexes
 
 
-def test_schema_sql_matches_the_initial_migration() -> None:
+def test_schema_sql_matches_the_released_migrations() -> None:
     """schema.sql is documentation, not what Database.open() runs (see
     glassbox/store/database.py) — nothing regenerates it, so a later migration
     that isn't mirrored here would drift silently. Fail loudly instead."""
     schema_sql = (STORE_ROOT / "schema.sql").read_text(encoding="utf-8")
-    initial_migration = (STORE_ROOT / "migrations" / "001_initial.sql").read_text(
+    initial_migration = (STORE_ROOT / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+    feedback_migration = (STORE_ROOT / "migrations" / "002_feedback.sql").read_text(
         encoding="utf-8"
     )
-    assert schema_sql == initial_migration
+    assert schema_sql == f"{initial_migration}\n{feedback_migration}"
 
 
 @pytest.mark.parametrize(
