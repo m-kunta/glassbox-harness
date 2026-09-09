@@ -79,6 +79,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 ### P2.2 — Read experience
 
 - [x] Build queue, Decision Card, and trace-view models and templates.
+- [ ] Repair the trace-template syntax error, validate malformed queue query parameters as HTTP 400 responses, and add the missing seeded HTTP route and override-status cross-layer regression tests before treating P2.2 as fully verified.
 
 ### P2.3 — Feedback workflow
 
@@ -88,6 +89,10 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [ ] Add safe read-only static exports.
 - [ ] Run the structured planner usability test.
+
+### P2.5 — Operational overrides
+
+- [ ] Add the operational override workflow: planner accept/modify/reject actions write `overrides`, exercising P2.2's existing head/inconsistency display for the first time.
 
 ## P3 — LLM evaluation (deferred)
 
@@ -120,3 +125,4 @@ Record approved scope changes before implementation changes them. Each entry mus
 | 2026-08-30 | All four P1 deterministic assertions apply uniformly to every case category, including do-nothing cases. A no-action decision still requires at least three evidence items and at least one considered-and-rejected alternative. | §2 says evidence is first-class and “No evidence → unexplainable → fails eval,” without an action-based exception. A weak no-action decision risks silently missing an exception; any resulting evidentiary padding is an agent-reasoning defect to investigate, not grounds for an evaluation exemption. | P1 | Mohith Kunta |
 | 2026-08-30 | Urgency agreement uses linear weighted kappa over the ordered real-agent SLA scale `LOW < MEDIUM < HIGH < CRITICAL`. The source-specification `urgency_agreement >= 0.6` threshold remains unchanged until it is checked against completed 40-case linear-kappa results. | Adjacent priority tiers have distinct operational response windows, so their misses must remain visible; quadratic weighting would disproportionately forgive systematic adjacent-tier SLA failures. | P1 | Mohith Kunta |
 | 2026-08-31 | The generic `glassbox.eval` runner does not create traces or collectors. Each agent-owned `EvaluationTarget` creates an isolated per-case trace/collector, flushes it, reads its persisted decision data, and returns a generic `DecisionResult`. | The approved `eval-dependencies` import boundary forbids `sdk` and `collector` imports, so a runner-owned tracing lifecycle would contradict the architecture. This preserves both isolation and the dependency rule. | P1 | Mohith Kunta |
+| 2026-09-08 | Feedback (P2.3) is a separate append-only ledger from `overrides`; the source specification's original “feedback POST writes overrides” behavior is superseded. `overrides` remains retained for the scheduled P2.5 operational accept/modify/reject workflow. | P3 human-label calibration needs an assessment schema (`agree`/`disagree`/`uncertain`, optionally corrected recommendation), not the operational-action schema (`accepted`/`modified`/`rejected`). Retaining `overrides` preserves the ratified core data model and P2.2's existing head/inconsistency reads until an operational writer is added. | P2.3, P2.5, P3 | Mohith Kunta |

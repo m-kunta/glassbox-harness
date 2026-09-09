@@ -23,6 +23,14 @@ payload matches; a key reused with different payload is rejected as a generic
 client error. The write uses one SQLite transaction so no partial feedback row
 can appear.
 
+Each POST opens a short-lived writer through `Database.open()` using the same
+configured database path and its bounded busy timeout, then closes it after the
+single feedback transaction. The collector and web server are concurrent SQLite
+writers; WAL serializes their writes. If the timeout expires, the server renders
+a generic retryable failure and persists nothing. It never acknowledges or
+silently drops a contended feedback action; the form keeps its idempotency key
+so a retry is safe.
+
 ## Request flow and security
 
 `GET /decision/{decision_id}` renders the existing Decision Card plus a POST
@@ -31,6 +39,13 @@ form with an opaque idempotency key and the server-side session's CSRF token.
 decision and an authenticated session. It validates a constant-time CSRF token
 comparison, request-size limits, allowed verdict, optional bounded strings,
 and JSON-only corrected recommendation before writing.
+
+The POST additionally requires an exact `Host` header for the configured
+loopback host and port. An absent `Origin` is allowed for local non-browser
+clients; when present, `Origin` must exactly match that loopback origin. A
+mismatch on either check is rejected before CSRF or persistence. This treats
+`Origin` as a browser-enforced cross-origin signal without mistaking a
+client-supplied header for authentication.
 
 The endpoint uses the existing loopback-only authentication/session boundary.
 Every authenticated feedback attempt, including validation or persistence
