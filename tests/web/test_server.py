@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from glassbox.store import Database
 from glassbox.web.server import create_app, load_server_config, run_server
 
 TOKEN = "t" * 32
@@ -18,9 +20,14 @@ class Clock:
         return self.value
 
 
-def app_for(clock: Clock):
+def app_for(clock: Clock, tmp_path: Path):
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = Database.open(database_path)
+    database.close()
     config = load_server_config(
-        environ={"GLASSBOX_LOCAL_ACCESS_TOKEN": TOKEN}, host="127.0.0.1", port=8787
+        environ={"GLASSBOX_LOCAL_ACCESS_TOKEN": TOKEN, "GLASSBOX_DATABASE": str(database_path)},
+        host="127.0.0.1",
+        port=8787,
     )
     return create_app(config, clock=clock)
 
@@ -84,15 +91,15 @@ def test_serve_command_dispatches_validated_arguments(monkeypatch: pytest.Monkey
     assert received == {"host": "::1", "port": 8788}
 
 
-def test_health_is_public_and_contains_no_decision_data() -> None:
-    response = TestClient(app_for(Clock()), base_url="http://127.0.0.1").get("/health")
+def test_health_is_public_and_contains_no_decision_data(tmp_path: Path) -> None:
+    response = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1").get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-def test_failed_login_is_generic_and_does_not_set_a_cookie() -> None:
-    response = TestClient(app_for(Clock()), base_url="http://127.0.0.1").post(
+def test_failed_login_is_generic_and_does_not_set_a_cookie(tmp_path: Path) -> None:
+    response = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1").post(
         "/login", data={"access_token": "wrong"}
     )
 
@@ -101,8 +108,8 @@ def test_failed_login_is_generic_and_does_not_set_a_cookie() -> None:
     assert "wrong" not in response.text
 
 
-def test_successful_login_sets_the_intended_cookie_attributes() -> None:
-    client = TestClient(app_for(Clock()), base_url="http://127.0.0.1")
+def test_successful_login_sets_the_intended_cookie_attributes(tmp_path: Path) -> None:
+    client = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1")
 
     response = client.post("/login", data={"access_token": TOKEN}, follow_redirects=False)
 
@@ -115,21 +122,23 @@ def test_successful_login_sets_the_intended_cookie_attributes() -> None:
     assert TOKEN not in cookie
 
 
-def test_protected_route_redirects_without_session_and_refreshes_with_session() -> None:
+def test_protected_route_redirects_without_session_and_refreshes_with_session(
+    tmp_path: Path,
+) -> None:
     clock = Clock()
-    client = TestClient(app_for(clock), base_url="http://127.0.0.1")
+    client = TestClient(app_for(clock, tmp_path), base_url="http://127.0.0.1")
 
     assert client.get("/", follow_redirects=False).headers["location"] == "/login"
     client.post("/login", data={"access_token": TOKEN})
     clock.value += timedelta(minutes=29)
-    assert client.get("/").status_code == 503
+    assert client.get("/").status_code == 200
     clock.value += timedelta(minutes=29)
-    assert client.get("/", follow_redirects=False).status_code == 503
+    assert client.get("/", follow_redirects=False).status_code == 200
 
 
-def test_idle_session_is_rejected_after_its_timeout() -> None:
+def test_idle_session_is_rejected_after_its_timeout(tmp_path: Path) -> None:
     clock = Clock()
-    client = TestClient(app_for(clock), base_url="http://127.0.0.1")
+    client = TestClient(app_for(clock, tmp_path), base_url="http://127.0.0.1")
     client.post("/login", data={"access_token": TOKEN})
     clock.value += timedelta(minutes=30, seconds=1)
 

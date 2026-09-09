@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,11 +12,15 @@ from typing import Annotated
 
 import uvicorn
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 
+from glassbox.store import Database, ReadOnlyDatabaseError
+
 from .auth import SESSION_COOKIE_NAME, SessionStore, token_matches
+from .read_service import QueueRequest, ReadService
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _MIN_TOKEN_LENGTH = 32
@@ -34,6 +39,7 @@ class ServerConfig:
     port: int
     access_token: str
     session_idle_timeout: timedelta = timedelta(minutes=30)
+    database_path: Path = Path("glassbox.sqlite3")
 
 
 def load_server_config(
@@ -54,15 +60,26 @@ def load_server_config(
         raise ValueError("GLASSBOX_LOCAL_ACCESS_TOKEN must contain at least 32 characters")
     if session_idle_timeout <= timedelta():
         raise ValueError("session_idle_timeout must be positive")
-    return ServerConfig(host, port, token, session_idle_timeout)
+    return ServerConfig(
+        host,
+        port,
+        token,
+        session_idle_timeout,
+        Path(source.get("GLASSBOX_DATABASE", "glassbox.sqlite3")),
+    )
 
 
 def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now) -> FastAPI:
-    """Create the authenticated P2.1 application shell."""
+    """Create the authenticated read-only planner application."""
+    database = Database.open_read_only(config.database_path)
+    database.close()
     templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
     sessions = SessionStore(config.session_idle_timeout, clock=clock)
     app = FastAPI()
     app.state.sessions = sessions
+    app.mount(
+        "/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static"
+    )
 
     @app.middleware("http")
     async def require_session(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -102,9 +119,65 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
     def health() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    def service() -> ReadService:
+        return ReadService(config.database_path)
+
+    def unavailable(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"title": "Planner unavailable", "message": "The planner data is unavailable."},
+            status_code=503,
+        )
+
     @app.get("/")
-    def root() -> PlainTextResponse:
-        return PlainTextResponse("Planner views are not available yet.", status_code=503)
+    def root(request: Request) -> Response:
+        try:
+            page = service().queue(
+                QueueRequest(
+                    agent_name=request.query_params.get("agent"),
+                    decision_type=request.query_params.get("decision_type"),
+                    date_from=request.query_params.get("from"),
+                    date_to=request.query_params.get("to"),
+                    confidence=request.query_params.get("confidence"),
+                    override_status=request.query_params.get("override_status"),
+                    sort=request.query_params.get("sort", "timestamp"),
+                    cursor=request.query_params.get("cursor"),
+                )
+            )
+        except (ReadOnlyDatabaseError, sqlite3.Error):
+            return unavailable(request)
+        return templates.TemplateResponse(request, "queue.html", {"page": page})
+
+    @app.get("/decision/{decision_id}")
+    def decision_card(request: Request, decision_id: str) -> Response:
+        try:
+            card = service().decision_card(decision_id)
+        except (ReadOnlyDatabaseError, sqlite3.Error):
+            return unavailable(request)
+        if card is None:
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {"title": "Not found", "message": "The requested decision was not found."},
+                status_code=404,
+            )
+        return templates.TemplateResponse(request, "decision_card.html", {"card": card})
+
+    @app.get("/trace/{trace_id}")
+    def trace(request: Request, trace_id: str) -> Response:
+        try:
+            view = service().trace(trace_id)
+        except (ReadOnlyDatabaseError, sqlite3.Error):
+            return unavailable(request)
+        if view is None:
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {"title": "Not found", "message": "The requested trace was not found."},
+                status_code=404,
+            )
+        return templates.TemplateResponse(request, "trace.html", {"view": view})
 
     return app
 

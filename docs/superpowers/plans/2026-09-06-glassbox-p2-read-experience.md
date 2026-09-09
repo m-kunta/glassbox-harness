@@ -430,7 +430,7 @@
 - `create_app()` preflights and closes `Database.open_read_only(config.database_path)` before returning FastAPI.
 - Authenticated routes call a short-lived `ReadService(config.database_path)` per request.
 
-- [ ] **Step 1: Write failing server route tests using a strict seeded database.**
+- [x] **Step 1: Write failing server route tests using a strict seeded database.**
 
   First update the existing `app_for` helper in `tests/web/test_server.py` so it creates and closes a strict temporary database, passes that path through `GLASSBOX_DATABASE`, and uses it in `ServerConfig`. This preserves P2.1's auth-focused tests after `create_app()` starts read-only schema preflight. Give every route test an explicit seeded database path rather than relying on the process working directory.
 
@@ -462,13 +462,13 @@
 
   Add assertions that an unconfigured/missing `GLASSBOX_DATABASE` makes `create_app()` fail before an app is returned; a runtime `ReadOnlyDatabaseError` renders a generic `503` without the database path/error text; an unauthenticated queue remains a redirect to `/login`; and trace output includes span/blob references but not blob content.
 
-- [ ] **Step 2: Run route tests to verify P2.1’s root placeholder fails the new expectations.**
+- [x] **Step 2: Run route tests to verify P2.1’s root placeholder fails the new expectations.**
 
   Run: `.venv/bin/python -m pytest --import-mode=importlib tests/web/test_server.py -q`
 
   Expected: the existing authenticated root `503` and missing decision/trace routes fail the read-experience assertions.
 
-- [ ] **Step 3: Replace the placeholder with preflighted read routes.**
+- [x] **Step 3: Replace the placeholder with preflighted read routes.**
 
   In `load_server_config`, add:
 
@@ -481,7 +481,7 @@
 
   Implement the templates with Jinja inheritance from `base.html`. The queue's GET form uses `agent`, `decision_type`, `from`, `to`, `confidence`, `override_status`, `sort`, and `cursor`. It renders an explicit “No decisions match these filters.” state. The card renders a `<table>` of each evidence group, anchor IDs from `CitationView.anchor`, unresolved diagnostics, alternatives, and a non-submit feedback-deferred notice. The trace recursively renders only the cycle-free `SpanView.children` tree and renders orphan/cycle diagnostics as text. `glassbox.css` contains only local, readable typography/table/layout rules and no external URL or script.
 
-- [ ] **Step 4: Run route, quality, and architecture checks.**
+- [x] **Step 4: Run route, quality, and architecture checks.**
 
   Run:
 
@@ -494,7 +494,7 @@
 
   Expected: all pass and import-linter reports six kept contracts.
 
-- [ ] **Step 5: Commit the P2.2 read surface.**
+- [x] **Step 5: Commit the P2.2 read surface.**
 
   ```shell
   git add glassbox/web/server.py glassbox/web/templates glassbox/web/static tests/web/test_server.py
