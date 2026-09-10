@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from glassbox.eval.runner import run_suite
-from glassbox.store import Database, Repository, TraceTree
+from glassbox.store import Database, ReadOnlyDatabaseError, Repository, TraceTree
+from glassbox.web.export import ExportError, render_decision_export, write_decision_export
+from glassbox.web.read_service import ReadService
 from glassbox.web.server import run_server
 
 
@@ -27,6 +29,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     trace_command = commands.add_parser("trace", help="print one persisted trace tree as JSON")
     trace_command.add_argument("trace_id")
+    export_command = commands.add_parser("export", help="write one static Decision Card HTML file")
+    export_command.add_argument("--decision", required=True)
+    export_command.add_argument("--output", required=True)
+    export_command.add_argument("--live-base-url")
+    export_command.add_argument("--overwrite", action="store_true")
     eval_command = commands.add_parser("eval", help="run one deterministic evaluation suite")
     eval_command.add_argument("--suite", required=True)
     serve_command = commands.add_parser("serve", help="run the local Glassbox web server")
@@ -48,6 +55,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_server(host=arguments.host, port=arguments.port)
         except ValueError as exc:
             print(f"glassbox: unable to start server: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if arguments.command == "export":
+        try:
+            card = ReadService(Path(arguments.database)).decision_card(arguments.decision)
+            if card is None:
+                print("glassbox: decision not found", file=sys.stderr)
+                return 1
+            html = render_decision_export(card, arguments.live_base_url)
+            write_decision_export(Path(arguments.output), html, overwrite=arguments.overwrite)
+        except (ExportError, ReadOnlyDatabaseError, OSError):
+            print("glassbox: unable to export decision", file=sys.stderr)
             return 2
         return 0
 

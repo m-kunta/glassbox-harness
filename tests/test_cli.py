@@ -183,6 +183,57 @@ def test_trace_command_never_mutates_the_database(tmp_path: Path, capsys) -> Non
     assert rows_after == rows_before
 
 
+def test_export_command_writes_one_read_only_card(tmp_path: Path, capsys) -> None:
+    from glassbox.cli import main
+
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = _repository_with_trace(database_path)
+    database.close()
+    target = tmp_path / "card.html"
+    arguments = [
+        "--database",
+        str(database_path),
+        "export",
+        "--decision",
+        DECISION_ID,
+        "--output",
+        str(target),
+    ]
+
+    assert main(arguments) == 0
+    capsys.readouterr()
+
+    html = target.read_text(encoding="utf-8")
+    assert "Decision Card" in html
+    assert "Feedback is read-only" in html
+    assert "<form" not in html
+
+
+def test_export_command_rejects_missing_decision_and_accidental_overwrite(
+    tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = _repository_with_trace(database_path)
+    database.close()
+    target = tmp_path / "card.html"
+    arguments = [
+        "--database",
+        str(database_path),
+        "export",
+        "--decision",
+        DECISION_ID,
+        "--output",
+        str(target),
+    ]
+
+    assert main(arguments[:4] + ["01ARZ3NDEKTSV4RRFFQ69G5FBK"] + arguments[5:]) == 1
+    assert main(arguments) == 0
+    assert main(arguments) == 2
+    assert "unable to export decision" in capsys.readouterr().err
+
+
 def test_eval_command_prints_result_and_returns_gate_status(tmp_path: Path, capsys) -> None:
     import yaml
 
