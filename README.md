@@ -84,7 +84,19 @@ Decision Card, and `/trace/<id>` shows trace timing data. Each Decision Card
 includes an authenticated append-only feedback ledger. Feedback
 records planner assessment (`agree`, `disagree`, or `uncertain`) for later P3
 calibration; it does not modify a decision or create an operational override.
-Static export remains planned work.
+
+## Export one Decision Card
+
+Write a self-contained, read-only HTML snapshot without starting the server:
+
+```shell
+glassbox --database glassbox.sqlite3 export --decision <decision-id> --output decision-card.html
+```
+
+Use `--overwrite` to replace an existing artifact. Optionally add
+`--live-base-url http://127.0.0.1:8787` to include a link back to the live
+card. Exports contain inline CSS and no JavaScript, session state, or feedback
+form; feedback and operational actions remain available only in the live app.
 
 ## Development
 

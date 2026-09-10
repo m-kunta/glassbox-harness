@@ -87,7 +87,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P2.4 — Export and usability gate
 
-- [ ] Add safe read-only static exports.
+- [x] Add safe read-only static exports.
 - [ ] Run the structured planner usability test.
 
 ### P2.5 — Operational overrides
