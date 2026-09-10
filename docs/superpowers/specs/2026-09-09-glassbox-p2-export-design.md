@@ -14,6 +14,11 @@ display, JavaScript, or any write path. Bulk queue export remains a separate
 future design question because it needs explicit volume, layout, and packaging
 decisions.
 
+`export` uses the existing top-level `--database` CLI option, including its
+`GLASSBOX_DATABASE`/`glassbox.sqlite3` default. Like `trace`, it is a
+single-shot read-only command; it does not use the long-running server's
+configuration path.
+
 ## Architecture
 
 The CLI opens the configured database exclusively with `Database.open_read_only`
@@ -70,3 +75,7 @@ representative cards. The participant must identify the verdict, top two
 evidence items, one rejected alternative, and an evidence timestamp without
 developer assistance. Record task completion and observations in a durable
 project artifact; P2.4 completes only when the result reaches at least 90%.
+The source specification's accept/modify/reject, superseding-response, and
+override-action usability scenarios are deferred to the P2.5 operational
+override workflow, consistent with the 2026-09-08 separate-feedback-ledger
+decision.
