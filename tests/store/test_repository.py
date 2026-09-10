@@ -191,9 +191,19 @@ def test_feedback_is_append_only_idempotent_and_decision_scoped(tmp_path: Path) 
     repository.write_event(trace)
     repository.write_event(decision)
     submission = _feedback_submission()
+    independent_replay = FeedbackSubmission(
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBK",
+        decision_id=submission.decision_id,
+        verdict=submission.verdict,
+        reason_code=submission.reason_code,
+        free_text=submission.free_text,
+        corrected_recommendation=submission.corrected_recommendation,
+        created_at=TIMESTAMP + timedelta(seconds=1),
+        idempotency_key=submission.idempotency_key,
+    )
 
     stored = repository.record_feedback(submission)
-    replay = repository.record_feedback(submission)
+    replay = repository.record_feedback(independent_replay)
     second = repository.record_feedback(
         _feedback_submission(
             feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBG",

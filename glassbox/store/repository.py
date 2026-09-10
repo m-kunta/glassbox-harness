@@ -305,13 +305,11 @@ class Repository:
                 if existing_row is not None:
                     existing = self._feedback_from_row(existing_row)
                     if (
-                        existing.feedback_id == submission.feedback_id
-                        and existing.decision_id == submission.decision_id
+                        existing.decision_id == submission.decision_id
                         and existing.verdict == submission.verdict
                         and existing.reason_code == submission.reason_code
                         and existing.free_text == submission.free_text
                         and existing.corrected_recommendation == submission.corrected_recommendation
-                        and existing.created_at == submission.created_at
                     ):
                         return existing
                     raise ValueError("feedback idempotency key was reused with a different payload")
