@@ -8,7 +8,12 @@ import pytest
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
-from glassbox.store.repository import FeedbackSubmission, QueueCursor, QueueQuery
+from glassbox.store.repository import (
+    FeedbackSubmission,
+    OverrideSubmission,
+    QueueCursor,
+    QueueQuery,
+)
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -457,3 +462,53 @@ def test_queue_and_detail_identify_override_heads_and_inconsistency(tmp_path: Pa
         OVERRIDE_IDS[0],
         OVERRIDE_IDS[1],
     ]
+
+
+def test_record_override_creates_a_linear_idempotent_history(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    trace, _, decision, _ = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+    first = OverrideSubmission(
+        OVERRIDE_IDS[0],
+        DECISION_ID,
+        "planner",
+        "accepted",
+        None,
+        None,
+        None,
+        TIMESTAMP,
+        "override-request-1",
+    )
+    second = OverrideSubmission(
+        OVERRIDE_IDS[1],
+        DECISION_ID,
+        "planner",
+        "modified",
+        {"action": "hold"},
+        None,
+        None,
+        TIMESTAMP + timedelta(seconds=1),
+        "override-request-2",
+    )
+
+    stored_first = repository.record_override(first)
+    stored_second = repository.record_override(second)
+    replay = repository.record_override(
+        OverrideSubmission(
+            OVERRIDE_IDS[2],
+            DECISION_ID,
+            "other",
+            "modified",
+            {"action": "hold"},
+            None,
+            None,
+            TIMESTAMP + timedelta(seconds=2),
+            "override-request-2",
+        )
+    )
+
+    assert stored_first.supersedes_override_id is None
+    assert stored_second.supersedes_override_id == OVERRIDE_IDS[0]
+    assert replay == stored_second

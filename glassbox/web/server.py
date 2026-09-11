@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
 import uvicorn
 from fastapi import FastAPI, Form, Request
@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 
 from glassbox.store import Database, ReadOnlyDatabaseError, Repository
-from glassbox.store.repository import FeedbackSubmission
+from glassbox.store.repository import FeedbackSubmission, OverrideSubmission
 
 from .auth import SESSION_COOKIE_NAME, SessionStore, token_matches
 from .read_service import QueueRequest, ReadService
@@ -47,6 +47,7 @@ class ServerConfig:
     access_token: str
     session_idle_timeout: timedelta = timedelta(minutes=30)
     database_path: Path = Path("glassbox.sqlite3")
+    operator_name: str = "local-planner"
 
 
 def load_server_config(
@@ -67,12 +68,16 @@ def load_server_config(
         raise ValueError("GLASSBOX_LOCAL_ACCESS_TOKEN must contain at least 32 characters")
     if session_idle_timeout <= timedelta():
         raise ValueError("session_idle_timeout must be positive")
+    operator_name = source.get("GLASSBOX_OPERATOR_NAME", "local-planner").strip()
+    if not operator_name:
+        raise ValueError("GLASSBOX_OPERATOR_NAME must not be blank")
     return ServerConfig(
         host,
         port,
         token,
         session_idle_timeout,
         Path(source.get("GLASSBOX_DATABASE", "glassbox.sqlite3")),
+        operator_name,
     )
 
 
@@ -250,6 +255,39 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
                 database.close()
         return RedirectResponse(f"/decision/{decision_id}", status_code=303)
 
+    @app.post("/decision/{decision_id}/override")
+    def override(
+        request: Request,
+        decision_id: str,
+        csrf_token: Annotated[str, Form()],
+        idempotency_key: Annotated[str, Form()],
+        action: Annotated[str, Form()],
+        modified_value: Annotated[str | None, Form()] = None,
+    ) -> Response:
+        if not _valid_feedback_origin(request, config) or not token_matches(
+            csrf_token, request.state.csrf_token
+        ):
+            return feedback_error(request)
+        try:
+            value = None if not modified_value else json.loads(modified_value)
+            submission = _override_submission(
+                decision_id, config.operator_name, action, value, idempotency_key, clock()
+            )
+        except (ValueError, json.JSONDecodeError):
+            return feedback_error(request)
+        database: Database | None = None
+        try:
+            database = Database.open(config.database_path)
+            Repository(database).record_override(submission)
+        except sqlite3.OperationalError:
+            return feedback_error(request, 503)
+        except (ValueError, sqlite3.IntegrityError):
+            return feedback_error(request)
+        finally:
+            if database is not None:
+                database.close()
+        return RedirectResponse(f"/decision/{decision_id}", status_code=303)
+
     @app.get("/trace/{trace_id}")
     def trace(request: Request, trace_id: str) -> Response:
         try:
@@ -329,6 +367,30 @@ def _feedback_submission(
         reason_code or None,
         free_text or None,
         parsed_recommendation,
+        created_at,
+        idempotency_key,
+    )
+
+
+def _override_submission(
+    decision_id: str,
+    actor: str,
+    action: str,
+    modified_value: object | None,
+    idempotency_key: str,
+    created_at: datetime,
+) -> OverrideSubmission:
+    value = (int(created_at.timestamp() * 1_000) << 80) | secrets.randbits(80)
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    override_id = "".join(alphabet[(value >> (5 * index)) & 31] for index in range(25, -1, -1))
+    return OverrideSubmission(
+        override_id,
+        decision_id,
+        actor,
+        cast(Literal["accepted", "modified", "rejected"], action),
+        modified_value,
+        None,
+        None,
         created_at,
         idempotency_key,
     )

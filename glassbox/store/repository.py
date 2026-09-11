@@ -96,6 +96,19 @@ class OverrideRecord:
 
 
 @dataclass(frozen=True)
+class OverrideSubmission:
+    override_id: str
+    decision_id: str
+    actor: str
+    action: Literal["accepted", "modified", "rejected"]
+    modified_value: Any | None
+    reason_code: str | None
+    free_text: str | None
+    created_at: datetime
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
 class QueueDecision:
     """A decision plus its effective override status and raw queue key."""
 
@@ -351,6 +364,72 @@ class Repository:
                 )
             )
 
+    def record_override(self, submission: OverrideSubmission) -> OverrideRecord:
+        """Atomically append one operational action to a linear override history."""
+        self._validate_override_submission(submission)
+        modified_value = (
+            None if submission.modified_value is None else self._json(submission.modified_value)
+        )
+        created_at = self._timestamp_text(submission.created_at)
+        with self._operation_lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing_row = self._connection.execute(
+                    "SELECT * FROM overrides WHERE idempotency_key = ?",
+                    (submission.idempotency_key,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._override_from_row(existing_row)
+                    if (
+                        existing.decision_id == submission.decision_id
+                        and existing.action == submission.action
+                        and existing.modified_value == submission.modified_value
+                        and existing.reason_code == submission.reason_code
+                        and existing.free_text == submission.free_text
+                    ):
+                        self._connection.execute("COMMIT")
+                        return existing
+                    raise ValueError("override idempotency key was reused with a different payload")
+                rows = self._connection.execute(
+                    "SELECT * FROM overrides WHERE decision_id = ?", (submission.decision_id,)
+                ).fetchall()
+                predecessors = {
+                    row["supersedes_override_id"] for row in rows if row["supersedes_override_id"]
+                }
+                heads = [row for row in rows if row["override_id"] not in predecessors]
+                if rows and len(heads) != 1:
+                    raise ValueError("override history is inconsistent")
+                predecessor = None if not rows else heads[0]["override_id"]
+                self._connection.execute(
+                    """INSERT INTO overrides (
+                    override_id, decision_id, actor, action, modified_value, reason_code,
+                    free_text, created_at, supersedes_override_id, idempotency_key
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        submission.override_id,
+                        submission.decision_id,
+                        submission.actor,
+                        submission.action,
+                        modified_value,
+                        submission.reason_code,
+                        submission.free_text,
+                        created_at,
+                        predecessor,
+                        submission.idempotency_key,
+                    ),
+                )
+                row = self._connection.execute(
+                    "SELECT * FROM overrides WHERE override_id = ?", (submission.override_id,)
+                ).fetchone()
+                assert row is not None
+                self._connection.execute("COMMIT")
+                return self._override_from_row(row)
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
         optional_set_clause = ", ".join(
@@ -494,12 +573,30 @@ class Repository:
         )
 
     @staticmethod
+    def _validate_override_submission(submission: OverrideSubmission) -> None:
+        if submission.action not in {"accepted", "modified", "rejected"}:
+            raise ValueError("override action is not supported")
+        if not all(
+            (
+                submission.override_id,
+                submission.decision_id,
+                submission.actor,
+                submission.idempotency_key,
+            )
+        ):
+            raise ValueError("override identifiers must be non-empty")
+        if submission.action == "modified" and submission.modified_value is None:
+            raise ValueError("modified overrides require a replacement value")
+        if submission.action != "modified" and submission.modified_value is not None:
+            raise ValueError("only modified overrides accept a replacement value")
+        if submission.created_at.tzinfo is None or submission.created_at.utcoffset() != _UTC_OFFSET:
+            raise ValueError("override timestamp must be timezone-aware UTC")
+
+    @staticmethod
     def _validate_feedback_submission(submission: FeedbackSubmission) -> None:
         if submission.verdict not in {"agree", "disagree", "uncertain"}:
             raise ValueError("feedback verdict is not supported")
-        if not (
-            submission.feedback_id and submission.decision_id and submission.idempotency_key
-        ):
+        if not (submission.feedback_id and submission.decision_id and submission.idempotency_key):
             raise ValueError("feedback identifiers must be non-empty")
         if submission.created_at.tzinfo is None or submission.created_at.utcoffset() != _UTC_OFFSET:
             raise ValueError("feedback timestamp must be timezone-aware UTC")
