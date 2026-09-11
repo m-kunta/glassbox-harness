@@ -85,6 +85,11 @@ includes an authenticated append-only feedback ledger. Feedback
 records planner assessment (`agree`, `disagree`, or `uncertain`) for later P3
 calibration; it does not modify a decision or create an operational override.
 
+Set `GLASSBOX_OPERATOR_NAME` to record an accountability label on operational
+accept, modify, and reject actions; it defaults to `local-planner`. Overrides
+are append-only: each new action supersedes the current action for that
+decision, while a modified action records its corrected recommendation JSON.
+
 ## Export one Decision Card
 
 Write a self-contained, read-only HTML snapshot without starting the server:

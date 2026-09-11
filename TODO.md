@@ -92,7 +92,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ### P2.5 — Operational overrides
 
-- [ ] Add the operational override workflow: planner accept/modify/reject actions write `overrides`, exercising P2.2's existing head/inconsistency display for the first time.
+- [x] Add the operational override workflow: planner accept/modify/reject actions write `overrides`, exercising P2.2's existing head/inconsistency display for the first time.
 
 ## P3 — LLM evaluation (deferred)
 

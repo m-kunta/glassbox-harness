@@ -278,6 +278,40 @@ def test_feedback_form_enforces_request_guards_and_uses_prg(tmp_path: Path) -> N
     assert "<script>not executable</script>" not in card.text
 
 
+def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+
+    response = client.post(
+        f"/decision/{decision_id}/override",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "action": "modified",
+            "modified_value": '{"action":"hold"}',
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    database = Database.open_read_only(database_path)
+    try:
+        detail = Repository(database).decision_detail(decision_id)
+    finally:
+        database.close()
+    assert detail is not None
+    assert detail.overrides[0].action == "modified"
+    assert detail.overrides[0].actor == "local-planner"
+
+
 @pytest.mark.parametrize(
     "query",
     ["?sort=bogus", "?from=not-a-date", "?confidence=bogus", "?cursor=not-valid-base64!!"],
