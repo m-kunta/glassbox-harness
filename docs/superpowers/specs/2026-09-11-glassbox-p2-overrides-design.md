@@ -11,9 +11,9 @@ change the decision itself.
 ## Configuration and form
 
 Startup reads `GLASSBOX_OPERATOR_NAME` through `os.environ.get`, defaulting to
-`local-planner`. The value is captured once in `ServerConfig` and recorded as
-the `actor` for every override; it is an accountability label, not multi-user
-identity.
+`local-planner`. A configured value is stripped and must remain non-empty. The
+value is captured once in `ServerConfig` and recorded as the `actor` for every
+override; it is an accountability label, not multi-user identity.
 
 The Decision Card renders one authenticated POST form with action, optional
 reason code/free text, optional corrected recommendation JSON, CSRF token, and
@@ -58,4 +58,8 @@ serialization, exact idempotent replay, changed-payload rejection, modified
 payload rules, operator configuration, Host/Origin/CSRF rejection, PRG, and
 escaped display. P2.5 also owns the deferred operational-action portion of the
 planner usability check: accept, modify, reject, superseding a response, and
-duplicate POST delivery.
+duplicate POST delivery. A cross-layer regression writes a superseding override
+through `record_override`, then asserts the queue SQL and Decision Card
+graph-walk report the same current action and head selected by the write
+transaction. This guards all three head-classification implementations against
+drift.
