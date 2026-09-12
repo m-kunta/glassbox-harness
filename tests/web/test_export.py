@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from glassbox.events import DecisionEvent
+from glassbox.events import DecisionEvent, EvidenceEvent
 from glassbox.store.repository import StoredDecision
 from glassbox.web.export import ExportError, render_decision_export, write_decision_export
 from glassbox.web.read_models import build_decision_card
@@ -26,7 +26,17 @@ def _card():
         alternatives_considered=("hold",),
         decided_at=datetime(2026, 9, 9, 12, 0, tzinfo=UTC),
     )
-    return build_decision_card(StoredDecision(decision, ()), ())
+    evidence = EvidenceEvent(
+        evidence_id="inventory",
+        decision_id=decision.decision_id,
+        source_system="erp",
+        source_ref="sku-1",
+        field_name="available_units",
+        field_value={"units": 2},
+        weight=1.0,
+        retrieved_at=decision.decided_at,
+    )
+    return build_decision_card(StoredDecision(decision, (evidence,)), ())
 
 
 def test_export_is_standalone_read_only_and_escaped() -> None:
@@ -38,6 +48,8 @@ def test_export_is_standalone_read_only_and_escaped() -> None:
     assert "<script" not in html
     assert 'href="/static/' not in html
     assert "&lt;script&gt;unsafe&lt;/script&gt;" in html
+    assert '{&#34;units&#34;:2}' in html
+    assert "FrozenDict" not in html
 
 
 def test_export_writer_requires_explicit_overwrite(tmp_path) -> None:

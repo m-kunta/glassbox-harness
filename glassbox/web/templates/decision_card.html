@@ -1,14 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Decision · Glassbox{% endblock %}
 {% block content %}
-<h1>Decision Card</h1>
-<p>{{ card.verdict }}</p><p>{{ card.decision.event.rationale }}</p>
-<h2>Evidence</h2>
-{% for group in card.evidence_groups %}<section id="{{ group.anchor }}"><h3>{{ group.evidence_id }}</h3><table>{% for field in group.fields %}<tr><th>{{ field.field_name }}</th><td>{{ field.field_value }}</td></tr>{% endfor %}</table></section>{% endfor %}
-<h2>Alternatives</h2><p>{{ card.decision.event.alternatives_considered }}</p>
-<h2>Operational override</h2>
-<form method="post" action="/decision/{{ card.decision.event.decision_id }}/override"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="idempotency_key" value="{{ idempotency_key }}"><label>Action <select name="action"><option value="accepted">Accept</option><option value="modified">Modify</option><option value="rejected">Reject</option></select></label><label>Modified recommendation JSON <textarea name="modified_value"></textarea></label><button type="submit">Save override</button></form>
-<h2>Feedback</h2>
-<form method="post" action="/decision/{{ card.decision.event.decision_id }}/feedback"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="idempotency_key" value="{{ idempotency_key }}"><label>Verdict <select name="verdict"><option value="agree">Agree</option><option value="disagree">Disagree</option><option value="uncertain">Uncertain</option></select></label><label>Reason code <input name="reason_code"></label><label>Note <textarea name="free_text"></textarea></label><label>Corrected recommendation JSON <textarea name="corrected_recommendation"></textarea></label><button type="submit">Save feedback</button></form>
-{% for item in card.feedback %}<section><p>{{ item.verdict }} · {{ item.created_at }}</p>{% if item.free_text %}<p>{{ item.free_text }}</p>{% endif %}</section>{% endfor %}
+<section class="decision-brief" aria-labelledby="decision-summary">
+  <p class="eyebrow">Decision brief</p>
+  <h1 id="decision-summary">{{ card.decision.event.decision_type|replace('_', ' ')|title }}</h1>
+  <dl class="fact-grid">
+    <div><dt>Entity</dt><dd>{{ card.entity_label }}</dd></div>
+    <div><dt>Recommended action</dt><dd>{{ card.recommended_action|replace('_', ' ')|title }}</dd></div>
+    <div><dt>Confidence</dt><dd>{{ card.confidence_band.value|title }} ({{ "%.0f"|format(card.decision.event.confidence * 100) }}%)</dd></div>
+  </dl>
+  <p class="rationale">{{ card.decision.event.rationale }}</p>
+  <p class="metadata">Decision ID: {{ card.decision.event.decision_id }}</p>
+</section>
+<section class="section-card" aria-labelledby="evidence-heading">
+  <h2 id="evidence-heading">Evidence</h2>
+  {% for group in card.evidence_groups %}<article id="{{ group.anchor }}" class="evidence-group"><h3>{{ group.evidence_id }}</h3><table><tbody>{% for field in group.fields %}<tr><th scope="row">{{ field.field_name }}</th><td><pre>{{ field.display_value }}</pre></td></tr>{% endfor %}</tbody></table></article>{% else %}<p>No evidence was recorded for this decision.</p>{% endfor %}
+</section>
+<section class="section-card" aria-labelledby="alternatives-heading">
+  <h2 id="alternatives-heading">Alternatives considered</h2>
+  {% if card.alternatives %}<ul class="alternatives">{% for alternative in card.alternatives %}<li><strong>{{ alternative.summary }}</strong>{% if alternative.detail %}<pre>{{ alternative.detail }}</pre>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No alternatives were recorded.</p>{% endif %}
+</section>
+<details class="section-card"><summary>Full recommendation data</summary><pre>{{ card.recommendation_detail }}</pre></details>
+<section class="section-card" aria-labelledby="override-heading">
+  <h2 id="override-heading">Operational override</h2>
+  {% if card.override.current %}<p class="status">Current status: {{ card.override.status|title }} by {{ card.override.current.actor }}</p>{% else %}<p class="metadata">No operational override recorded.</p>{% endif %}
+  <form class="form-stack" method="post" action="/decision/{{ card.decision.event.decision_id }}/override"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="idempotency_key" value="{{ idempotency_key }}"><label>Action <select name="action"><option value="accepted">Accept recommendation</option><option value="modified">Modify recommendation</option><option value="rejected">Reject recommendation</option></select></label><label>Modified recommendation JSON <textarea name="modified_value" rows="4" aria-describedby="override-help"></textarea></label><p class="help" id="override-help">Required only when modifying the recommendation. Paste valid JSON.</p><button type="submit">Save override</button></form>
+</section>
+<section class="section-card" aria-labelledby="feedback-heading">
+  <h2 id="feedback-heading">Feedback</h2>
+  <form class="form-stack" method="post" action="/decision/{{ card.decision.event.decision_id }}/feedback"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="idempotency_key" value="{{ idempotency_key }}"><label>Verdict <select name="verdict"><option value="agree">Agree</option><option value="disagree">Disagree</option><option value="uncertain">Uncertain</option></select></label><label>Reason code <input name="reason_code"></label><label>Note <textarea name="free_text" rows="4"></textarea></label><label>Corrected recommendation JSON <textarea name="corrected_recommendation" rows="4"></textarea></label><button type="submit">Save feedback</button></form>
+  {% for item in card.feedback %}<article class="feedback-record"><strong>{{ item.verdict|title }}</strong> <span class="metadata">{{ item.created_at }}</span>{% if item.reason_code %}<p>{{ item.reason_code }}</p>{% endif %}{% if item.free_text %}<p>{{ item.free_text }}</p>{% endif %}{% if item.corrected_recommendation %}<pre>{{ item.corrected_recommendation }}</pre>{% endif %}</article>{% endfor %}
+</section>
 {% endblock %}

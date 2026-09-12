@@ -204,7 +204,7 @@ def test_export_command_writes_one_read_only_card(tmp_path: Path, capsys) -> Non
     capsys.readouterr()
 
     html = target.read_text(encoding="utf-8")
-    assert "Decision Card" in html
+    assert "Decision brief" in html
     assert "Feedback is read-only" in html
     assert "<form" not in html
 

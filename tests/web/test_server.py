@@ -228,6 +228,22 @@ def test_authenticated_decision_and_trace_routes_render_persisted_telemetry(tmp_
     assert "recommendation model" in trace.text
 
 
+def test_decision_card_renders_a_readable_brief_without_python_values(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1")
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get(f"/decision/{decision_id}")
+
+    assert response.status_code == 200
+    assert "Decision brief" in response.text
+    assert "sku · sku-1" in response.text
+    assert "Recommended action" in response.text
+    assert "Inventory is low." in response.text
+    assert "FrozenDict" not in response.text
+    assert "object at 0x" not in response.text
+
+
 def test_missing_decision_and_trace_render_generic_not_found(tmp_path: Path) -> None:
     client = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1")
     client.post("/login", data={"access_token": TOKEN})
