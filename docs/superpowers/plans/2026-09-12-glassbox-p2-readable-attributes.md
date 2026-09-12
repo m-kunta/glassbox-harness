@@ -32,7 +32,7 @@
 - Add value_view(value: object) -> ValueView and recommendation_view(value: object) -> RecommendationView.
 - Change FieldView to own value: ValueView and DecisionCard to own recommendation: RecommendationView.
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 ~~~python
 def test_value_view_formats_scalar_mapping_without_inferred_units() -> None:
@@ -59,13 +59,13 @@ def test_value_view_keeps_nested_data_as_canonical_json() -> None:
 
 Extend the existing Decision Card model test to assert evidence {"units": 0} becomes an AttributeView and recommendation {"action": "order", "threshold": 0.25} becomes RecommendationView("order", (AttributeView("Threshold", "0.25"),), None).
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: .venv/bin/pytest tests/web/test_read_models.py -q
 
 Expected: FAIL because the new models and functions do not exist.
 
-- [ ] **Step 3: Implement the minimal presentation boundary**
+- [x] **Step 3: Implement the minimal presentation boundary**
 
 ~~~python
 @dataclass(frozen=True)
@@ -95,13 +95,13 @@ def value_view(value: object) -> ValueView:
 
 Implement _is_scalar with math.isfinite for floats; _scalar_text returns Yes, No, Not provided, or canonical JSON numeric text; _label returns key.replace("_", " ").title(). recommendation_view reads a string action only from a mapping, removes Action from secondary attributes, and exposes raw_json only for a non-scalar mapping. Build all evidence FieldViews via value_view and the DecisionCard recommendation via recommendation_view.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: .venv/bin/pytest tests/web/test_read_models.py -q
 
 Expected: PASS, including evidence, alternatives, overrides, and trace models.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add glassbox/web/read_models.py tests/web/test_read_models.py
@@ -127,7 +127,7 @@ git commit -m "feat: add agent-neutral attribute display models"
 - Every template selects exactly one ValueView branch: scalar, attributes, or raw JSON.
 - Export uses the same DecisionCard views and contains no export-only presentation code.
 
-- [ ] **Step 1: Write failing cross-surface tests**
+- [x] **Step 1: Write failing cross-surface tests**
 
 ~~~python
 def test_queue_row_uses_the_same_recommendation_view_as_the_card(tmp_path: Path) -> None:
@@ -154,13 +154,13 @@ def test_queue_renders_scalar_recommendation_attributes_not_compact_json(tmp_pat
 
 Use seeded recommendation {"action": "order", "threshold": 0.25} and evidence {"is_estimated": False, "units": 2}. Assert live card and export HTML include Threshold, 0.25, Is Estimated, No, and Units, but not their compact scalar JSON. In the existing export fixture, add nested recommendation {"action": "order", "constraints": {"minimum": 2}} and evidence {"location": {"warehouse": "A"}}; assert canonical fallback JSON is present: {"action":"order","constraints":{"minimum":2}} and {"location":{"warehouse":"A"}}.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: .venv/bin/pytest tests/web/test_read_service.py tests/web/test_server.py tests/web/test_export.py tests/test_cli.py -q
 
 Expected: FAIL because QueueRow still owns recommendation_summary and templates render compact JSON.
 
-- [ ] **Step 3: Implement the one rendering path**
+- [x] **Step 3: Implement the one rendering path**
 
 In ReadService.queue, call recommendation_view on the event recommendation and pass that view to QueueRow. Remove recommendation_summary only after no caller remains.
 
@@ -180,13 +180,13 @@ Use this branch for every evidence value in card and export templates:
 
 Render queue Recommendation as action first, then secondary attributes with the same definition list. For raw recommendation fallback, render a details disclosure containing preformatted JSON. The full-recommendation card/export section uses attributes when present and raw JSON only otherwise. Add compact attribute-list CSS suitable for table cells and cards.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: .venv/bin/pytest tests/web/test_read_service.py tests/web/test_server.py tests/web/test_export.py tests/test_cli.py -q
 
 Expected: PASS, including pagination, feedback, overrides, standalone export, and JSON fallback tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add glassbox/web/read_models.py glassbox/web/read_service.py glassbox/web/templates/queue.html glassbox/web/templates/decision_card.html glassbox/web/templates/decision_export.html glassbox/web/static/glassbox.css tests/web/test_read_service.py tests/web/test_server.py tests/web/test_export.py tests/test_cli.py
@@ -202,7 +202,7 @@ git commit -m "feat: render readable decision attributes"
 - Consumes ValueView and RecommendationView plus all queue/card/export renderers.
 - Produces evidence that the change is ready for browser review.
 
-- [ ] **Step 1: Run the complete quality gate**
+- [x] **Step 1: Run the complete quality gate**
 
 ~~~bash
 .venv/bin/pytest -q
