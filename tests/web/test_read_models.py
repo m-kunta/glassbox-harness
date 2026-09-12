@@ -101,6 +101,22 @@ def test_card_groups_evidence_and_marks_unresolved_citation() -> None:
     assert card.citations[1].diagnostic == "Unresolved evidence citation: demand"
 
 
+def test_card_exposes_json_safe_decision_brief_values() -> None:
+    stored = _stored_decision()
+    evidence = stored.evidence[0].model_copy(update={"field_value": {"units": 0}})
+    decision = stored.event.model_copy(
+        update={"alternatives_considered": [{"action": "wait", "reason": "incoming stock"}]}
+    )
+
+    card = build_decision_card(StoredDecision(decision, (evidence,)), ())
+
+    assert card.entity_label == "sku · sku-1"
+    assert card.recommended_action == "order"
+    assert card.evidence_groups[0].fields[0].display_value == '{"units":0}'
+    assert card.alternatives[0].summary == "Wait — incoming stock"
+    assert "FrozenDict" not in card.evidence_groups[0].fields[0].display_value
+
+
 def test_card_reports_inconsistent_override_history() -> None:
     override = OverrideRecord(
         override_id="01ARZ3NDEKTSV4RRFFQ69G5FAY",

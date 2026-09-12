@@ -29,10 +29,26 @@ class Diagnostic:
 
 
 @dataclass(frozen=True)
+class FieldView:
+    """One JSON-safe evidence field ready for template rendering."""
+
+    field_name: str
+    display_value: str
+
+
+@dataclass(frozen=True)
 class EvidenceGroupView:
     evidence_id: str
     anchor: str
-    fields: tuple[EvidenceEvent, ...]
+    fields: tuple[FieldView, ...]
+
+
+@dataclass(frozen=True)
+class AlternativeView:
+    """A readable rejected alternative with a faithful JSON fallback."""
+
+    summary: str
+    detail: str | None
 
 
 @dataclass(frozen=True)
@@ -63,10 +79,14 @@ class FeedbackView:
 class DecisionCard:
     decision: StoredDecision
     recommendation_summary: str
+    recommendation_detail: str
+    recommended_action: str
+    entity_label: str
     confidence_band: ConfidenceBand
     verdict: str
     evidence_groups: tuple[EvidenceGroupView, ...]
     citations: tuple[CitationView, ...]
+    alternatives: tuple[AlternativeView, ...]
     override: OverrideView
     feedback: tuple[FeedbackView, ...]
     diagnostics: tuple[Diagnostic, ...]
@@ -92,6 +112,7 @@ class QueueRow:
     trace_id: str
     agent_name: str
     decision_type: str
+    entity_label: str
     recommendation_summary: str
     confidence: float
     confidence_band: ConfidenceBand
@@ -134,17 +155,44 @@ def recommendation_summary(recommendation: object, *, limit: int = 160) -> str:
     return text if len(text) <= limit else f"{text[:limit - 1]}…"
 
 
+def _json_display(value: object) -> str:
+    """Format one opaque JSON value for safe, faithful planner display."""
+    return canonical_dumps(value)
+
+
+def _alternative_view(value: object) -> AlternativeView:
+    """Prefer a generic action/reason statement, retaining unknown shapes as JSON."""
+    if isinstance(value, dict) and isinstance(action := value.get("action"), str):
+        reason = value.get("reason")
+        label = action.replace("_", " ").capitalize()
+        if isinstance(reason, str) and reason:
+            return AlternativeView(f"{label} — {reason}", None)
+    return AlternativeView(_json_display(value), None)
+
+
 def build_decision_card(
     decision: StoredDecision,
     overrides: tuple[OverrideRecord, ...],
     feedback: tuple[FeedbackRecord, ...] = (),
 ) -> DecisionCard:
     """Convert a stored decision and override history into a stable card."""
+    event = decision.event.model_dump(mode="json")
+    recommendation = event["recommendation"]
     groups_by_id: dict[str, list[EvidenceEvent]] = {}
     for evidence in decision.evidence:
         groups_by_id.setdefault(evidence.evidence_id, []).append(evidence)
     groups = tuple(
-        EvidenceGroupView(evidence_id, f"evidence-{index}", tuple(fields))
+        EvidenceGroupView(
+            evidence_id,
+            f"evidence-{index}",
+            tuple(
+                FieldView(
+                    field.field_name,
+                    _json_display(field.model_dump(mode="json")["field_value"]),
+                )
+                for field in fields
+            ),
+        )
         for index, (evidence_id, fields) in enumerate(groups_by_id.items())
     )
     anchors = {group.evidence_id: group.anchor for group in groups}
@@ -160,14 +208,23 @@ def build_decision_card(
         Diagnostic(citation.diagnostic) for citation in citations if citation.diagnostic is not None
     )
     band = confidence_band(decision.event.confidence)
-    summary = recommendation_summary(decision.event.recommendation)
+    summary = recommendation_summary(recommendation)
+    recommended_action = (
+        recommendation["action"]
+        if isinstance(recommendation, dict) and isinstance(recommendation.get("action"), str)
+        else "Not specified"
+    )
     return DecisionCard(
         decision,
         summary,
+        _json_display(recommendation),
+        recommended_action,
+        f"{decision.event.entity_type} · {decision.event.entity_id}",
         band,
         f"{summary} — {band.value.title()} ({decision.event.confidence:.2f})",
         groups,
         citations,
+        tuple(_alternative_view(value) for value in event["alternatives_considered"]),
         _override_view(overrides),
         tuple(
             FeedbackView(

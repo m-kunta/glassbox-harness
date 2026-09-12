@@ -76,6 +76,7 @@ class ReadService:
                 trace_id=item.event.trace_id,
                 agent_name=item.event.agent_name,
                 decision_type=item.event.decision_type,
+                entity_label=f"{item.event.entity_type} · {item.event.entity_id}",
                 recommendation_summary=recommendation_summary(item.event.model_dump(mode="json")["recommendation"]),
                 confidence=item.event.confidence,
                 confidence_band=confidence_band(item.event.confidence),

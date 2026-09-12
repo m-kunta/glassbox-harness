@@ -82,6 +82,7 @@ def test_read_service_parses_dates_bands_and_fixed_sort_aliases(tmp_path: Path) 
     )
 
     assert [row.decision_id for row in page.rows] == [DECISION_ID]
+    assert page.rows[0].entity_label == "sku · sku-1"
     with pytest.raises(ValueError, match="sort"):
         service.queue(QueueRequest(sort="confidence; DROP TABLE decisions"))
 
