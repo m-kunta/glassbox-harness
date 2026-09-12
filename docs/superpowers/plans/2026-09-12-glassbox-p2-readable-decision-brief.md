@@ -23,15 +23,18 @@
 
 **Files:**
 - Modify: `glassbox/web/read_models.py:32-72,137-186`
+- Modify: `glassbox/web/read_service.py:73-91`
 - Modify: `tests/web/test_read_models.py:1-110`
+- Modify: `tests/web/test_read_service.py:72-87`
 
 **Interfaces:**
 - Consumes: `StoredDecision.event`, `EvidenceEvent`, `canonical_dumps`.
-- Produces: `FieldView`, `AlternativeView`, and additional `DecisionCard` display fields used by templates.
+- Produces: `FieldView`, `AlternativeView`, additional `DecisionCard` display fields, and `QueueRow.entity_label` used by templates.
 
 - [ ] **Step 1: Write failing model tests**
 
 Add a decision containing nested evidence and an alternative with a reason. Assert that the resulting card exposes `entity_label == "sku · sku-1"`, `recommended_action == "order"`, field JSON without `FrozenDict`, and a readable alternative label.
+Also assert `ReadService.queue(QueueRequest()).rows[0].entity_label == "sku · sku-1"`.
 
 ```python
 def test_card_exposes_json_safe_decision_brief_values() -> None:
@@ -58,7 +61,7 @@ Expected: FAIL because `DecisionCard` lacks the readable display fields and evid
 
 - [ ] **Step 3: Add minimal immutable display models and builders**
 
-Replace event-bearing evidence fields with a `FieldView(field_name: str, display_value: str)`. Add `AlternativeView(summary: str, detail: str | None)`, plus `entity_label`, `recommended_action`, `recommendation_detail`, and `alternatives` to `DecisionCard`. Use `event.model_dump(mode="json")` before inspecting opaque payloads; `canonical_dumps` supplies every JSON fallback.
+Replace event-bearing evidence fields with a `FieldView(field_name: str, display_value: str)`. Add `AlternativeView(summary: str, detail: str | None)`, plus `entity_label`, `recommended_action`, `recommendation_detail`, and `alternatives` to `DecisionCard`. Add `entity_label: str` to `QueueRow`, populated as `f"{item.event.entity_type} · {item.event.entity_id}"` in `ReadService.queue`. Use `event.model_dump(mode="json")` before inspecting opaque payloads; `canonical_dumps` supplies every JSON fallback.
 
 ```python
 @dataclass(frozen=True)

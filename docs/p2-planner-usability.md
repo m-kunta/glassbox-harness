@@ -44,6 +44,10 @@ operational-action scenarios are now part of this P2.5 session. Record each
 result below; P2 passes when at least 18 of the 20 comprehension tasks succeed
 and all five operational actions are completed without unexpected behavior.
 
+Pre-session interface review: confirm the queue identifies each decision by
+type and entity, and every Decision Card visibly exposes its action, rationale,
+readable evidence, and alternatives before recruiting the target planner.
+
 | Operational task | Decision card | Result | Notes |
 | --- | --- | --- | --- |
 | Accept | Pending participant session | Pending | |
