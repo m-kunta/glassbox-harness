@@ -160,6 +160,14 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             status_code=status_code,
         )
 
+    def override_error(request: Request, status_code: int = 400) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"title": "Override not saved", "message": "The override request could not be saved."},
+            status_code=status_code,
+        )
+
     @app.get("/")
     def root(request: Request) -> Response:
         try:
@@ -269,22 +277,22 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         if not _valid_feedback_origin(request, config) or not token_matches(
             csrf_token, request.state.csrf_token
         ):
-            return feedback_error(request)
+            return override_error(request)
         try:
             value = None if not modified_value else json.loads(modified_value)
             submission = _override_submission(
                 decision_id, config.operator_name, action, value, idempotency_key, clock()
             )
         except (ValueError, json.JSONDecodeError):
-            return feedback_error(request)
+            return override_error(request)
         database: Database | None = None
         try:
             database = Database.open(config.database_path)
             Repository(database).record_override(submission)
         except sqlite3.OperationalError:
-            return feedback_error(request, 503)
+            return override_error(request, 503)
         except (ValueError, sqlite3.IntegrityError):
-            return feedback_error(request)
+            return override_error(request)
         finally:
             if database is not None:
                 database.close()

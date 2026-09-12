@@ -329,6 +329,64 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
     assert detail.overrides[0].actor == "local-planner"
 
 
+def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+
+    response = client.post(
+        f"/decision/{decision_id}/override",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "action": "modified",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Override not saved" in response.text
+    assert "Feedback not saved" not in response.text
+
+
+def test_exact_override_post_replay_redirects_without_another_history_row(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+    payload = {
+        "csrf_token": csrf.group(1),
+        "idempotency_key": key.group(1),
+        "action": "accepted",
+    }
+    url = f"/decision/{decision_id}/override"
+
+    first = client.post(url, data=payload, follow_redirects=False)
+    replay = client.post(url, data=payload, follow_redirects=False)
+
+    assert first.status_code == 303
+    assert replay.status_code == 303
+    database = Database.open_read_only(database_path)
+    try:
+        detail = Repository(database).decision_detail(decision_id)
+    finally:
+        database.close()
+    assert detail is not None
+    assert len(detail.overrides) == 1
+
+
 @pytest.mark.parametrize(
     "query",
     ["?sort=bogus", "?from=not-a-date", "?confidence=bogus", "?cursor=not-valid-base64!!"],
