@@ -86,11 +86,13 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
     database = Database.open_read_only(config.database_path)
     database.close()
     templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
+    static_directory = Path(__file__).with_name("static")
+    templates.env.globals["static_version"] = (static_directory / "glassbox.css").stat().st_mtime_ns
     sessions = SessionStore(config.session_idle_timeout, clock=clock)
     app = FastAPI()
     app.state.sessions = sessions
     app.mount(
-        "/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static"
+        "/static", StaticFiles(directory=str(static_directory)), name="static"
     )
 
     @app.middleware("http")

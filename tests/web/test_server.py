@@ -242,6 +242,7 @@ def test_decision_card_renders_a_readable_brief_without_python_values(tmp_path: 
     assert "Inventory is low." in response.text
     assert "FrozenDict" not in response.text
     assert "object at 0x" not in response.text
+    assert re.search(r'href="/static/glassbox\.css\?v=\d+"', response.text)
 
 
 def test_missing_decision_and_trace_render_generic_not_found(tmp_path: Path) -> None:
