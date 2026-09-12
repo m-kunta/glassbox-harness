@@ -7,12 +7,14 @@ import pytest
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store.repository import OverrideRecord, StoredDecision, TraceTree
 from glassbox.web.read_models import (
+    AttributeView,
     ConfidenceBand,
     build_decision_card,
     build_trace_view,
     confidence_band,
     confidence_bounds,
     recommendation_summary,
+    value_view,
 )
 
 TIMESTAMP = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
@@ -92,6 +94,28 @@ def test_recommendation_summary_is_canonical_and_truncated() -> None:
     assert summary.endswith("…")
 
 
+def test_value_view_formats_scalar_mapping_without_inferred_units() -> None:
+    view = value_view(
+        {"is_estimated": False, "notes": None, "threshold": 0.25, "units": 0}
+    )
+
+    assert view.scalar is None
+    assert view.raw_json is None
+    assert view.attributes == (
+        AttributeView("Is Estimated", "No"),
+        AttributeView("Notes", "Not provided"),
+        AttributeView("Threshold", "0.25"),
+        AttributeView("Units", "0"),
+    )
+
+
+def test_value_view_keeps_nested_data_as_canonical_json() -> None:
+    view = value_view({"units": 2, "source": {"warehouse": "A"}})
+
+    assert view.attributes == ()
+    assert view.raw_json == '{"source":{"warehouse":"A"},"units":2}'
+
+
 def test_card_groups_evidence_and_marks_unresolved_citation() -> None:
     card = build_decision_card(_stored_decision(), ())
 
@@ -105,16 +129,19 @@ def test_card_exposes_json_safe_decision_brief_values() -> None:
     stored = _stored_decision()
     evidence = stored.evidence[0].model_copy(update={"field_value": {"units": 0}})
     decision = stored.event.model_copy(
-        update={"alternatives_considered": [{"action": "wait", "reason": "incoming stock"}]}
+        update={
+            "recommendation": {"action": "order", "threshold": 0.25},
+            "alternatives_considered": [{"action": "wait", "reason": "incoming stock"}],
+        }
     )
 
     card = build_decision_card(StoredDecision(decision, (evidence,)), ())
 
     assert card.entity_label == "sku · sku-1"
     assert card.recommended_action == "order"
-    assert card.evidence_groups[0].fields[0].display_value == '{"units":0}'
+    assert card.recommendation.attributes == (AttributeView("Threshold", "0.25"),)
+    assert card.evidence_groups[0].fields[0].value.attributes == (AttributeView("Units", "0"),)
     assert card.alternatives[0].summary == "Wait — incoming stock"
-    assert "FrozenDict" not in card.evidence_groups[0].fields[0].display_value
 
 
 def test_card_reports_inconsistent_override_history() -> None:

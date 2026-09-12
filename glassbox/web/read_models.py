@@ -29,11 +29,37 @@ class Diagnostic:
 
 
 @dataclass(frozen=True)
+class AttributeView:
+    """One readable key/value attribute from an opaque scalar mapping."""
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ValueView:
+    """One opaque value rendered as a scalar, attributes, or raw JSON."""
+
+    scalar: str | None
+    attributes: tuple[AttributeView, ...]
+    raw_json: str | None
+
+
+@dataclass(frozen=True)
+class RecommendationView:
+    """A recommendation's primary action plus neutral secondary attributes."""
+
+    action: str
+    attributes: tuple[AttributeView, ...]
+    raw_json: str | None
+
+
+@dataclass(frozen=True)
 class FieldView:
     """One JSON-safe evidence field ready for template rendering."""
 
     field_name: str
-    display_value: str
+    value: ValueView
 
 
 @dataclass(frozen=True)
@@ -79,6 +105,7 @@ class FeedbackView:
 class DecisionCard:
     decision: StoredDecision
     recommendation_summary: str
+    recommendation: RecommendationView
     recommendation_detail: str
     recommended_action: str
     entity_label: str
@@ -160,6 +187,56 @@ def _json_display(value: object) -> str:
     return canonical_dumps(value)
 
 
+def _is_scalar(value: object) -> bool:
+    return (
+        value is None
+        or isinstance(value, (bool, str, int))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
+
+
+def _scalar_text(value: object) -> str:
+    if value is None:
+        return "Not provided"
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return canonical_dumps(value)
+    raise TypeError("value must be a displayable scalar")
+
+
+def _label(key: str) -> str:
+    return key.replace("_", " ").title()
+
+
+def value_view(value: object) -> ValueView:
+    """Return the sole safe presentation shape for an opaque JSON value."""
+    if _is_scalar(value):
+        return ValueView(_scalar_text(value), (), None)
+    if isinstance(value, dict) and all(_is_scalar(item) for item in value.values()):
+        return ValueView(
+            None,
+            tuple(AttributeView(_label(key), _scalar_text(item)) for key, item in value.items()),
+            None,
+        )
+    return ValueView(None, (), _json_display(value))
+
+
+def recommendation_view(value: object) -> RecommendationView:
+    """Extract a conventional action without inferring semantics for other keys."""
+    display = value_view(value)
+    action = value.get("action") if isinstance(value, dict) else None
+    return RecommendationView(
+        action if isinstance(action, str) else "Not specified",
+        tuple(attribute for attribute in display.attributes if attribute.label != "Action"),
+        display.raw_json,
+    )
+
+
 def _alternative_view(value: object) -> AlternativeView:
     """Prefer a generic action/reason statement, retaining unknown shapes as JSON."""
     if isinstance(value, dict) and isinstance(action := value.get("action"), str):
@@ -186,10 +263,7 @@ def build_decision_card(
             evidence_id,
             f"evidence-{index}",
             tuple(
-                FieldView(
-                    field.field_name,
-                    _json_display(field.model_dump(mode="json")["field_value"]),
-                )
+                FieldView(field.field_name, value_view(field.model_dump(mode="json")["field_value"]))
                 for field in fields
             ),
         )
@@ -209,16 +283,13 @@ def build_decision_card(
     )
     band = confidence_band(decision.event.confidence)
     summary = recommendation_summary(recommendation)
-    recommended_action = (
-        recommendation["action"]
-        if isinstance(recommendation, dict) and isinstance(recommendation.get("action"), str)
-        else "Not specified"
-    )
+    recommendation_display = recommendation_view(recommendation)
     return DecisionCard(
         decision,
         summary,
+        recommendation_display,
         _json_display(recommendation),
-        recommended_action,
+        recommendation_display.action,
         f"{decision.event.entity_type} · {decision.event.entity_id}",
         band,
         f"{summary} — {band.value.title()} ({decision.event.confidence:.2f})",
