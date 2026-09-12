@@ -7,6 +7,7 @@ import pytest
 
 from glassbox.events import DecisionEvent, TraceEvent
 from glassbox.store import Database, Repository
+from glassbox.store.repository import OverrideSubmission
 from glassbox.web.read_service import QueueRequest, ReadService, decode_cursor
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -131,3 +132,47 @@ def test_queue_and_card_agree_on_override_status(
     assert queue_status == expected_status
     assert card is not None
     assert card.override.status == queue_status
+
+
+def test_write_path_and_read_views_agree_after_a_superseding_override(tmp_path: Path) -> None:
+    path = _strict_database_with_decision(tmp_path)
+    database = Database.open(path)
+    try:
+        repository = Repository(database)
+        first = repository.record_override(
+            OverrideSubmission(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+                DECISION_ID,
+                "planner",
+                "accepted",
+                None,
+                None,
+                None,
+                TIMESTAMP,
+                "override-request-one",
+            )
+        )
+        second = repository.record_override(
+            OverrideSubmission(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                DECISION_ID,
+                "planner",
+                "rejected",
+                None,
+                None,
+                None,
+                TIMESTAMP,
+                "override-request-two",
+            )
+        )
+    finally:
+        database.close()
+
+    service = ReadService(path)
+    card = service.decision_card(DECISION_ID)
+
+    assert second.supersedes_override_id == first.override_id
+    assert service.queue(QueueRequest()).rows[0].override_status == "rejected"
+    assert card is not None
+    assert card.override.status == "rejected"
+    assert card.override.current == second

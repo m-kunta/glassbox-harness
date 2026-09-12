@@ -65,11 +65,8 @@ underscores replaced by spaces. Booleans become `Yes` or `No`; `null` becomes
 `Not provided`; strings and numbers keep their underlying value.
 
 The `action` member, when present as a string, is the primary recommendation
-label. A `threshold` member that is a finite number from 0 through 1 is also
-shown as a percentage (`0.25` becomes `25%`) for planner-facing UI. Other
-numbers retain their literal representation. This percentage convention is
-limited to the literal key `threshold`; Glassbox does not infer units for other
-numeric attributes.
+label. Numeric values retain their literal representation; Glassbox does not
+infer units or display conventions from an opaque field name.
 
 The queue shows the primary action plus secondary attributes. The Decision Card
 uses the same attributes for evidence and the full recommendation. Mappings
@@ -85,9 +82,8 @@ opaque unknown values through formatted JSON. HTTP-level tests assert the queue
 and Decision Card render business entity/action/rationale content, readable
 evidence and alternatives, and no `FrozenDict` or object-address text.
 
-Tests additionally prove the `threshold` percentage rule, scalar attribute
-formatting, nested-value JSON fallback, and consistent queue/card/export
-rendering of readable attributes.
+Tests additionally prove scalar attribute formatting, nested-value JSON
+fallback, and consistent queue/card/export rendering of readable attributes.
 
 After automated checks pass, the existing scratch usability session is reopened
 in the browser for a visual review. The P2 planner usability check remains

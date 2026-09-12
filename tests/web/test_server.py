@@ -362,6 +362,79 @@ def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> Non
     assert "Feedback not saved" not in response.text
 
 
+def test_override_for_missing_decision_is_not_found(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+
+    response = client.post(
+        "/decision/not-a-real-decision/override",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "action": "accepted",
+        },
+    )
+
+    assert response.status_code == 404
+    assert "The requested decision was not found." in response.text
+
+
+def test_card_exposes_inconsistent_override_history(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    database = Database.open(database_path)
+    try:
+        with database.connection:
+            database.connection.executemany(
+                """
+                INSERT INTO overrides (
+                    override_id, decision_id, actor, action, modified_value, reason_code,
+                    free_text, created_at, supersedes_override_id, idempotency_key
+                ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?)
+                """,
+                [
+                    (
+                        "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+                        decision_id,
+                        "planner-one",
+                        "accepted",
+                        "first action",
+                        "2026-09-08T12:00:00Z",
+                        "override-one",
+                    ),
+                    (
+                        "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                        decision_id,
+                        "planner-two",
+                        "rejected",
+                        "second action",
+                        "2026-09-08T12:01:00Z",
+                        "override-two",
+                    ),
+                ],
+            )
+    finally:
+        database.close()
+
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    response = client.get(f"/decision/{decision_id}")
+
+    assert response.status_code == 200
+    assert "Inconsistent override history" in response.text
+    assert "Override history" in response.text
+    assert response.text.index("planner-two") < response.text.index("planner-one")
+
+
 def test_exact_override_post_replay_redirects_without_another_history_row(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
     client = TestClient(

@@ -297,7 +297,15 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         database: Database | None = None
         try:
             database = Database.open(config.database_path)
-            Repository(database).record_override(submission)
+            repository = Repository(database)
+            if repository.decision_detail(decision_id) is None:
+                return templates.TemplateResponse(
+                    request,
+                    "error.html",
+                    {"title": "Not found", "message": "The requested decision was not found."},
+                    status_code=404,
+                )
+            repository.record_override(submission)
         except sqlite3.OperationalError:
             return override_error(request, 503)
         except (ValueError, sqlite3.IntegrityError):
