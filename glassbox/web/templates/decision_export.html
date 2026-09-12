@@ -1,1 +1,31 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Decision · Glassbox</title><style>{{ css }}</style></head><body><main><section class="decision-brief"><p class="eyebrow">Decision brief</p><h1>{{ card.decision.event.decision_type|replace('_', ' ')|title }}</h1>{% if live_url %}<p><a href="{{ live_url }}">Open live Decision Card</a></p>{% endif %}<dl class="fact-grid"><div><dt>Entity</dt><dd>{{ card.entity_label }}</dd></div><div><dt>Recommended action</dt><dd>{{ card.recommended_action|replace('_', ' ')|title }}</dd></div><div><dt>Confidence</dt><dd>{{ card.confidence_band.value|title }} ({{ "%.0f"|format(card.decision.event.confidence * 100) }}%)</dd></div></dl><p class="rationale">{{ card.decision.event.rationale }}</p></section><section class="section-card"><h2>Evidence</h2>{% for group in card.evidence_groups %}<article><h3>{{ group.evidence_id }}</h3><table>{% for field in group.fields %}<tr><th>{{ field.field_name }}</th><td><pre>{{ field.display_value }}</pre></td></tr>{% endfor %}</table></article>{% endfor %}</section><section class="section-card"><h2>Alternatives considered</h2>{% if card.alternatives %}<ul class="alternatives">{% for alternative in card.alternatives %}<li><strong>{{ alternative.summary }}</strong>{% if alternative.detail %}<pre>{{ alternative.detail }}</pre>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No alternatives were recorded.</p>{% endif %}</section><details class="section-card"><summary>Full recommendation data</summary><pre>{{ card.recommendation_detail }}</pre></details><section class="section-card"><h2>Feedback is read-only</h2>{% for item in card.feedback %}<article><p>{{ item.verdict }} · {{ item.created_at }}</p>{% if item.reason_code %}<p>{{ item.reason_code }}</p>{% endif %}{% if item.free_text %}<p>{{ item.free_text }}</p>{% endif %}{% if item.corrected_recommendation %}<pre>{{ item.corrected_recommendation }}</pre>{% endif %}</article>{% endfor %}</section></main></body></html>
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Decision · Glassbox</title><style>{{ css }}</style></head>
+<body><main>
+<section class="decision-brief">
+  <p class="eyebrow">Decision brief</p>
+  <h1>{{ card.decision.event.decision_type|replace('_', ' ')|title }}</h1>
+  {% if live_url %}<p><a href="{{ live_url }}">Open live Decision Card</a></p>{% endif %}
+  <dl class="fact-grid">
+    <div><dt>Entity</dt><dd>{{ card.entity_label }}</dd></div>
+    <div><dt>Recommended action</dt><dd>{{ card.recommended_action|replace('_', ' ')|title }}</dd></div>
+    <div><dt>Confidence</dt><dd>{{ card.confidence_band.value|title }} ({{ "%.0f"|format(card.decision.event.confidence * 100) }}%)</dd></div>
+  </dl>
+  <p class="rationale">{{ card.decision.event.rationale }}</p>
+</section>
+<section class="section-card">
+  <h2>Evidence</h2>
+  {% for group in card.evidence_groups %}
+  <article><h3>{{ group.evidence_id }}</h3><table>{% for field in group.fields %}<tr><th>{{ field.field_name }}</th><td>{% if field.value.scalar is not none %}{{ field.value.scalar }}{% elif field.value.attributes %}<dl class="attribute-list">{% for attribute in field.value.attributes %}<div><dt>{{ attribute.label }}</dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl>{% else %}<pre>{{ field.value.raw_json }}</pre>{% endif %}</td></tr>{% endfor %}</table></article>
+  {% endfor %}
+</section>
+<section class="section-card">
+  <h2>Alternatives considered</h2>
+  {% if card.alternatives %}<ul class="alternatives">{% for alternative in card.alternatives %}<li><strong>{{ alternative.summary }}</strong>{% if alternative.detail %}<pre>{{ alternative.detail }}</pre>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No alternatives were recorded.</p>{% endif %}
+</section>
+<details class="section-card"><summary>Full recommendation data</summary>{% if card.recommendation.attributes %}<dl class="attribute-list">{% for attribute in card.recommendation.attributes %}<div><dt>{{ attribute.label }}</dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl>{% elif card.recommendation.raw_json %}<pre>{{ card.recommendation.raw_json }}</pre>{% else %}<p>No secondary recommendation attributes were recorded.</p>{% endif %}</details>
+<section class="section-card">
+  <h2>Feedback is read-only</h2>
+  {% for item in card.feedback %}<article><p>{{ item.verdict }} · {{ item.created_at }}</p>{% if item.reason_code %}<p>{{ item.reason_code }}</p>{% endif %}{% if item.free_text %}<p>{{ item.free_text }}</p>{% endif %}{% if item.corrected_recommendation %}<pre>{{ item.corrected_recommendation }}</pre>{% endif %}</article>{% endfor %}
+</section>
+</main></body></html>

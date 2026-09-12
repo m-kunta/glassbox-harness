@@ -22,7 +22,7 @@ from .read_models import (
     build_trace_view,
     confidence_band,
     confidence_bounds,
-    recommendation_summary,
+    recommendation_view,
 )
 
 _SORT_ALIASES: dict[str, QueueSort] = {"timestamp": "decided_at", "confidence": "confidence"}
@@ -77,7 +77,9 @@ class ReadService:
                 agent_name=item.event.agent_name,
                 decision_type=item.event.decision_type,
                 entity_label=f"{item.event.entity_type} · {item.event.entity_id}",
-                recommendation_summary=recommendation_summary(item.event.model_dump(mode="json")["recommendation"]),
+                recommendation=recommendation_view(
+                    item.event.model_dump(mode="json")["recommendation"]
+                ),
                 confidence=item.event.confidence,
                 confidence_band=confidence_band(item.event.confidence),
                 decided_at=item.event.model_dump(mode="json")["decided_at"],

@@ -140,7 +140,7 @@ class QueueRow:
     agent_name: str
     decision_type: str
     entity_label: str
-    recommendation_summary: str
+    recommendation: RecommendationView
     confidence: float
     confidence_band: ConfidenceBand
     decided_at: str
@@ -263,7 +263,10 @@ def build_decision_card(
             evidence_id,
             f"evidence-{index}",
             tuple(
-                FieldView(field.field_name, value_view(field.model_dump(mode="json")["field_value"]))
+                FieldView(
+                    field.field_name,
+                    value_view(field.model_dump(mode="json")["field_value"]),
+                )
                 for field in fields
             ),
         )

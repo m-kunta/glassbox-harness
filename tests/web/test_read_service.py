@@ -88,6 +88,17 @@ def test_read_service_parses_dates_bands_and_fixed_sort_aliases(tmp_path: Path) 
         service.queue(QueueRequest(sort="confidence; DROP TABLE decisions"))
 
 
+def test_queue_row_uses_the_same_recommendation_view_as_the_card(tmp_path: Path) -> None:
+    service = ReadService(_strict_database_with_decision(tmp_path))
+
+    row = service.queue(QueueRequest()).rows[0]
+    card = service.decision_card(DECISION_ID)
+
+    assert card is not None
+    assert row.recommendation == card.recommendation
+    assert row.recommendation.action == "order"
+
+
 def test_decode_cursor_rejects_unknown_keys_and_wrong_sort_value_type() -> None:
     with pytest.raises(ValueError, match="cursor"):
         decode_cursor("eyJ2YWx1ZSI6Im5vdC1hLWZsb2F0IiwiZGVjaXNpb25faWQiOiJ4In0", "confidence")

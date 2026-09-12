@@ -10,7 +10,11 @@ from glassbox.web.export import ExportError, render_decision_export, write_decis
 from glassbox.web.read_models import build_decision_card
 
 
-def _card():
+def _card(
+    *,
+    recommendation: object = {"action": "order", "threshold": 0.25},
+    evidence_value: object = {"is_estimated": False, "units": 2},
+):
     decision = DecisionEvent(
         decision_id="01ARZ3NDEKTSV4RRFFQ69G5FAX",
         trace_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -19,7 +23,7 @@ def _card():
         entity_type="sku",
         entity_id="sku-1",
         decision_type="replenish",
-        recommendation={"action": "order"},
+        recommendation=recommendation,
         rationale="<script>unsafe</script>",
         rationale_citations=(),
         confidence=0.8,
@@ -32,7 +36,7 @@ def _card():
         source_system="erp",
         source_ref="sku-1",
         field_name="available_units",
-        field_value={"units": 2},
+        field_value=evidence_value,
         weight=1.0,
         retrieved_at=decision.decided_at,
     )
@@ -48,8 +52,25 @@ def test_export_is_standalone_read_only_and_escaped() -> None:
     assert "<script" not in html
     assert 'href="/static/' not in html
     assert "&lt;script&gt;unsafe&lt;/script&gt;" in html
-    assert '{&#34;units&#34;:2}' in html
+    assert "Threshold" in html
+    assert "0.25" in html
+    assert "Is Estimated" in html
+    assert "No" in html
+    assert '{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}' not in html
     assert "FrozenDict" not in html
+
+
+def test_export_preserves_nested_values_as_canonical_json() -> None:
+    html = render_decision_export(
+        _card(
+            recommendation={"action": "order", "constraints": {"minimum": 2}},
+            evidence_value={"location": {"warehouse": "A"}},
+        ),
+        None,
+    )
+
+    assert '{&#34;action&#34;:&#34;order&#34;,&#34;constraints&#34;:{&#34;minimum&#34;:2}}' in html
+    assert '{&#34;location&#34;:{&#34;warehouse&#34;:&#34;A&#34;}}' in html
 
 
 def test_export_writer_requires_explicit_overwrite(tmp_path) -> None:

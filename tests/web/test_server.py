@@ -71,7 +71,7 @@ def seeded_database(tmp_path: Path) -> tuple[Path, str, str]:
                 entity_type="sku",
                 entity_id="sku-1",
                 decision_type="replenish",
-                recommendation={"action": "order"},
+                recommendation={"action": "order", "threshold": 0.25},
                 rationale="Inventory is low.",
                 rationale_citations=("inventory",),
                 confidence=0.8,
@@ -86,7 +86,7 @@ def seeded_database(tmp_path: Path) -> tuple[Path, str, str]:
                 source_system="erp",
                 source_ref="inventory/sku-1",
                 field_name="available_units",
-                field_value=2,
+                field_value={"is_estimated": False, "units": 2},
                 weight=1.0,
                 retrieved_at=timestamp,
             )
@@ -240,6 +240,11 @@ def test_decision_card_renders_a_readable_brief_without_python_values(tmp_path: 
     assert "sku · sku-1" in response.text
     assert "Recommended action" in response.text
     assert "Inventory is low." in response.text
+    assert "Threshold" in response.text
+    assert "0.25" in response.text
+    assert "Is Estimated" in response.text
+    assert "No" in response.text
+    assert '{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}' not in response.text
     assert "FrozenDict" not in response.text
     assert "object at 0x" not in response.text
     assert re.search(r'href="/static/glassbox\.css\?v=\d+"', response.text)

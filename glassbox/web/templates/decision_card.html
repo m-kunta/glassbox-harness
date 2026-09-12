@@ -14,13 +14,13 @@
 </section>
 <section class="section-card" aria-labelledby="evidence-heading">
   <h2 id="evidence-heading">Evidence</h2>
-  {% for group in card.evidence_groups %}<article id="{{ group.anchor }}" class="evidence-group"><h3>{{ group.evidence_id }}</h3><table><tbody>{% for field in group.fields %}<tr><th scope="row">{{ field.field_name }}</th><td><pre>{{ field.display_value }}</pre></td></tr>{% endfor %}</tbody></table></article>{% else %}<p>No evidence was recorded for this decision.</p>{% endfor %}
+  {% for group in card.evidence_groups %}<article id="{{ group.anchor }}" class="evidence-group"><h3>{{ group.evidence_id }}</h3><table><tbody>{% for field in group.fields %}<tr><th scope="row">{{ field.field_name }}</th><td>{% if field.value.scalar is not none %}{{ field.value.scalar }}{% elif field.value.attributes %}<dl class="attribute-list">{% for attribute in field.value.attributes %}<div><dt>{{ attribute.label }}</dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl>{% else %}<pre>{{ field.value.raw_json }}</pre>{% endif %}</td></tr>{% endfor %}</tbody></table></article>{% else %}<p>No evidence was recorded for this decision.</p>{% endfor %}
 </section>
 <section class="section-card" aria-labelledby="alternatives-heading">
   <h2 id="alternatives-heading">Alternatives considered</h2>
   {% if card.alternatives %}<ul class="alternatives">{% for alternative in card.alternatives %}<li><strong>{{ alternative.summary }}</strong>{% if alternative.detail %}<pre>{{ alternative.detail }}</pre>{% endif %}</li>{% endfor %}</ul>{% else %}<p>No alternatives were recorded.</p>{% endif %}
 </section>
-<details class="section-card"><summary>Full recommendation data</summary><pre>{{ card.recommendation_detail }}</pre></details>
+<details class="section-card"><summary>Full recommendation data</summary>{% if card.recommendation.attributes %}<dl class="attribute-list">{% for attribute in card.recommendation.attributes %}<div><dt>{{ attribute.label }}</dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl>{% elif card.recommendation.raw_json %}<pre>{{ card.recommendation.raw_json }}</pre>{% else %}<p>No secondary recommendation attributes were recorded.</p>{% endif %}</details>
 <section class="section-card" aria-labelledby="override-heading">
   <h2 id="override-heading">Operational override</h2>
   {% if card.override.status == "inconsistent" %}
