@@ -273,6 +273,8 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         idempotency_key: Annotated[str, Form()],
         action: Annotated[str, Form()],
         modified_value: Annotated[str | None, Form()] = None,
+        reason_code: Annotated[str | None, Form()] = None,
+        free_text: Annotated[str | None, Form()] = None,
     ) -> Response:
         if not _valid_feedback_origin(request, config) or not token_matches(
             csrf_token, request.state.csrf_token
@@ -281,7 +283,14 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         try:
             value = None if not modified_value else json.loads(modified_value)
             submission = _override_submission(
-                decision_id, config.operator_name, action, value, idempotency_key, clock()
+                decision_id,
+                config.operator_name,
+                action,
+                value,
+                reason_code,
+                free_text,
+                idempotency_key,
+                clock(),
             )
         except (ValueError, json.JSONDecodeError):
             return override_error(request)
@@ -387,9 +396,18 @@ def _override_submission(
     actor: str,
     action: str,
     modified_value: object | None,
+    reason_code: str | None,
+    free_text: str | None,
     idempotency_key: str,
     created_at: datetime,
 ) -> OverrideSubmission:
+    if (
+        len(action) > _MAX_VERDICT_LENGTH
+        or not idempotency_key
+        or (reason_code is not None and len(reason_code) > _MAX_REASON_CODE_LENGTH)
+        or (free_text is not None and len(free_text) > _MAX_FREE_TEXT_LENGTH)
+    ):
+        raise ValueError("invalid override form")
     value = (int(created_at.timestamp() * 1_000) << 80) | secrets.randbits(80)
     alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
     override_id = "".join(alphabet[(value >> (5 * index)) & 31] for index in range(25, -1, -1))
@@ -399,8 +417,8 @@ def _override_submission(
         actor,
         cast(Literal["accepted", "modified", "rejected"], action),
         modified_value,
-        None,
-        None,
+        reason_code or None,
+        free_text or None,
         created_at,
         idempotency_key,
     )

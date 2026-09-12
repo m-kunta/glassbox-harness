@@ -314,6 +314,8 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
             "idempotency_key": key.group(1),
             "action": "modified",
             "modified_value": '{"action":"hold"}',
+            "reason_code": "inventory-review",
+            "free_text": "Hold until the next inbound shipment is confirmed.",
         },
         follow_redirects=False,
     )
@@ -327,6 +329,11 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
     assert detail is not None
     assert detail.overrides[0].action == "modified"
     assert detail.overrides[0].actor == "local-planner"
+    assert detail.overrides[0].reason_code == "inventory-review"
+    assert detail.overrides[0].free_text == "Hold until the next inbound shipment is confirmed."
+    rendered = client.get(f"/decision/{decision_id}")
+    assert "inventory-review" in rendered.text
+    assert "Hold until the next inbound shipment is confirmed." in rendered.text
 
 
 def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> None:
