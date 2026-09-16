@@ -30,7 +30,7 @@
 - Produces a checklist link to the invitation and a clear statement that P2.4 is pending until the checklist records a real session.
 - Does not change runtime code or the TODO completion state.
 
-- [ ] **Step 1: Write the failing documentation assertions**
+- [x] **Step 1: Write the failing documentation assertions**
 
 Run the following checks before adding the invitation:
 
@@ -41,7 +41,7 @@ rg -n '<LOCAL_LOGIN_URL>|<TEMPORARY_ACCESS_TOKEN>' docs/p2-planner-usability-inv
 
 Expected: both commands fail because the handoff invitation does not exist.
 
-- [ ] **Step 2: Create the copyable facilitator invitation**
+- [x] **Step 2: Create the copyable facilitator invitation**
 
 Create docs/p2-planner-usability-invitation.md with these exact sections:
 
@@ -76,7 +76,7 @@ During the session, complete these operational actions once each: accept, modify
 P2.4 passes only after an actual target planner completes at least 18 of 20 comprehension tasks unaided and all five operational actions without unexpected behavior.
 ~~~
 
-- [ ] **Step 3: Link the checklist to the invitation**
+- [x] **Step 3: Link the checklist to the invitation**
 
 Under the Facilitator setup heading in docs/p2-planner-usability.md, add:
 
@@ -88,7 +88,7 @@ control; never commit them.
 
 Retain every Pending participant session cell and the existing P2.4 unchecked TODO item.
 
-- [ ] **Step 4: Verify the handoff package**
+- [x] **Step 4: Verify the handoff package**
 
 Run:
 
@@ -101,7 +101,7 @@ git diff --check
 
 Expected: invitation and canonical checklist contain the required protocol; TODO confirms P2.4 remains unchecked; no whitespace errors occur.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add docs/p2-planner-usability.md docs/p2-planner-usability-invitation.md
