@@ -2,6 +2,10 @@
 
 ## Facilitator setup
 
+Use the copyable [facilitator invitation](p2-planner-usability-invitation.md)
+to invite the participant. Replace its two placeholders only outside version
+control; never commit them.
+
 Use a non-production Glassbox database containing at least five representative
 decisions. Start the local server with a temporary access token and an operator
 label, then give the participant the login URL and token only:
