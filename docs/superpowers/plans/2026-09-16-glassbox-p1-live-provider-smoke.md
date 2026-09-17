@@ -40,7 +40,7 @@ AI-driven-replenishment-exception-triage-agent/
 - Consumes: existing golden files under `goldens/replenishment_triage/cases/`; `GoldenCase`; `DecisionResult`; `evaluate_deterministic`.
 - Produces: `SMOKE_CASE_FILES: tuple[str, ...]`, `load_smoke_cases(root: Path) -> tuple[GoldenCase, ...]`, `run_smoke(cases: tuple[GoldenCase, ...], *, config: AppConfig) -> dict[str, object]`, and `main(argv: list[str] | None = None) -> int`.
 
-- [ ] **Step 1: Write failing profile and canonical-report tests**
+- [x] **Step 1: Write failing profile and canonical-report tests**
 
 ```python
 # tests/test_live_eval_smoke.py
@@ -89,13 +89,13 @@ def test_report_is_canonical_and_marks_cost_unavailable(monkeypatch: pytest.Monk
     assert json.dumps(report, sort_keys=True, separators=(",", ":")) == smoke.canonical_json(report)
 ```
 
-- [ ] **Step 2: Run the focused tests to verify they fail**
+- [x] **Step 2: Run the focused tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_live_eval_smoke.py -v`
 
 Expected: FAIL because `load_smoke_cases`, `run_smoke`, and `canonical_json` do not exist and the legacy command requires `--case`.
 
-- [ ] **Step 3: Implement the fixed profile and pure reporting helpers**
+- [x] **Step 3: Implement the fixed profile and pure reporting helpers**
 
 Replace the `--case` argument with no required case argument. Define the fixed relative paths and path-safe loader:
 
@@ -145,13 +145,13 @@ Add `run_smoke` so it loads the existing recommendation schema once, calls
 Use a small local `_percentile` helper or `glassbox.eval.metrics.operational_metrics`
 only for latency/token fields; do not pass a fabricated `cost_usd: 0.0` value.
 
-- [ ] **Step 4: Run focused tests to verify they pass**
+- [x] **Step 4: Run focused tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_live_eval_smoke.py -v`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the first deliverable**
+- [x] **Step 5: Commit the first deliverable**
 
 ```bash
 git add scripts/run_live_eval_smoke.py tests/test_live_eval_smoke.py
@@ -168,7 +168,7 @@ git commit -m "feat: add bounded live evaluation smoke profile"
 - Consumes: `GoldenCase`, one validated `AppConfig` from `load_config`, the real `TriageAgent`, and persisted `Repository.trace_tree` decision records.
 - Produces: `run_live_case(case: GoldenCase, *, config: AppConfig) -> DecisionResult`; `main` prints the canonical report and returns `0` only when every case is structurally valid and error-free.
 
-- [ ] **Step 1: Add failing continuation and status tests**
+- [x] **Step 1: Add failing continuation and status tests**
 
 ```python
 def test_smoke_continues_after_one_case_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +207,7 @@ def test_main_returns_one_when_a_reported_case_is_not_clean(
     assert json.loads(capsys.readouterr().out)["cases"][0]["case_id"] == "x"
 ```
 
-- [ ] **Step 2: Run focused tests to verify they fail**
+- [x] **Step 2: Run focused tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_live_eval_smoke.py -v`
 
@@ -215,7 +215,7 @@ Expected: FAIL because the legacy execution returns an opaque recommendation
 instead of a `DecisionResult`, aborts on the first exception, and always
 returns `0` after one run.
 
-- [ ] **Step 3: Extract the existing live execution into `run_live_case`**
+- [x] **Step 3: Extract the existing live execution into `run_live_case`**
 
 Move the current real `TriageAgent(config).run([exception])` lifecycle into:
 
@@ -251,14 +251,14 @@ Call `config = load_config(arguments.config)` and
 check, then call `run_smoke(cases, config=config)`. Print `canonical_json(report)`. Return `1` when
 any `error` is non-null or any check is false; otherwise return `0`.
 
-- [ ] **Step 4: Run the focused smoke-script tests**
+- [x] **Step 4: Run the focused smoke-script tests**
 
 Run: `.venv/bin/pytest tests/test_live_eval_smoke.py -v`
 
 Expected: PASS with no provider network call because every real execution is
 replaced by a test double.
 
-- [ ] **Step 5: Commit the execution behavior**
+- [x] **Step 5: Commit the execution behavior**
 
 ```bash
 git add scripts/run_live_eval_smoke.py tests/test_live_eval_smoke.py
@@ -275,7 +275,7 @@ git commit -m "feat: report live evaluation smoke outcomes"
 - Consumes: `scripts/run_live_eval_smoke.py` with no user-supplied case argument.
 - Produces: a safe, copyable manual smoke command and regression coverage that CI-facing deterministic evaluation is untouched.
 
-- [ ] **Step 1: Add failing documentation/isolation tests**
+- [x] **Step 1: Add failing documentation/isolation tests**
 
 ```python
 def test_live_smoke_script_is_not_a_manifest_target() -> None:
@@ -287,13 +287,13 @@ def test_live_smoke_script_is_not_a_manifest_target() -> None:
 Add an assertion that the README contains both the exact opt-in variable and
 the script command.
 
-- [ ] **Step 2: Run focused tests to verify the README assertion fails**
+- [x] **Step 2: Run focused tests to verify the README assertion fails**
 
 Run: `.venv/bin/pytest tests/test_live_eval_smoke.py -v`
 
 Expected: FAIL because the README has no live-evaluation smoke section.
 
-- [ ] **Step 3: Add concise README guidance**
+- [x] **Step 3: Add concise README guidance**
 
 Under a new **Run the optional live-provider Glassbox smoke** subsection, add:
 
@@ -307,7 +307,7 @@ LIVE_EVAL_ENABLED=1 .venv/bin/python scripts/run_live_eval_smoke.py
 State that nonzero means one or more live cases errored or failed a structural
 assertion; it does not change deterministic suite gates.
 
-- [ ] **Step 4: Run focused tests and the existing deterministic evaluation suite**
+- [x] **Step 4: Run focused tests and the existing deterministic evaluation suite**
 
 Run:
 
@@ -319,7 +319,7 @@ Run:
 Expected: all tests pass; deterministic command exits `0` without requiring
 `LIVE_EVAL_ENABLED` or any provider credential.
 
-- [ ] **Step 5: Commit documentation and isolation proof**
+- [x] **Step 5: Commit documentation and isolation proof**
 
 ```bash
 git add README.md tests/test_live_eval_smoke.py
@@ -328,9 +328,9 @@ git commit -m "docs: explain optional live evaluation smoke"
 
 ## Final verification
 
-- [ ] Run `.venv/bin/pytest tests/test_live_eval_smoke.py tests/test_replenishment_evaluation.py -v` and expect success.
-- [ ] Run `.venv/bin/python -m glassbox.cli eval --suite goldens/replenishment_triage/manifest.yaml` with no `LIVE_EVAL_ENABLED` and no provider credential; expect exit `0`.
-- [ ] Run `.venv/bin/python scripts/run_live_eval_smoke.py` with `LIVE_EVAL_ENABLED` absent; expect exit `2` before provider configuration is loaded.
+- [x] Run `.venv/bin/pytest tests/test_live_eval_smoke.py tests/test_replenishment_evaluation.py -v` and expect success.
+- [x] Run `.venv/bin/python -m glassbox.cli eval --suite goldens/replenishment_triage/manifest.yaml` with no `LIVE_EVAL_ENABLED` and no provider credential; expect exit `0`.
+- [x] Run `.venv/bin/python scripts/run_live_eval_smoke.py` with `LIVE_EVAL_ENABLED` absent; expect exit `2` before provider configuration is loaded.
 - [ ] With intentionally configured non-production provider credentials, run `LIVE_EVAL_ENABLED=1 .venv/bin/python scripts/run_live_eval_smoke.py`; inspect one canonical JSON document with five case IDs, per-case checks/errors, token/latency metrics, and `null` cost metrics. This manual command is the only step allowed to contact a provider.
 
 ## Plan self-review

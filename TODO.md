@@ -66,7 +66,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Create the 40-case balanced golden set.
 - [x] Implement suite gates and CI-compatible exit codes.
 - [x] Sanity-check the source-specification `urgency_agreement >= 0.6` gate against the completed 40-case suite using the approved linear weighted-kappa calculation; the scripted suite observed `1.0`, so the `0.6` threshold remains unchanged pending live-provider calibration.
-- [ ] Add a non-blocking live-provider smoke mode that reuses the scripted suite contract and cases; keep it outside the deterministic CI gate until its credentials, cost controls, and nondeterminism policy are approved.
+- [x] Add a non-blocking live-provider smoke mode that reuses the scripted suite contract and cases; keep it outside the deterministic CI gate until its credentials, cost controls, and nondeterminism policy are approved.
 - [ ] During P1.3 authoring, inspect the initial do-nothing cases for evidence or alternatives added only to satisfy the uniform evaluation floor; strengthen real-agent reasoning requirements if padding appears, without category exemptions.
 
 ## P2 — Decision Cards and feedback (blocked by P1)
