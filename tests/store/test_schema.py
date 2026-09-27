@@ -883,14 +883,11 @@ def test_judge_run_requires_complete_provenance_and_decision_result(tmp_path: Pa
         ("judge_model", None),
         ("rubric_version", None),
         ("judge_temperature", 0.2),
-        # A NULL self_judge_allowed/judge_failure_count is not explicitly
-        # rejected here: SQLite's CHECK treats an expression that evaluates to
-        # NULL (rather than false) as satisfied, and `NULL IN (0, 1)` /
-        # `NULL >= 0` both evaluate to NULL. Only an out-of-range *value*
-        # trips the CHECK, matching the plan's literal constraint text.
+        ("self_judge_allowed", None),
         ("self_judge_allowed", 2),
         ("status", "unknown"),
         ("status_reason", None),
+        ("judge_failure_count", None),
         ("judge_failure_count", -1),
     ):
         incomplete_judge_run = dict(complete_judge_run) | {

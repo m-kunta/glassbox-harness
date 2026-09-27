@@ -210,8 +210,10 @@ CREATE TABLE IF NOT EXISTS eval_runs (
       OR
       (run_kind = 'judge' AND judge_provider IS NOT NULL AND judge_model IS NOT NULL
        AND rubric_version IS NOT NULL AND judge_temperature = 0
-       AND self_judge_allowed IN (0, 1) AND status IN ('passed', 'failed', 'uncalibrated')
-       AND status_reason IS NOT NULL AND judge_failure_count >= 0)
+       AND self_judge_allowed IS NOT NULL AND self_judge_allowed IN (0, 1)
+       AND status IN ('passed', 'failed', 'uncalibrated')
+       AND status_reason IS NOT NULL
+       AND judge_failure_count IS NOT NULL AND judge_failure_count >= 0)
     )
 );
 
