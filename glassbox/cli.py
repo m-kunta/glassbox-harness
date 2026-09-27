@@ -102,9 +102,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         decided_since = datetime.now(UTC) - arguments.since
         try:
-            candidates = Repository(Database.open(database_path)).judge_candidates(
-                cohort, decided_since
-            )
+            preflight_database = Database.open(database_path)
+            try:
+                candidates = Repository(preflight_database).judge_candidates(
+                    cohort, decided_since
+                )
+            finally:
+                preflight_database.close()
         except (OSError, sqlite3.Error) as exc:
             print(f"glassbox: unable to read judge candidates: {exc}", file=sys.stderr)
             return 2
