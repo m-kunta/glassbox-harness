@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
@@ -257,3 +261,316 @@ def test_eval_command_prints_result_and_returns_gate_status(tmp_path: Path, caps
 
     assert main(["eval", "--suite", str(manifest)]) == 0
     assert json.loads(capsys.readouterr().out)["gates"]["passed"] is True
+
+
+# --- `judge` command -------------------------------------------------------
+
+_LOOPBACK_CONFIG_ARGS = dict(
+    provider="ollama",
+    model="llama3",
+    credential=None,
+    base_url="http://127.0.0.1:11434",
+    is_remote=False,
+)
+
+_REMOTE_CONFIG_ARGS = dict(
+    provider="openai",
+    model="gpt-4o",
+    credential="test-secret",
+    base_url="https://api.openai.com/v1",
+    is_remote=True,
+)
+
+
+@dataclass(frozen=True)
+class _FakeJudgeReport:
+    """A minimal stand-in for `JudgeReport`: only `status`/`to_dict()` are used by the CLI."""
+
+    status: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {"status": self.status, "reason": "fake"}
+
+
+def _patch_judge_config(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
+    from glassbox.eval.judge_config import JudgeConfig
+
+    values = dict(_LOOPBACK_CONFIG_ARGS)
+    values.update(overrides)
+    config = JudgeConfig(**values)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "glassbox.eval.judge_config.load_judge_config",
+        lambda project_root, environ: config,
+    )
+
+
+def _patch_judge_config_error(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+    from glassbox.eval.judge_config import JudgeConfigError
+
+    def _raise(project_root: Path, environ: object) -> None:
+        raise JudgeConfigError(message)
+
+    monkeypatch.setattr("glassbox.eval.judge_config.load_judge_config", _raise)
+
+
+def _patch_run_judge(
+    monkeypatch: pytest.MonkeyPatch, report: _FakeJudgeReport
+) -> list[tuple[object, ...]]:
+    calls: list[tuple[object, ...]] = []
+
+    def fake_run_judge(database_path, config, since, max_cases, allow_self_judge):  # type: ignore[no-untyped-def]
+        calls.append((database_path, config, since, max_cases, allow_self_judge))
+        return report
+
+    monkeypatch.setattr("glassbox.eval.judge.run_judge", fake_run_judge)
+    return calls
+
+
+def test_serve_export_and_eval_never_import_the_judge_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """`glassbox.eval.judge` pulls in the optional `dotenv` dependency and the
+    judge/provider/egress stack; `serve`, `export`, and `eval` must never
+    trigger loading it. Setting the sys.modules entry to `None` makes any
+    attempted `import glassbox.eval.judge` raise `ImportError` immediately,
+    so this test fails loudly if a future change adds such an import."""
+    monkeypatch.setitem(sys.modules, "glassbox.eval.judge", None)
+
+    from glassbox.cli import main
+
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = _repository_with_trace(database_path)
+    database.close()
+
+    assert main(["serve", "--host", "127.0.0.1", "--port", "8787"]) == 2
+    capsys.readouterr()
+
+    output_path = tmp_path / "card.html"
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "export",
+                "--decision",
+                DECISION_ID,
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    import yaml
+
+    (tmp_path / "schema.json").write_text('{"type":"object","required":["urgency","action"]}')
+    (tmp_path / "case.yaml").write_text(
+        yaml.safe_dump({"case_id": "case-001", "input": {}, "expected_labels": {"urgency": "HIGH"}})
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "target": "tests.eval.runner_target:run_case",
+                "schema": "schema.json",
+                "cases": ["case.yaml"],
+                "gates": {"deterministic_pass_rate": 1.0},
+            }
+        )
+    )
+    assert main(["eval", "--suite", str(manifest)]) == 0
+
+
+def test_judge_command_returns_zero_for_an_uncalibrated_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert main(["judge", "--since", "7d"]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "uncalibrated"
+    assert len(calls) == 1
+
+
+def test_judge_command_returns_one_for_uncalibrated_when_calibration_is_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert main(["judge", "--since", "7d", "--require-calibrated"]) == 1
+    capsys.readouterr()
+
+
+def test_judge_command_returns_one_for_a_calibrated_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge(monkeypatch, _FakeJudgeReport(status="failed"))
+
+    assert main(["judge", "--since", "7d"]) == 1
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "failed"
+
+
+def test_judge_command_returns_two_on_a_preflight_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config_error(monkeypatch, "GLASSBOX_JUDGE_PROVIDER is required")
+
+    assert main(["judge", "--since", "7d"]) == 2
+
+    error = capsys.readouterr().err
+    assert "GLASSBOX_JUDGE_PROVIDER is required" in error
+
+
+def test_judge_command_passed_status_and_a_calibrated_run_return_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge(monkeypatch, _FakeJudgeReport(status="passed"))
+
+    assert main(["judge", "--since", "7d", "--require-calibrated"]) == 0
+    capsys.readouterr()
+
+
+def test_judge_command_rejects_a_remote_provider_without_confirm_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch, **_REMOTE_CONFIG_ARGS)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="passed"))
+
+    assert main(["judge", "--since", "7d"]) == 2
+
+    assert calls == []
+    error = capsys.readouterr().err
+    assert "--confirm-egress" in error
+
+
+def test_judge_command_allows_a_remote_provider_with_confirm_egress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch, **_REMOTE_CONFIG_ARGS)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="passed"))
+
+    assert main(["judge", "--since", "7d", "--confirm-egress"]) == 0
+
+    assert len(calls) == 1
+    capsys.readouterr()
+
+
+def test_judge_command_prints_the_preflight_disclosure_for_a_loopback_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Loopback Ollama never requires `--confirm-egress`, but the same
+    disclosure is still printed before `run_judge()` runs."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert main(["judge", "--since", "7d"]) == 0
+
+    error = capsys.readouterr().err
+    assert "provider=ollama" in error
+    assert "model=llama3" in error
+    assert "base_url=http://127.0.0.1:11434" in error
+    assert "calibration_backlog_count=0" in error
+    assert "recent_gated_count=0" in error
+    assert "deduplicated_send_count=0" in error
+
+
+def test_judge_command_rejects_an_invalid_duration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+
+    for invalid in ("7", "7x", "0d", "-1d", "1.5h", "d7"):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["judge", "--since", invalid])
+        assert excinfo.value.code == 2
+        capsys.readouterr()
+
+
+def test_judge_command_rejects_zero_or_negative_max_cases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+
+    for invalid in ("0", "-1", "not-a-number"):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["judge", "--since", "7d", "--max-cases", invalid])
+        assert excinfo.value.code == 2
+        capsys.readouterr()
+
+
+def test_judge_command_passes_parsed_arguments_through_to_run_judge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert (
+        main(
+            [
+                "judge",
+                "--since",
+                "30m",
+                "--max-cases",
+                "5",
+                "--allow-self-judge",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    from datetime import timedelta
+
+    [(database_path, config, since, max_cases, allow_self_judge)] = calls
+    assert database_path == Path("glassbox.sqlite3")
+    assert since == timedelta(minutes=30)
+    assert max_cases == 5
+    assert allow_self_judge is True

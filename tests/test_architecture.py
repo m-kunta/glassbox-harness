@@ -97,7 +97,7 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         },
         "web-dependencies": {
             "source_modules": ["glassbox.web"],
-            "forbidden_modules": ["glassbox.sdk"],
+            "forbidden_modules": ["glassbox.eval.judge", "glassbox.sdk"],
         },
     }
 
@@ -202,6 +202,31 @@ def _module_level_import_names(source_path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             names.add(node.module)
     return names
+
+
+def test_import_linter_forbids_sdk_collector_and_web_from_the_judge_module() -> None:
+    """`glassbox.eval.judge` runs the P3a calibrated judge and must never be
+    reachable from the tracing SDK, the collector, or the web app -- those
+    packages instrument or serve production agent code and must not carry
+    the judge stack's optional provider-SDK/egress surface as a transitive
+    dependency. `sdk-dependencies` and `collector-dependencies` already
+    forbid those two source modules from importing all of `glassbox.eval`
+    (a strict superset of `glassbox.eval.judge`); `web-dependencies` is
+    extended by this task to forbid `glassbox.eval.judge` specifically,
+    since `glassbox.web` may have legitimate reasons to import other
+    `glassbox.eval` submodules later."""
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    contracts = config["tool"]["importlinter"]["contracts"]
+    by_source: dict[str, list[str]] = {}
+    for contract in contracts:
+        for source in contract["source_modules"]:
+            by_source.setdefault(source, []).extend(contract["forbidden_modules"])
+
+    for source in ("glassbox.sdk", "glassbox.collector", "glassbox.web"):
+        forbidden = by_source[source]
+        assert "glassbox.eval.judge" in forbidden or "glassbox.eval" in forbidden, (
+            f"{source} must be forbidden from importing glassbox.eval.judge"
+        )
 
 
 def test_judge_provider_keeps_optional_provider_sdk_imports_lazy() -> None:

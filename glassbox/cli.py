@@ -5,17 +5,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from glassbox.eval.runner import run_suite
-from glassbox.store import Database, ReadOnlyDatabaseError, Repository, TraceTree
+from glassbox.store import Database, JudgeCohort, ReadOnlyDatabaseError, Repository, TraceTree
 from glassbox.web.export import ExportError, render_decision_export, write_decision_export
 from glassbox.web.read_service import ReadService
 from glassbox.web.server import run_server
+
+_DURATION_PATTERN = re.compile(r"^([1-9][0-9]*)([mhd])$")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -39,6 +43,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve_command = commands.add_parser("serve", help="run the local Glassbox web server")
     serve_command.add_argument("--host", default="127.0.0.1")
     serve_command.add_argument("--port", type=int, default=8787)
+    judge_command = commands.add_parser(
+        "judge", help="run the calibrated LLM reasoning-quality judge"
+    )
+    judge_command.add_argument("--since", required=True, type=_parse_duration)
+    judge_command.add_argument("--max-cases", type=_parse_max_cases, default=None)
+    judge_command.add_argument("--allow-self-judge", action="store_true")
+    judge_command.add_argument("--confirm-egress", action="store_true")
+    judge_command.add_argument("--require-calibrated", action="store_true")
     arguments = parser.parse_args(argv)
 
     if arguments.command == "eval":
@@ -71,6 +83,69 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return 0
 
+    if arguments.command == "judge":
+        # Imported here, not at module scope, so `serve`/`export`/`eval` never
+        # trigger loading the judge stack's optional dependency (`dotenv`).
+        from glassbox.eval.judge import _RUBRIC_VERSION, run_judge
+        from glassbox.eval.judge_config import JudgeConfigError, load_judge_config
+
+        database_path = Path(arguments.database)
+        project_root = Path.cwd()
+        try:
+            config = load_judge_config(project_root, os.environ)
+        except JudgeConfigError as exc:
+            print(f"glassbox: unable to configure judge: {exc}", file=sys.stderr)
+            return 2
+
+        cohort = JudgeCohort(
+            provider=config.provider, model=config.model, rubric_version=_RUBRIC_VERSION
+        )
+        decided_since = datetime.now(UTC) - arguments.since
+        try:
+            candidates = Repository(Database.open(database_path)).judge_candidates(
+                cohort, decided_since
+            )
+        except (OSError, sqlite3.Error) as exc:
+            print(f"glassbox: unable to read judge candidates: {exc}", file=sys.stderr)
+            return 2
+
+        backlog_count = sum(1 for candidate in candidates if candidate.calibration_backlog)
+        recent_count = sum(1 for candidate in candidates if candidate.recent_gated)
+        send_count = (
+            len(candidates)
+            if arguments.max_cases is None
+            else min(len(candidates), arguments.max_cases)
+        )
+        print(
+            "glassbox: judge preflight disclosure -- "
+            f"provider={config.provider} model={config.model} base_url={config.base_url} "
+            f"calibration_backlog_count={backlog_count} recent_gated_count={recent_count} "
+            f"deduplicated_send_count={send_count}",
+            file=sys.stderr,
+        )
+
+        if config.is_remote and not arguments.confirm_egress:
+            print(
+                "glassbox: remote judge provider requires --confirm-egress before any "
+                "decision data leaves this machine; no request was sent",
+                file=sys.stderr,
+            )
+            return 2
+
+        report = run_judge(
+            database_path,
+            config,
+            arguments.since,
+            arguments.max_cases,
+            arguments.allow_self_judge,
+        )
+        print(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
+        if report.status == "failed":
+            return 1
+        if report.status == "uncalibrated" and arguments.require_calibrated:
+            return 1
+        return 0
+
     database_path = Path(arguments.database)
     try:
         trace_tree = _read_trace_tree(database_path, arguments.trace_id)
@@ -87,6 +162,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(json.dumps(_trace_tree_payload(trace_tree), sort_keys=True, separators=(",", ":")))
     return 0
+
+
+def _parse_duration(text: str) -> timedelta:
+    """Parse a positive whole-number duration of the form ``<N>m``, ``<N>h``, or ``<N>d``."""
+    match = _DURATION_PATTERN.fullmatch(text)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {text!r}; expected a positive whole number followed by "
+            "'m', 'h', or 'd' (e.g. '30m', '12h', '7d')"
+        )
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "m":
+        return timedelta(minutes=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    return timedelta(days=amount)
+
+
+def _parse_max_cases(text: str) -> int:
+    """Parse ``--max-cases`` as a positive integer."""
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --max-cases value: {text!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError("--max-cases must be a positive integer")
+    return value
 
 
 def _read_trace_tree(database_path: Path, trace_id: str) -> TraceTree | None:

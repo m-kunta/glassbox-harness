@@ -103,6 +103,81 @@ Use `--overwrite` to replace an existing artifact. Optionally add
 card. Exports contain inline CSS and no JavaScript, session state, or feedback
 form; feedback and operational actions remain available only in the live app.
 
+## Run the calibrated LLM judge
+
+The judge scores recorded decision reasoning against the `reasoning_quality_v1`
+rubric and gates on agreement with human labels before its results are
+trusted. Install the base judge extra plus whichever provider you use:
+
+```shell
+python -m pip install -e '.[judge]'         # Ollama only; no extra SDK needed
+python -m pip install -e '.[judge-claude]'  # + anthropic
+python -m pip install -e '.[judge-openai]'  # + openai
+python -m pip install -e '.[judge-gemini]'  # + google-genai
+```
+
+Configure the judge in a `.env` file in the **project root only** (the
+directory you run `glassbox` from) — a `.env` in any other directory,
+including an agent's own working directory, is never read. Any value already
+set in the process environment always takes precedence over the same key in
+`.env`. Required keys:
+
+- `GLASSBOX_JUDGE_PROVIDER` — one of `claude`, `openai`, `gemini`, `ollama`.
+- `GLASSBOX_JUDGE_MODEL` — the provider's model identifier.
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` — whichever
+  matches the selected provider (`claude`, `openai`, `gemini` respectively).
+  Ollama needs no credential.
+- `GLASSBOX_JUDGE_OLLAMA_URL` — required only for `provider=ollama`; for
+  example `http://127.0.0.1:11434`.
+
+Run it against decisions from the last 7 days:
+
+```shell
+glassbox --database glassbox.sqlite3 judge --since 7d
+```
+
+`--since` takes a positive whole number followed by `m` (minutes), `h`
+(hours), or `d` (days) — for example `30m`, `12h`, `7d`. `--max-cases N`
+caps how many candidate decisions are judged in one run. `--allow-self-judge`
+bypasses the refusal that otherwise blocks judging a decision whose own
+recorded LLM spans used the same (normalized) model as the configured judge —
+without it, that decision is skipped with an error rather than silently
+self-graded.
+
+**Egress disclosure and consent.** Claude, OpenAI, and Gemini are remote
+providers: before any request leaves this machine, the command prints the
+provider, model, constructed base URL, and how many decisions (calibration
+backlog, recent-gated, and total de-duplicated) are about to be judged, then
+refuses to proceed — exiting `2` without making any network call — unless you
+pass `--confirm-egress`. A loopback Ollama endpoint (`localhost`, `127.0.0.1`,
+or `::1`) never leaves the machine, so it never requires `--confirm-egress`;
+the same disclosure is still printed for visibility. A non-loopback Ollama
+URL is treated as remote and requires confirmation like any other provider.
+
+**Human labels.** Human reasoning-quality scores come from the live app's
+Decision Card feedback form, an integer from 1 (unsupported by the cited
+evidence) through 5 (precise, complete, evidence-grounded reasoning); see
+[`glassbox/eval/rubrics/reasoning_quality_v1.md`](glassbox/eval/rubrics/reasoning_quality_v1.md)
+for the full rubric.
+
+**Status and exit codes.** The command prints one compact JSON `JudgeReport`
+to stdout and returns:
+
+- `0` — the run's status is `passed`, or `uncalibrated` without
+  `--require-calibrated`.
+- `1` — the run's status is `failed`, or `uncalibrated` **with**
+  `--require-calibrated` (use this flag in CI once you require the judge to
+  already be calibrated).
+- `2` — a preflight error: invalid or missing configuration, an unconfirmed
+  remote provider, or a database read failure. No provider request is made.
+
+A run is `uncalibrated` until the cohort (provider/model/rubric) has at least
+**30** human/judge score pairs across all runs with linear weighted kappa
+agreement of at least **0.60**, and this run's own gated (recent) set has at
+least **10** successful judgments with a failure rate no higher than **5%**.
+Once calibrated, the run's status is `failed` if the gated set's mean score
+falls below **3.5**, otherwise `passed`.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:

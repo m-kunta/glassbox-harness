@@ -129,4 +129,8 @@ forbidden_modules = [
 name = "web-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.web"]
-forbidden_modules = ["glassbox.sdk"]
+# glassbox.web may legitimately import other glassbox.eval submodules later
+# (e.g. shared metrics), so only the judge stack itself is forbidden here --
+# not all of glassbox.eval, unlike the broader sdk-dependencies and
+# collector-dependencies contracts above.
+forbidden_modules = ["glassbox.eval.judge", "glassbox.sdk"]
