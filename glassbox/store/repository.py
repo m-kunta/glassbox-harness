@@ -132,7 +132,14 @@ class DecisionDetail:
 
 @dataclass(frozen=True)
 class FeedbackSubmission:
-    """An immutable, caller-complete feedback write request."""
+    """An immutable, caller-complete feedback write request.
+
+    ``reasoning_quality_score`` and ``reasoning_quality_rubric_version`` are
+    both optional, but paired: either both are set (score 1-5, a non-empty
+    rubric version) or both are omitted. Defaulted to ``None`` so existing
+    positional callers built before P3 (e.g. ``glassbox/web/server.py``'s
+    ``_feedback_submission``) keep working unchanged.
+    """
 
     feedback_id: str
     decision_id: str
@@ -142,6 +149,8 @@ class FeedbackSubmission:
     corrected_recommendation: Any | None
     created_at: datetime
     idempotency_key: str
+    reasoning_quality_score: int | None = None
+    reasoning_quality_rubric_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,8 @@ class FeedbackRecord:
     corrected_recommendation: Any | None
     created_at: datetime
     idempotency_key: str
+    reasoning_quality_score: int | None = None
+    reasoning_quality_rubric_version: str | None = None
 
 
 class Repository:
@@ -338,6 +349,9 @@ class Repository:
                         and existing.reason_code == submission.reason_code
                         and existing.free_text == submission.free_text
                         and existing.corrected_recommendation == submission.corrected_recommendation
+                        and existing.reasoning_quality_score == submission.reasoning_quality_score
+                        and existing.reasoning_quality_rubric_version
+                        == submission.reasoning_quality_rubric_version
                     ):
                         return existing
                     raise ValueError("feedback idempotency key was reused with a different payload")
@@ -345,8 +359,9 @@ class Repository:
                     """
                     INSERT INTO feedback (
                         feedback_id, decision_id, verdict, reason_code, free_text,
-                        corrected_recommendation, created_at, idempotency_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        corrected_recommendation, created_at, idempotency_key,
+                        reasoning_quality_score, reasoning_quality_rubric_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         submission.feedback_id,
@@ -357,6 +372,8 @@ class Repository:
                         corrected_recommendation,
                         created_at,
                         submission.idempotency_key,
+                        submission.reasoning_quality_score,
+                        submission.reasoning_quality_rubric_version,
                     ),
                 )
                 row = self._connection.execute(
@@ -585,6 +602,8 @@ class Repository:
             ),
             created_at=datetime.fromisoformat(values["created_at"].replace("Z", "+00:00")),
             idempotency_key=values["idempotency_key"],
+            reasoning_quality_score=values["reasoning_quality_score"],
+            reasoning_quality_rubric_version=values["reasoning_quality_rubric_version"],
         )
 
     @staticmethod
@@ -618,6 +637,17 @@ class Repository:
         for value in (submission.reason_code, submission.free_text):
             if value is not None and not isinstance(value, str):
                 raise ValueError("feedback text values must be strings")
+        score = submission.reasoning_quality_score
+        rubric_version = submission.reasoning_quality_rubric_version
+        if (score is None) != (rubric_version is None):
+            raise ValueError(
+                "reasoning quality score and rubric version must both be set or both be omitted"
+            )
+        if score is not None:
+            if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5:
+                raise ValueError("reasoning quality score must be an integer between 1 and 5")
+            if not isinstance(rubric_version, str) or not rubric_version:
+                raise ValueError("reasoning quality rubric version must be a non-empty string")
 
     @staticmethod
     def _validate_queue_query(query: QueueQuery) -> None:

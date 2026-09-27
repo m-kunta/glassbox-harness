@@ -72,6 +72,8 @@ def _feedback_submission(
     feedback_id: str = FEEDBACK_ID,
     idempotency_key: str = "feedback-request-1",
     verdict: str = "agree",
+    reasoning_quality_score: int | None = None,
+    reasoning_quality_rubric_version: str | None = None,
 ) -> FeedbackSubmission:
     return FeedbackSubmission(
         feedback_id=feedback_id,
@@ -82,6 +84,8 @@ def _feedback_submission(
         corrected_recommendation={"action": "order"},
         created_at=TIMESTAMP,
         idempotency_key=idempotency_key,
+        reasoning_quality_score=reasoning_quality_score,
+        reasoning_quality_rubric_version=reasoning_quality_rubric_version,
     )
 
 
@@ -258,6 +262,98 @@ def test_feedback_is_append_only_idempotent_and_decision_scoped(tmp_path: Path) 
                 corrected_recommendation=None,
                 created_at=TIMESTAMP,
                 idempotency_key="missing-decision",
+            )
+        )
+
+
+def test_feedback_reasoning_quality_score_and_rubric_version_round_trip(tmp_path: Path) -> None:
+    """FeedbackSubmission/FeedbackRecord's reasoning-quality fields must reach
+    the database and come back out through the public Repository API, not
+    just satisfy the raw schema CHECK -- this is the P3 feature's whole
+    point: a planner-facing score, not merely a column that exists."""
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    trace, _, decision, _ = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+
+    scored = repository.record_feedback(
+        _feedback_submission(
+            feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FCC",
+            idempotency_key="feedback-request-scored",
+            reasoning_quality_score=4,
+            reasoning_quality_rubric_version="reasoning_quality_v1",
+        )
+    )
+    unscored = repository.record_feedback(
+        _feedback_submission(
+            feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FCD",
+            idempotency_key="feedback-request-unscored",
+        )
+    )
+
+    assert scored.reasoning_quality_score == 4
+    assert scored.reasoning_quality_rubric_version == "reasoning_quality_v1"
+    assert unscored.reasoning_quality_score is None
+    assert unscored.reasoning_quality_rubric_version is None
+
+    fetched = {
+        record.feedback_id: record for record in repository.feedback_for_decision(DECISION_ID)
+    }
+    assert fetched[scored.feedback_id] == scored
+    assert fetched[unscored.feedback_id] == unscored
+
+    # An exact replay (same score and rubric version) returns the stored record.
+    replay = repository.record_feedback(
+        _feedback_submission(
+            feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FCE",
+            idempotency_key="feedback-request-scored",
+            reasoning_quality_score=4,
+            reasoning_quality_rubric_version="reasoning_quality_v1",
+        )
+    )
+    assert replay == scored
+
+    # A replay under the same idempotency key with a different score is rejected.
+    with pytest.raises(ValueError, match="idempotency"):
+        repository.record_feedback(
+            _feedback_submission(
+                feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FCF",
+                idempotency_key="feedback-request-scored",
+                reasoning_quality_score=5,
+                reasoning_quality_rubric_version="reasoning_quality_v1",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("score", "rubric_version"),
+    [
+        (0, "reasoning_quality_v1"),
+        (6, "reasoning_quality_v1"),
+        (3, None),
+        (None, "reasoning_quality_v1"),
+        (3, ""),
+    ],
+)
+def test_feedback_reasoning_quality_score_is_validated_before_the_database(
+    tmp_path: Path, score: int | None, rubric_version: str | None
+) -> None:
+    """A repository-level ValueError is a better failure mode than a raw
+    sqlite3.IntegrityError bubbling up from the CHECK constraint."""
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    trace, _, decision, _ = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+
+    with pytest.raises(ValueError, match="reasoning quality"):
+        repository.record_feedback(
+            _feedback_submission(
+                feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FCG",
+                idempotency_key="feedback-request-invalid-score",
+                reasoning_quality_score=score,
+                reasoning_quality_rubric_version=rubric_version,
             )
         )
 
