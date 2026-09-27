@@ -101,17 +101,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             provider=config.provider, model=config.model, rubric_version=_RUBRIC_VERSION
         )
         decided_since = datetime.now(UTC) - arguments.since
+        # Read-only: a missing or invalid --database path must fail loudly here,
+        # before any candidate is counted or run_judge() ever opens it for
+        # writing -- never silently fabricate an empty database (that would
+        # defeat the whole point of this preflight check).
         try:
-            preflight_database = Database.open(database_path)
-            try:
-                candidates = Repository(preflight_database).judge_candidates(
-                    cohort, decided_since
-                )
-            finally:
-                preflight_database.close()
+            preflight_database = Database.open_read_only(database_path)
+        except (ReadOnlyDatabaseError, OSError, sqlite3.Error) as exc:
+            print(f"glassbox: unable to read judge candidates: {exc}", file=sys.stderr)
+            return 2
+
+        try:
+            candidates = Repository(preflight_database).judge_candidates(cohort, decided_since)
         except (OSError, sqlite3.Error) as exc:
             print(f"glassbox: unable to read judge candidates: {exc}", file=sys.stderr)
             return 2
+        finally:
+            preflight_database.close()
 
         backlog_count = sum(1 for candidate in candidates if candidate.calibration_backlog)
         recent_count = sum(1 for candidate in candidates if candidate.recent_gated)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -512,6 +513,64 @@ def test_judge_command_prints_the_preflight_disclosure_for_a_loopback_provider(
     assert "calibration_backlog_count=0" in error
     assert "recent_gated_count=0" in error
     assert "deduplicated_send_count=0" in error
+
+
+def test_judge_command_returns_two_for_a_nonexistent_database_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """A mistyped --database path is exactly the class of preflight mistake this
+    command's exit-code contract must catch: it must fail loudly with exit 2,
+    never silently fabricate an empty database and report a hollow 0-candidate
+    'uncalibrated' success."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    _patch_judge_config(monkeypatch)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="passed"))
+
+    missing_path = tmp_path / "typo.sqlite3"
+
+    assert main(["--database", str(missing_path), "judge", "--since", "7d"]) == 2
+
+    assert calls == []
+    assert not missing_path.exists()
+    error = capsys.readouterr().err
+    assert "unable to read judge candidates" in error
+
+
+def test_judge_command_closes_the_preflight_connection_even_when_the_query_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Regression test for the preflight connection leak fixed alongside this
+    task: whatever happens during the preflight judge_candidates() read, the
+    read-only connection opened for it must be closed before returning."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="passed"))
+
+    close_calls: list[object] = []
+    original_close = Database.close
+
+    def tracking_close(self: Database) -> None:
+        close_calls.append(self)
+        original_close(self)
+
+    monkeypatch.setattr(Database, "close", tracking_close)
+
+    def raising_judge_candidates(self: Repository, cohort: object, decided_since: object) -> None:
+        raise sqlite3.Error("simulated mid-query failure")
+
+    monkeypatch.setattr(Repository, "judge_candidates", raising_judge_candidates)
+
+    assert main(["judge", "--since", "7d"]) == 2
+
+    assert len(close_calls) == 1
+    assert calls == []
+    error = capsys.readouterr().err
+    assert "unable to read judge candidates" in error
 
 
 def test_judge_command_rejects_an_invalid_duration(
