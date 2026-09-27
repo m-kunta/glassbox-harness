@@ -99,6 +99,8 @@ class FeedbackView:
     free_text: str | None
     corrected_recommendation: str | None
     created_at: str
+    reasoning_quality_score: int | None
+    reasoning_quality_rubric_version: str | None
 
 
 @dataclass(frozen=True)
@@ -310,6 +312,8 @@ def build_decision_card(
                 if item.corrected_recommendation is None
                 else canonical_dumps(item.corrected_recommendation),
                 item.created_at.isoformat().replace("+00:00", "Z"),
+                item.reasoning_quality_score,
+                item.reasoning_quality_rubric_version,
             )
             for item in feedback
         ),

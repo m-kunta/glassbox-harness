@@ -31,6 +31,7 @@ _MAX_VERDICT_LENGTH = 16
 _MAX_REASON_CODE_LENGTH = 64
 _MAX_FREE_TEXT_LENGTH = 4 * 1024
 _MAX_CORRECTED_RECOMMENDATION_LENGTH = 16 * 1024
+_REASONING_QUALITY_RUBRIC_VERSION = "reasoning_quality_v1"
 
 
 def utc_now() -> datetime:
@@ -222,6 +223,7 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         reason_code: Annotated[str | None, Form()] = None,
         free_text: Annotated[str | None, Form()] = None,
         corrected_recommendation: Annotated[str | None, Form()] = None,
+        reasoning_quality_score: Annotated[str | None, Form()] = None,
     ) -> Response:
         if not _valid_feedback_origin(request, config):
             return feedback_error(request)
@@ -234,6 +236,7 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
                 reason_code,
                 free_text,
                 corrected_recommendation,
+                reasoning_quality_score,
                 idempotency_key,
                 clock(),
             )
@@ -363,6 +366,7 @@ def _feedback_submission(
     reason_code: str | None,
     free_text: str | None,
     corrected_recommendation: str | None,
+    reasoning_quality_score: str | None,
     idempotency_key: str,
     created_at: datetime,
 ) -> FeedbackSubmission:
@@ -384,6 +388,7 @@ def _feedback_submission(
             parsed_recommendation = json.loads(corrected_recommendation)
         except json.JSONDecodeError as error:
             raise ValueError("invalid corrected recommendation") from error
+    score, rubric_version = _parsed_reasoning_quality_score(reasoning_quality_score)
     value = (int(created_at.timestamp() * 1_000) << 80) | secrets.randbits(80)
     alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
     feedback_id = "".join(alphabet[(value >> (5 * index)) & 31] for index in range(25, -1, -1))
@@ -396,7 +401,28 @@ def _feedback_submission(
         parsed_recommendation,
         created_at,
         idempotency_key,
+        reasoning_quality_score=score,
+        reasoning_quality_rubric_version=rubric_version,
     )
+
+
+def _parsed_reasoning_quality_score(raw_value: str | None) -> tuple[int | None, str | None]:
+    """Map a raw form selection to a paired ``(score, rubric_version)``.
+
+    A blank or absent selection is "not scored", not a validation error. Any
+    other value must be exactly an integer from 1 through 5; the repository's
+    own pairing validation remains the source of truth for the invariant that
+    a score and a rubric version are always set or omitted together.
+    """
+    if raw_value is None or not raw_value.strip():
+        return None, None
+    try:
+        score = int(raw_value)
+    except ValueError as error:
+        raise ValueError("invalid reasoning quality score") from error
+    if not 1 <= score <= 5:
+        raise ValueError("invalid reasoning quality score")
+    return score, _REASONING_QUALITY_RUBRIC_VERSION
 
 
 def _override_submission(

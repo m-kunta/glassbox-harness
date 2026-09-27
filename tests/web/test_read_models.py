@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
-from glassbox.store.repository import OverrideRecord, StoredDecision, TraceTree
+from glassbox.store.repository import FeedbackRecord, OverrideRecord, StoredDecision, TraceTree
 from glassbox.web.read_models import (
     AttributeView,
     ConfidenceBand,
@@ -160,6 +160,44 @@ def test_card_reports_inconsistent_override_history() -> None:
     card = build_decision_card(_stored_decision(), (override,))
 
     assert card.override.status == "inconsistent"
+
+
+def test_card_includes_reasoning_quality_score_and_rubric_version() -> None:
+    record = FeedbackRecord(
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBK",
+        decision_id=DECISION_ID,
+        verdict="agree",
+        reason_code=None,
+        free_text=None,
+        corrected_recommendation=None,
+        created_at=TIMESTAMP,
+        idempotency_key="feedback-request-1",
+        reasoning_quality_score=4,
+        reasoning_quality_rubric_version="reasoning_quality_v1",
+    )
+
+    card = build_decision_card(_stored_decision(), (), (record,))
+
+    assert card.feedback[0].reasoning_quality_score == 4
+    assert card.feedback[0].reasoning_quality_rubric_version == "reasoning_quality_v1"
+
+
+def test_card_feedback_reasoning_quality_defaults_to_none_when_unscored() -> None:
+    record = FeedbackRecord(
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FBL",
+        decision_id=DECISION_ID,
+        verdict="agree",
+        reason_code=None,
+        free_text=None,
+        corrected_recommendation=None,
+        created_at=TIMESTAMP,
+        idempotency_key="feedback-request-2",
+    )
+
+    card = build_decision_card(_stored_decision(), (), (record,))
+
+    assert card.feedback[0].reasoning_quality_score is None
+    assert card.feedback[0].reasoning_quality_rubric_version is None
 
 
 def test_trace_view_reports_missing_parent_and_cycle_without_cyclic_children() -> None:

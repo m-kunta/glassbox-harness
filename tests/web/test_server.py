@@ -300,6 +300,153 @@ def test_feedback_form_enforces_request_guards_and_uses_prg(tmp_path: Path) -> N
     assert "<script>not executable</script>" not in card.text
 
 
+@pytest.mark.parametrize(
+    ("raw_score", "expected_score", "expected_version"),
+    [
+        (None, None, None),
+        ("3", 3, "reasoning_quality_v1"),
+        ("", None, None),
+    ],
+)
+def test_feedback_form_maps_reasoning_quality_score_selection(
+    tmp_path: Path,
+    raw_score: str | None,
+    expected_score: int | None,
+    expected_version: str | None,
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+    payload = {
+        "csrf_token": csrf.group(1),
+        "idempotency_key": key.group(1),
+        "verdict": "agree",
+    }
+    if raw_score is not None:
+        payload["reasoning_quality_score"] = raw_score
+
+    response = client.post(
+        f"/decision/{decision_id}/feedback", data=payload, follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    database = Database.open_read_only(database_path)
+    try:
+        record = Repository(database).feedback_for_decision(decision_id)[0]
+    finally:
+        database.close()
+    assert record.reasoning_quality_score == expected_score
+    assert record.reasoning_quality_rubric_version == expected_version
+
+
+@pytest.mark.parametrize("raw_score", ["0", "6", "abc", "3.5"])
+def test_feedback_form_rejects_invalid_reasoning_quality_scores(
+    tmp_path: Path, raw_score: str
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+
+    response = client.post(
+        f"/decision/{decision_id}/feedback",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "verdict": "agree",
+            "reasoning_quality_score": raw_score,
+        },
+    )
+
+    assert response.status_code == 400
+    database = Database.open_read_only(database_path)
+    try:
+        assert Repository(database).feedback_for_decision(decision_id) == ()
+    finally:
+        database.close()
+
+
+def test_feedback_score_replay_is_idempotent_but_a_changed_score_is_rejected(
+    tmp_path: Path,
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+    payload = {
+        "csrf_token": csrf.group(1),
+        "idempotency_key": key.group(1),
+        "verdict": "agree",
+        "reasoning_quality_score": "3",
+    }
+    url = f"/decision/{decision_id}/feedback"
+
+    first = client.post(url, data=payload, follow_redirects=False)
+    replay = client.post(url, data=payload, follow_redirects=False)
+    changed = client.post(url, data=payload | {"reasoning_quality_score": "4"})
+
+    assert first.status_code == 303
+    assert replay.status_code == 303
+    assert changed.status_code == 400
+    database = Database.open_read_only(database_path)
+    try:
+        records = Repository(database).feedback_for_decision(decision_id)
+    finally:
+        database.close()
+    assert len(records) == 1
+    assert records[0].reasoning_quality_score == 3
+
+
+def test_decision_card_renders_the_reasoning_quality_selector_help_and_history(
+    tmp_path: Path,
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+    assert 'name="reasoning_quality_score"' in card.text
+    assert "Not scored" in card.text
+
+    client.post(
+        f"/decision/{decision_id}/feedback",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "verdict": "agree",
+            "reasoning_quality_score": "3",
+        },
+    )
+
+    rendered = client.get(f"/decision/{decision_id}")
+
+    assert "Reasoning quality: 3/5 (reasoning_quality_v1)" in rendered.text
+
+
 def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
     client = TestClient(
