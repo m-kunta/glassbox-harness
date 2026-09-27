@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,18 @@ _SORT_COLUMNS: dict[QueueSort, str] = {
 }
 _OVERRIDE_STATUSES = frozenset(("none", "accepted", "modified", "rejected", "inconsistent"))
 _UTC_OFFSET = timedelta(0)
+_JUDGE_RUN_STATUSES = frozenset(("passed", "failed", "uncalibrated"))
+_JUDGE_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+# eval_runs.suite_id/suite_version/agent_version are NOT NULL, inherited from
+# the pre-P3 deterministic-eval shape; a judge run is not a suite run, so it
+# supplies these fixed placeholder values rather than anything meaningful.
+_JUDGE_SUITE_ID = "judge-calibration"
+_JUDGE_SUITE_VERSION = "v1"
+_JUDGE_AGENT_VERSION = "judge"
+# Every judge eval_results row uses this fixed assertion name (see the P3
+# design doc); it is also used to scope the "successful result" check in
+# judge_candidates() to judge-produced rows for the requested rubric.
+_JUDGE_ASSERTION_NAME = "reasoning_quality"
 
 # Fields the closing TraceEvent may omit; a close must not clobber them with
 # NULL when it does. Keep this in lockstep with any new optional TraceEvent
@@ -167,6 +180,78 @@ class FeedbackRecord:
     idempotency_key: str
     reasoning_quality_score: int | None = None
     reasoning_quality_rubric_version: str | None = None
+
+
+JudgeRunStatus: TypeAlias = Literal["passed", "failed", "uncalibrated"]
+
+
+@dataclass(frozen=True)
+class JudgeCohort:
+    """The provider/model/rubric identity a judge run and its results belong to.
+
+    Defined here (not in ``glassbox/eval/judge_models.py``) because
+    ``Repository.judge_candidates()``/``record_judge_run()`` reference it
+    directly, and ``glassbox.store`` may not import ``glassbox.eval`` (see
+    ``tests/test_architecture.py``'s ``store-dependencies`` import-linter
+    contract). ``glassbox.eval.judge_models`` re-exports this and the other
+    three judge dataclasses below as their intended public import path for
+    eval/orchestration code -- that direction (``eval`` importing ``store``)
+    is allowed.
+    """
+
+    provider: str
+    model: str
+    rubric_version: str
+
+
+@dataclass(frozen=True)
+class JudgeCandidate:
+    """One decision selected for judging, with its calibration-membership flags.
+
+    ``calibration_backlog`` is true when the decision has a human reasoning-
+    quality score for the cohort's rubric version and no successful judge
+    result yet in this exact provider/model/rubric cohort. ``recent_gated``
+    is true when the decision's ``decided_at`` falls within the caller's
+    ``decided_since`` cutoff. The two flags are independent; a decision can
+    be true on both, in which case it appears exactly once, in the
+    calibration-backlog ordering slot (see ``Repository.judge_candidates``).
+    """
+
+    decision: StoredDecision
+    llm_models: tuple[str, ...]
+    llm_providers: tuple[str, ...]
+    human_score: int | None
+    calibration_backlog: bool
+    recent_gated: bool
+
+
+@dataclass(frozen=True)
+class JudgeOutcome:
+    """One judge's per-decision result, successful or failed.
+
+    A successful outcome carries a non-null ``score`` (1-5) and a non-empty
+    ``rationale``, with ``error`` unset. A failed outcome carries a non-empty
+    ``error`` diagnostic, with ``score`` and ``rationale`` unset.
+    """
+
+    decision_id: str
+    score: int | None
+    rationale: str | None
+    error: str | None
+    self_judge_bypassed: bool
+
+
+@dataclass(frozen=True)
+class JudgeRun:
+    """One completed judge run's provenance and status, ready to persist."""
+
+    eval_run_id: str
+    cohort: JudgeCohort
+    run_at: datetime
+    status: JudgeRunStatus
+    status_reason: str
+    judge_failure_count: int
+    self_judge_allowed: bool
 
 
 class Repository:
@@ -462,6 +547,139 @@ class Repository:
                     self._connection.execute("ROLLBACK")
                 raise
 
+    def judge_candidates(
+        self, cohort: JudgeCohort, decided_since: datetime
+    ) -> tuple[JudgeCandidate, ...]:
+        """Return the de-duplicated, ordered union of judge candidate decisions.
+
+        Two groups are computed and concatenated: the calibration backlog
+        (every decision with a human reasoning-quality score for
+        ``cohort.rubric_version`` and no *successful* judge result yet in
+        this exact provider/model/rubric cohort), then the recent-gated set
+        (every decision with ``decided_at >= decided_since``). Each group is
+        ordered newest-``decided_at``-first, then ``decision_id`` descending.
+        A decision in both groups appears exactly once, in the
+        calibration-backlog slot, with both flags true.
+        """
+        self._validate_judge_cohort(cohort)
+        since_text = self._timestamp_text(decided_since)
+        with self._operation_lock:
+            rows = self._connection.execute(
+                """
+                WITH latest_feedback AS (
+                    SELECT decision_id, reasoning_quality_score AS human_score
+                    FROM (
+                        SELECT
+                            decision_id,
+                            reasoning_quality_score,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY decision_id
+                                ORDER BY glassbox_timestamp_key(created_at) DESC, feedback_id DESC
+                            ) AS rn
+                        FROM feedback
+                        WHERE reasoning_quality_rubric_version = :rubric_version
+                          AND reasoning_quality_score IS NOT NULL
+                    )
+                    WHERE rn = 1
+                ),
+                successful_judge_decisions AS (
+                    SELECT DISTINCT er.decision_id AS decision_id
+                    FROM eval_results er
+                    JOIN eval_runs r ON r.eval_run_id = er.eval_run_id
+                    WHERE r.run_kind = 'judge'
+                      AND r.judge_provider = :provider
+                      AND r.judge_model = :model
+                      AND r.rubric_version = :rubric_version
+                      AND er.assertion_name = :assertion_name
+                      AND er.score IS NOT NULL
+                      AND er.decision_id IS NOT NULL
+                ),
+                backlog AS (
+                    SELECT lf.decision_id AS decision_id
+                    FROM latest_feedback lf
+                    WHERE lf.decision_id NOT IN (SELECT decision_id FROM successful_judge_decisions)
+                )
+                SELECT
+                    d.*,
+                    lf.human_score AS human_score,
+                    (b.decision_id IS NOT NULL) AS calibration_backlog,
+                    (glassbox_timestamp_key(d.decided_at) >= glassbox_timestamp_key(:since))
+                        AS recent_gated,
+                    CASE WHEN b.decision_id IS NOT NULL THEN 0 ELSE 1 END AS group_rank
+                FROM decisions d
+                LEFT JOIN latest_feedback lf ON lf.decision_id = d.decision_id
+                LEFT JOIN backlog b ON b.decision_id = d.decision_id
+                WHERE b.decision_id IS NOT NULL
+                   OR glassbox_timestamp_key(d.decided_at) >= glassbox_timestamp_key(:since)
+                ORDER BY group_rank ASC, glassbox_timestamp_key(d.decided_at) DESC,
+                    d.decision_id DESC
+                """,
+                {
+                    "rubric_version": cohort.rubric_version,
+                    "provider": cohort.provider,
+                    "model": cohort.model,
+                    "assertion_name": _JUDGE_ASSERTION_NAME,
+                    "since": since_text,
+                },
+            ).fetchall()
+            return tuple(self._judge_candidate_from_row(row) for row in rows)
+
+    def record_judge_run(self, run: JudgeRun, results: tuple[JudgeOutcome, ...]) -> None:
+        """Persist one completed judge run and its per-decision results atomically."""
+        self._validate_judge_run(run, results)
+        run_at = self._timestamp_text(run.run_at)
+        with self._operation_lock:
+            with self._connection:
+                self._connection.execute(
+                    """
+                    INSERT INTO eval_runs (
+                        eval_run_id, suite_id, suite_version, agent_version, run_at, run_kind,
+                        judge_provider, judge_model, rubric_version, judge_temperature,
+                        self_judge_allowed, status, status_reason, judge_failure_count
+                    ) VALUES (
+                        :eval_run_id, :suite_id, :suite_version, :agent_version, :run_at, 'judge',
+                        :judge_provider, :judge_model, :rubric_version, 0,
+                        :self_judge_allowed, :status, :status_reason, :judge_failure_count
+                    )
+                    """,
+                    {
+                        "eval_run_id": run.eval_run_id,
+                        "suite_id": _JUDGE_SUITE_ID,
+                        "suite_version": _JUDGE_SUITE_VERSION,
+                        "agent_version": _JUDGE_AGENT_VERSION,
+                        "run_at": run_at,
+                        "judge_provider": run.cohort.provider,
+                        "judge_model": run.cohort.model,
+                        "rubric_version": run.cohort.rubric_version,
+                        "self_judge_allowed": 1 if run.self_judge_allowed else 0,
+                        "status": run.status,
+                        "status_reason": run.status_reason,
+                        "judge_failure_count": run.judge_failure_count,
+                    },
+                )
+                for outcome in results:
+                    success = outcome.error is None
+                    self._connection.execute(
+                        """
+                        INSERT INTO eval_results (
+                            eval_result_id, eval_run_id, case_id, assertion_name, passed, score,
+                            judge_rationale, run_at, decision_id, self_judge_bypassed
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            _new_judge_ulid(),
+                            run.eval_run_id,
+                            outcome.decision_id,
+                            _JUDGE_ASSERTION_NAME,
+                            1 if success else 0,
+                            outcome.score,
+                            outcome.rationale if success else outcome.error,
+                            run_at,
+                            outcome.decision_id,
+                            1 if outcome.self_judge_bypassed else 0,
+                        ),
+                    )
+
     def _write_trace(self, event: TraceEvent) -> None:
         payload = event.model_dump(mode="json")
         optional_set_clause = ", ".join(
@@ -606,6 +824,90 @@ class Repository:
             reasoning_quality_rubric_version=values["reasoning_quality_rubric_version"],
         )
 
+    def _judge_candidate_from_row(self, row: sqlite3.Row) -> JudgeCandidate:
+        values = dict(row)
+        stored_decision = self._stored_decision_from_row(row)
+        llm_models, llm_providers = self._llm_span_identities(stored_decision.event.trace_id)
+        return JudgeCandidate(
+            decision=stored_decision,
+            llm_models=llm_models,
+            llm_providers=llm_providers,
+            human_score=values["human_score"],
+            calibration_backlog=bool(values["calibration_backlog"]),
+            recent_gated=bool(values["recent_gated"]),
+        )
+
+    def _llm_span_identities(self, trace_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return distinct LLM span models and provider identities for one trace.
+
+        Both tuples preserve first-occurrence order (spans ordered by parsed
+        start time, then span ID) and are independently deduplicated; a span
+        with a model but no ``gen_ai.provider.name`` attribute contributes to
+        ``llm_models`` only.
+        """
+        models: list[str] = []
+        providers: list[str] = []
+        for span_row in self._connection.execute(
+            """
+            SELECT * FROM spans WHERE trace_id = ? AND span_kind = 'llm'
+            ORDER BY glassbox_timestamp_key(started_at), span_id
+            """,
+            (trace_id,),
+        ):
+            span = self._span_from_row(span_row)
+            if span.model is not None and span.model not in models:
+                models.append(span.model)
+            provider = span.attributes.get("gen_ai.provider.name")
+            if isinstance(provider, str) and provider not in providers:
+                providers.append(provider)
+        return tuple(models), tuple(providers)
+
+    @staticmethod
+    def _validate_judge_cohort(cohort: JudgeCohort) -> None:
+        if not (cohort.provider and cohort.model and cohort.rubric_version):
+            raise ValueError("judge cohort provider, model, and rubric version must be non-empty")
+
+    @staticmethod
+    def _validate_judge_run(run: JudgeRun, results: tuple[JudgeOutcome, ...]) -> None:
+        if not run.eval_run_id:
+            raise ValueError("judge run eval_run_id must be non-empty")
+        Repository._validate_judge_cohort(run.cohort)
+        if run.run_at.tzinfo is None or run.run_at.utcoffset() != _UTC_OFFSET:
+            raise ValueError("judge run timestamp must be timezone-aware UTC")
+        if run.status not in _JUDGE_RUN_STATUSES:
+            raise ValueError("judge run status is not supported")
+        if not run.status_reason:
+            raise ValueError("judge run status reason must be non-empty")
+        if (
+            isinstance(run.judge_failure_count, bool)
+            or not isinstance(run.judge_failure_count, int)
+            or run.judge_failure_count < 0
+        ):
+            raise ValueError("judge run failure count must be a non-negative integer")
+        for outcome in results:
+            Repository._validate_judge_outcome(outcome)
+
+    @staticmethod
+    def _validate_judge_outcome(outcome: JudgeOutcome) -> None:
+        if not outcome.decision_id:
+            raise ValueError("judge outcome decision_id must be non-empty")
+        if outcome.error is not None:
+            if not isinstance(outcome.error, str) or not outcome.error:
+                raise ValueError("a failed judge outcome must carry a non-empty error")
+            if outcome.score is not None:
+                raise ValueError("a failed judge outcome must not carry a score")
+        else:
+            if (
+                isinstance(outcome.score, bool)
+                or not isinstance(outcome.score, int)
+                or not 1 <= outcome.score <= 5
+            ):
+                raise ValueError(
+                    "a successful judge outcome must carry an integer score between 1 and 5"
+                )
+            if not isinstance(outcome.rationale, str) or not outcome.rationale:
+                raise ValueError("a successful judge outcome must carry a non-empty rationale")
+
     @staticmethod
     def _validate_override_submission(submission: OverrideSubmission) -> None:
         if submission.action not in {"accepted", "modified", "rejected"}:
@@ -731,3 +1033,20 @@ class Repository:
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         values = cast(dict[str, Any], dict(row))
         return {key: value for key, value in values.items() if value is not None}
+
+
+def _new_judge_ulid() -> str:
+    """Generate one ULID for an ``eval_results`` row written by a judge run.
+
+    ``JudgeOutcome`` carries no ID (see ``glassbox/eval/judge_models.py``), so
+    the repository mints one here, matching the encoding
+    ``glassbox/sdk/tracer.py``'s ``_new_ulid`` uses for every other canonical
+    ID: a millisecond timestamp in the high bits, 80 random bits, and
+    Crockford base32 (minus ``I``/``L``/``O``/``U``) with no separators.
+    """
+    value = (int(datetime.now(UTC).timestamp() * 1_000) << 80) | secrets.randbits(80)
+    result = ""
+    for _ in range(26):
+        value, remainder = divmod(value, 32)
+        result = _JUDGE_ULID_ALPHABET[remainder] + result
+    return result

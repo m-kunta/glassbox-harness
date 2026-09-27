@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,9 @@ from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
 from glassbox.store.repository import (
     FeedbackSubmission,
+    JudgeCohort,
+    JudgeOutcome,
+    JudgeRun,
     OverrideSubmission,
     QueueCursor,
     QueueQuery,
@@ -65,6 +69,168 @@ TIMESTAMP_ORDER_DECISION_IDS = (
 TIMESTAMP_ORDER_SECONDS = datetime(2026, 9, 27, 12, 0, 45, 0, tzinfo=UTC)
 TIMESTAMP_ORDER_MILLIS = datetime(2026, 9, 27, 12, 0, 45, 123_000, tzinfo=UTC)
 TIMESTAMP_ORDER_MICROS = datetime(2026, 9, 27, 12, 0, 45, 123_456, tzinfo=UTC)
+
+JUDGE_COHORT = JudgeCohort(provider="openai", model="gpt-4o", rubric_version="reasoning_quality_v1")
+JUDGE_SINCE = datetime(2026, 6, 1, tzinfo=UTC)
+
+JUDGE_BACKLOG_AND_RECENT_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD0"
+JUDGE_BACKLOG_AND_RECENT_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+JUDGE_BACKLOG_AND_RECENT_SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD2"
+JUDGE_BACKLOG_ONLY_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD3"
+JUDGE_BACKLOG_ONLY_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD4"
+JUDGE_RECENT_ONLY_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD5"
+JUDGE_RECENT_ONLY_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD6"
+JUDGE_BOUNDARY_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD7"
+JUDGE_BOUNDARY_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FD8"
+
+JUDGE_FAIL_ONLY_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDA"
+JUDGE_FAIL_ONLY_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDB"
+JUDGE_SUCCESS_THEN_FAIL_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDC"
+JUDGE_SUCCESS_THEN_FAIL_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDD"
+JUDGE_FAIL_THEN_SUCCESS_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDE"
+JUDGE_FAIL_THEN_SUCCESS_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDF"
+
+JUDGE_EVAL_RUN_ID_FAIL_ONLY = "01ARZ3NDEKTSV4RRFFQ69G5FDG"
+JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_OLD = "01ARZ3NDEKTSV4RRFFQ69G5FDH"
+JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_NEW = "01ARZ3NDEKTSV4RRFFQ69G5FDJ"
+JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_OLD = "01ARZ3NDEKTSV4RRFFQ69G5FDK"
+JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_NEW = "01ARZ3NDEKTSV4RRFFQ69G5FDM"
+JUDGE_EVAL_RESULT_ID_FAIL_ONLY = "01ARZ3NDEKTSV4RRFFQ69G5FDN"
+JUDGE_EVAL_RESULT_ID_SUCCESS_THEN_FAIL_OLD = "01ARZ3NDEKTSV4RRFFQ69G5FDP"
+JUDGE_EVAL_RESULT_ID_SUCCESS_THEN_FAIL_NEW = "01ARZ3NDEKTSV4RRFFQ69G5FDQ"
+JUDGE_EVAL_RESULT_ID_FAIL_THEN_SUCCESS_OLD = "01ARZ3NDEKTSV4RRFFQ69G5FDR"
+JUDGE_EVAL_RESULT_ID_FAIL_THEN_SUCCESS_NEW = "01ARZ3NDEKTSV4RRFFQ69G5FDS"
+
+JUDGE_RUN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDT"
+JUDGE_OK_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDV"
+JUDGE_OK_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDW"
+JUDGE_FAILED_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDX"
+JUDGE_FAILED_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FDY"
+JUDGE_MISSING_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FZZ"
+
+
+def _judge_timestamp_text(value: datetime) -> str:
+    assert value.microsecond == 0
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _seed_decision_for_judge(
+    repository: Repository, *, trace_id: str, decision_id: str, decided_at: datetime
+) -> DecisionEvent:
+    trace, _, decision, _ = _events()
+    trace = trace.model_copy(update={"trace_id": trace_id, "started_at": decided_at})
+    decision = decision.model_copy(
+        update={"decision_id": decision_id, "trace_id": trace_id, "decided_at": decided_at}
+    )
+    repository.write_event(trace)
+    repository.write_event(decision)
+    return decision
+
+
+def _seed_llm_span(
+    repository: Repository,
+    *,
+    span_id: str,
+    trace_id: str,
+    started_at: datetime,
+    model: str,
+    provider: str | None = None,
+) -> None:
+    repository.write_event(
+        SpanEvent(
+            span_id=span_id,
+            trace_id=trace_id,
+            name="generate_recommendation",
+            span_kind="llm",
+            started_at=started_at,
+            model=model,
+            attributes={} if provider is None else {"gen_ai.provider.name": provider},
+        )
+    )
+
+
+def _seed_scored_feedback(
+    repository: Repository,
+    *,
+    feedback_id: str,
+    decision_id: str,
+    created_at: datetime,
+    score: int,
+    idempotency_key: str,
+    rubric_version: str = "reasoning_quality_v1",
+) -> None:
+    repository.record_feedback(
+        FeedbackSubmission(
+            feedback_id=feedback_id,
+            decision_id=decision_id,
+            verdict="agree",
+            reason_code=None,
+            free_text=None,
+            corrected_recommendation=None,
+            created_at=created_at,
+            idempotency_key=idempotency_key,
+            reasoning_quality_score=score,
+            reasoning_quality_rubric_version=rubric_version,
+        )
+    )
+
+
+def _insert_judge_eval_run(
+    database: Database,
+    *,
+    eval_run_id: str,
+    run_at: datetime,
+    cohort: JudgeCohort = JUDGE_COHORT,
+) -> None:
+    database.connection.execute(
+        """
+        INSERT INTO eval_runs (
+            eval_run_id, suite_id, suite_version, agent_version, run_at, run_kind,
+            judge_provider, judge_model, rubric_version, judge_temperature,
+            self_judge_allowed, status, status_reason, judge_failure_count
+        ) VALUES (
+            ?, 'judge-calibration', 'v1', 'judge', ?, 'judge', ?, ?, ?, 0, 0, 'passed', 'ok', 0
+        )
+        """,
+        (
+            eval_run_id,
+            _judge_timestamp_text(run_at),
+            cohort.provider,
+            cohort.model,
+            cohort.rubric_version,
+        ),
+    )
+    database.connection.commit()
+
+
+def _insert_judge_eval_result(
+    database: Database,
+    *,
+    eval_result_id: str,
+    eval_run_id: str,
+    decision_id: str,
+    run_at: datetime,
+    score: float | None,
+) -> None:
+    database.connection.execute(
+        """
+        INSERT INTO eval_results (
+            eval_result_id, eval_run_id, case_id, assertion_name, passed, score,
+            judge_rationale, run_at, decision_id, self_judge_bypassed
+        ) VALUES (?, ?, ?, 'reasoning_quality', ?, ?, ?, ?, ?, 0)
+        """,
+        (
+            eval_result_id,
+            eval_run_id,
+            decision_id,
+            1 if score is not None else 0,
+            score,
+            "ok" if score is not None else "judge error",
+            _judge_timestamp_text(run_at),
+            decision_id,
+        ),
+    )
+    database.connection.commit()
 
 
 def _feedback_submission(
@@ -735,3 +901,361 @@ def test_timestamp_order_uses_instants_not_rfc3339_text(tmp_path: Path) -> None:
         TIMESTAMP_ORDER_DECISION_IDS[2],  # milliseconds
         TIMESTAMP_ORDER_DECISION_IDS[0],  # microseconds: latest last
     ]
+
+
+# --- Judge calibration: candidate selection and run persistence (P3a Task 3) ---
+
+
+def test_judge_candidates_returns_deduplicated_backlog_then_recent_groups_in_order(
+    tmp_path: Path,
+) -> None:
+    """Candidate union order is calibration backlog first (newest decided_at
+    first), then recent-only decisions (newest decided_at first). A decision
+    in both groups appears once, in the backlog slot, with both flags true."""
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+
+    backlog_and_recent = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_BACKLOG_AND_RECENT_TRACE_ID,
+        decision_id=JUDGE_BACKLOG_AND_RECENT_DECISION_ID,
+        decided_at=datetime(2026, 6, 10, tzinfo=UTC),
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FE0",
+        decision_id=backlog_and_recent.decision_id,
+        created_at=datetime(2026, 6, 10, 1, tzinfo=UTC),
+        score=5,
+        idempotency_key="judge-feedback-backlog-and-recent",
+    )
+    _seed_llm_span(
+        repository,
+        span_id=JUDGE_BACKLOG_AND_RECENT_SPAN_ID,
+        trace_id=JUDGE_BACKLOG_AND_RECENT_TRACE_ID,
+        started_at=datetime(2026, 6, 10, tzinfo=UTC),
+        model="gpt-4o",
+        provider="openai",
+    )
+
+    backlog_only = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_BACKLOG_ONLY_TRACE_ID,
+        decision_id=JUDGE_BACKLOG_ONLY_DECISION_ID,
+        decided_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
+        decision_id=backlog_only.decision_id,
+        created_at=datetime(2026, 5, 1, 1, tzinfo=UTC),
+        score=3,
+        idempotency_key="judge-feedback-backlog-only",
+    )
+
+    recent_only = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_RECENT_ONLY_TRACE_ID,
+        decision_id=JUDGE_RECENT_ONLY_DECISION_ID,
+        decided_at=datetime(2026, 6, 5, tzinfo=UTC),
+    )
+
+    candidates = repository.judge_candidates(JUDGE_COHORT, JUDGE_SINCE)
+
+    assert [
+        (c.decision.event.decision_id, c.calibration_backlog, c.recent_gated) for c in candidates
+    ] == [
+        (backlog_and_recent.decision_id, True, True),
+        (backlog_only.decision_id, True, False),
+        (recent_only.decision_id, False, True),
+    ]
+
+    by_id = {c.decision.event.decision_id: c for c in candidates}
+    assert by_id[backlog_and_recent.decision_id].human_score == 5
+    assert by_id[backlog_and_recent.decision_id].llm_models == ("gpt-4o",)
+    assert by_id[backlog_and_recent.decision_id].llm_providers == ("openai",)
+    assert by_id[backlog_only.decision_id].human_score == 3
+    assert by_id[backlog_only.decision_id].llm_models == ()
+    assert by_id[backlog_only.decision_id].llm_providers == ()
+    assert by_id[recent_only.decision_id].human_score is None
+
+
+def test_judge_candidates_decided_since_boundary_is_inclusive(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    boundary = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_BOUNDARY_TRACE_ID,
+        decision_id=JUDGE_BOUNDARY_DECISION_ID,
+        decided_at=JUDGE_SINCE,
+    )
+
+    candidates = repository.judge_candidates(JUDGE_COHORT, JUDGE_SINCE)
+
+    assert [(c.decision.event.decision_id, c.recent_gated) for c in candidates] == [
+        (boundary.decision_id, True)
+    ]
+
+
+def test_judge_candidates_excludes_decisions_with_any_successful_result_in_cohort(
+    tmp_path: Path,
+) -> None:
+    """A failed judge result never satisfies calibration backlog, and a
+    decision with a successful result anywhere in its history is excluded
+    from the backlog even if a later attempt in the same cohort failed."""
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    far_past = datetime(2026, 1, 1, tzinfo=UTC)
+
+    fail_only = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_FAIL_ONLY_TRACE_ID,
+        decision_id=JUDGE_FAIL_ONLY_DECISION_ID,
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FE2",
+        decision_id=fail_only.decision_id,
+        created_at=far_past,
+        score=2,
+        idempotency_key="judge-feedback-fail-only",
+    )
+    _insert_judge_eval_run(database, eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_ONLY, run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id=JUDGE_EVAL_RESULT_ID_FAIL_ONLY,
+        eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_ONLY,
+        decision_id=fail_only.decision_id,
+        run_at=far_past,
+        score=None,
+    )
+
+    success_then_fail = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_SUCCESS_THEN_FAIL_TRACE_ID,
+        decision_id=JUDGE_SUCCESS_THEN_FAIL_DECISION_ID,
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FE3",
+        decision_id=success_then_fail.decision_id,
+        created_at=far_past,
+        score=4,
+        idempotency_key="judge-feedback-success-then-fail",
+    )
+    _insert_judge_eval_run(
+        database, eval_run_id=JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_OLD, run_at=far_past
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id=JUDGE_EVAL_RESULT_ID_SUCCESS_THEN_FAIL_OLD,
+        eval_run_id=JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_OLD,
+        decision_id=success_then_fail.decision_id,
+        run_at=far_past,
+        score=4,
+    )
+    _insert_judge_eval_run(
+        database,
+        eval_run_id=JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_NEW,
+        run_at=far_past + timedelta(days=1),
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id=JUDGE_EVAL_RESULT_ID_SUCCESS_THEN_FAIL_NEW,
+        eval_run_id=JUDGE_EVAL_RUN_ID_SUCCESS_THEN_FAIL_NEW,
+        decision_id=success_then_fail.decision_id,
+        run_at=far_past + timedelta(days=1),
+        score=None,
+    )
+
+    fail_then_success = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_FAIL_THEN_SUCCESS_TRACE_ID,
+        decision_id=JUDGE_FAIL_THEN_SUCCESS_DECISION_ID,
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FE4",
+        decision_id=fail_then_success.decision_id,
+        created_at=far_past,
+        score=5,
+        idempotency_key="judge-feedback-fail-then-success",
+    )
+    _insert_judge_eval_run(
+        database, eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_OLD, run_at=far_past
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id=JUDGE_EVAL_RESULT_ID_FAIL_THEN_SUCCESS_OLD,
+        eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_OLD,
+        decision_id=fail_then_success.decision_id,
+        run_at=far_past,
+        score=None,
+    )
+    _insert_judge_eval_run(
+        database,
+        eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_NEW,
+        run_at=far_past + timedelta(days=1),
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id=JUDGE_EVAL_RESULT_ID_FAIL_THEN_SUCCESS_NEW,
+        eval_run_id=JUDGE_EVAL_RUN_ID_FAIL_THEN_SUCCESS_NEW,
+        decision_id=fail_then_success.decision_id,
+        run_at=far_past + timedelta(days=1),
+        score=5,
+    )
+
+    candidates = repository.judge_candidates(JUDGE_COHORT, JUDGE_SINCE)
+
+    assert [(c.decision.event.decision_id, c.calibration_backlog) for c in candidates] == [
+        (fail_only.decision_id, True)
+    ]
+
+
+def test_record_judge_run_persists_run_and_results_with_correct_nullability_and_flags(
+    tmp_path: Path,
+) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    ok_decision = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_OK_TRACE_ID,
+        decision_id=JUDGE_OK_DECISION_ID,
+        decided_at=datetime(2026, 6, 10, tzinfo=UTC),
+    )
+    failed_decision = _seed_decision_for_judge(
+        repository,
+        trace_id=JUDGE_FAILED_TRACE_ID,
+        decision_id=JUDGE_FAILED_DECISION_ID,
+        decided_at=datetime(2026, 6, 11, tzinfo=UTC),
+    )
+    run = JudgeRun(
+        eval_run_id=JUDGE_RUN_ID,
+        cohort=JUDGE_COHORT,
+        run_at=datetime(2026, 6, 12, tzinfo=UTC),
+        status="passed",
+        status_reason="calibration gate satisfied",
+        judge_failure_count=1,
+        self_judge_allowed=False,
+    )
+    results = (
+        JudgeOutcome(
+            decision_id=ok_decision.decision_id,
+            score=4,
+            rationale="Well-grounded in the cited evidence.",
+            error=None,
+            self_judge_bypassed=False,
+        ),
+        JudgeOutcome(
+            decision_id=failed_decision.decision_id,
+            score=None,
+            rationale=None,
+            error="judge response was not valid JSON",
+            self_judge_bypassed=True,
+        ),
+    )
+
+    repository.record_judge_run(run, results)
+
+    run_row = database.connection.execute(
+        "SELECT * FROM eval_runs WHERE eval_run_id = ?", (JUDGE_RUN_ID,)
+    ).fetchone()
+    assert run_row is not None
+    assert run_row["run_kind"] == "judge"
+    assert run_row["judge_provider"] == "openai"
+    assert run_row["judge_model"] == "gpt-4o"
+    assert run_row["rubric_version"] == "reasoning_quality_v1"
+    assert run_row["judge_temperature"] == 0
+    assert run_row["self_judge_allowed"] == 0
+    assert run_row["status"] == "passed"
+    assert run_row["status_reason"] == "calibration gate satisfied"
+    assert run_row["judge_failure_count"] == 1
+
+    result_rows = {
+        row["decision_id"]: row
+        for row in database.connection.execute(
+            "SELECT * FROM eval_results WHERE eval_run_id = ?", (JUDGE_RUN_ID,)
+        )
+    }
+    ok_row = result_rows[ok_decision.decision_id]
+    assert ok_row["score"] == 4
+    assert ok_row["judge_rationale"] == "Well-grounded in the cited evidence."
+    assert ok_row["passed"] == 1
+    assert ok_row["self_judge_bypassed"] == 0
+    assert ok_row["assertion_name"] == "reasoning_quality"
+    assert ok_row["case_id"] == ok_decision.decision_id
+
+    failed_row = result_rows[failed_decision.decision_id]
+    assert failed_row["score"] is None
+    assert failed_row["judge_rationale"] == "judge response was not valid JSON"
+    assert failed_row["passed"] == 0
+    assert failed_row["self_judge_bypassed"] == 1
+
+
+def test_record_judge_run_rejects_a_successful_outcome_carrying_an_error(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    run = JudgeRun(
+        eval_run_id=JUDGE_RUN_ID,
+        cohort=JUDGE_COHORT,
+        run_at=datetime(2026, 6, 12, tzinfo=UTC),
+        status="passed",
+        status_reason="calibration gate satisfied",
+        judge_failure_count=0,
+        self_judge_allowed=False,
+    )
+    outcome = JudgeOutcome(
+        decision_id=DECISION_ID,
+        score=4,
+        rationale="ok",
+        error="unexpected error",
+        self_judge_bypassed=False,
+    )
+
+    with pytest.raises(ValueError, match="score"):
+        repository.record_judge_run(run, (outcome,))
+
+
+def test_record_judge_run_rejects_an_unsupported_status(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    run = JudgeRun(
+        eval_run_id=JUDGE_RUN_ID,
+        cohort=JUDGE_COHORT,
+        run_at=datetime(2026, 6, 12, tzinfo=UTC),
+        status="passed",
+        status_reason="calibration gate satisfied",
+        judge_failure_count=0,
+        self_judge_allowed=False,
+    )
+    invalid_run = dataclasses.replace(run, status="bogus")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="status"):
+        repository.record_judge_run(invalid_run, ())
+
+
+def test_record_judge_run_is_atomic_when_a_result_violates_a_foreign_key(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    run = JudgeRun(
+        eval_run_id=JUDGE_RUN_ID,
+        cohort=JUDGE_COHORT,
+        run_at=datetime(2026, 6, 12, tzinfo=UTC),
+        status="failed",
+        status_reason="all cases errored",
+        judge_failure_count=1,
+        self_judge_allowed=False,
+    )
+    outcome = JudgeOutcome(
+        decision_id=JUDGE_MISSING_DECISION_ID,
+        score=None,
+        rationale=None,
+        error="boom",
+        self_judge_bypassed=False,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.record_judge_run(run, (outcome,))
+
+    assert database.connection.execute("SELECT COUNT(*) FROM eval_runs").fetchone()[0] == 0
+    assert database.connection.execute("SELECT COUNT(*) FROM eval_results").fetchone()[0] == 0
