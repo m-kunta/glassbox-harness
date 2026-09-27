@@ -320,7 +320,7 @@ def test_run_judge_prompt_includes_only_the_allowed_decision_fields(
     run_judge(
         database_path,
         _config(model="gpt-4o"),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -390,7 +390,7 @@ def test_run_judge_isolates_injected_evidence_between_untrusted_markers(
     run_judge(
         database_path,
         _config(),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -435,7 +435,7 @@ def test_run_judge_self_judge_match_refuses_without_calling_the_provider(
     report = run_judge(
         database_path,
         _config(provider="openai", model="gpt-4o"),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -447,6 +447,16 @@ def test_run_judge_self_judge_match_refuses_without_calling_the_provider(
     assert outcome.score is None
     assert outcome.error is not None and "self-judge" in outcome.error
     assert outcome.self_judge_bypassed is False
+
+    # A self-judge refusal is not evidence the judge malfunctioned, so it must
+    # be reported in its own dedicated count, not folded into the generic
+    # gated-failure/calibration-failure denominators (which would otherwise
+    # make every candidate in the common single-agent-model case look like a
+    # broken judge -- see JudgeReport.self_judge_refused_count).
+    assert report.self_judge_refused_count == 1
+    assert report.gated_selected == 0
+    assert report.gated_failures == 0
+    assert report.calibration_attempted == 0
 
     database = Database.open(database_path)
     row = database.connection.execute(
@@ -483,7 +493,7 @@ def test_run_judge_self_judge_bypass_calls_provider_and_persists_the_bypass_flag
     report = run_judge(
         database_path,
         _config(provider="openai", model="gpt-4o"),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=True,
     )
@@ -520,7 +530,7 @@ def test_run_judge_reports_missing_span_model_diagnostic_but_still_judges(
     report = run_judge(
         database_path,
         _config(),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -572,7 +582,7 @@ def test_run_judge_max_cases_caps_the_presorted_candidate_union(
     report = run_judge(
         database_path,
         _config(),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=1,
         allow_self_judge=False,
     )
@@ -601,7 +611,7 @@ def test_run_judge_isolates_a_per_case_provider_failure(
     report = run_judge(
         database_path,
         _config(),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -646,7 +656,7 @@ def test_run_judge_isolates_a_dangling_evidence_citation_without_calling_the_pro
     report = run_judge(
         database_path,
         _config(),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -738,7 +748,7 @@ def test_run_judge_calibration_pairs_include_this_runs_own_newly_judged_backlog(
     report = run_judge(
         database_path,
         _config(provider=cohort.provider, model=cohort.model),
-        since=timedelta(days=1),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
         max_cases=None,
         allow_self_judge=False,
     )
@@ -783,7 +793,11 @@ def test_run_judge_status_uncalibrated_too_few_labels(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.calibration_pairs == 0
@@ -811,7 +825,11 @@ def test_run_judge_status_uncalibrated_kappa_undefined(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.calibration_pairs == 30
@@ -840,7 +858,11 @@ def test_run_judge_status_uncalibrated_kappa_below_threshold(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.calibration_pairs == 30
@@ -875,7 +897,11 @@ def test_run_judge_status_uncalibrated_gated_set_too_small(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.calibration_pairs == 30
@@ -903,7 +929,11 @@ def test_run_judge_status_uncalibrated_failure_rate_too_high(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.gated_selected == 11
@@ -933,7 +963,11 @@ def test_run_judge_status_passed_when_calibrated_and_mean_meets_threshold(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.gated_successes == 10
@@ -963,7 +997,11 @@ def test_run_judge_status_failed_when_calibrated_but_mean_below_threshold(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     assert report.gated_successes == 10
@@ -989,7 +1027,11 @@ def test_judge_report_to_dict_is_json_serializable_with_expected_shape(
     _patch_provider(monkeypatch, fake)
 
     report = run_judge(
-        database_path, _config(), since=timedelta(days=1), max_cases=None, allow_self_judge=False
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
     )
 
     payload = report.to_dict()
@@ -1009,3 +1051,4 @@ def test_judge_report_to_dict_is_json_serializable_with_expected_shape(
     assert reloaded["gated"]["selected"] == 1
     assert reloaded["gated"]["succeeded"] == 1
     assert reloaded["self_judge"]["unverified_count"] == 1
+    assert reloaded["self_judge"]["refused_count"] == 0

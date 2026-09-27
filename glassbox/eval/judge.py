@@ -18,7 +18,7 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -30,7 +30,7 @@ from .judge_models import JudgeCandidate, JudgeCohort, JudgeOutcome, JudgeRun, J
 from .judge_provider import JudgeProvider, create_judge_provider, parse_judge_response
 from .metrics import BootstrapInterval, bootstrap_kappa_interval, ordinal_linear_weighted_kappa
 
-_RUBRIC_VERSION = "reasoning_quality_v1"
+RUBRIC_VERSION = "reasoning_quality_v1"
 _RUBRICS_DIR = Path(__file__).parent / "rubrics"
 
 _MIN_CALIBRATION_PAIRS = 30
@@ -129,6 +129,7 @@ class JudgeReport:
     self_judge_unverified_count: int
     self_judge_unverified_decision_ids: tuple[str, ...]
     self_judge_bypassed_count: int
+    self_judge_refused_count: int
 
     outcomes: tuple[JudgeOutcome, ...]
 
@@ -171,14 +172,30 @@ class JudgeReport:
                 "unverified_count": self.self_judge_unverified_count,
                 "unverified_decision_ids": list(self.self_judge_unverified_decision_ids),
                 "bypassed_count": self.self_judge_bypassed_count,
+                "refused_count": self.self_judge_refused_count,
             },
         }
+
+
+def build_judge_cohort(config: JudgeConfig) -> JudgeCohort:
+    """Build the fixed ``reasoning_quality_v1`` judge cohort for *config*.
+
+    Shared by the CLI's preflight disclosure and this module's own
+    ``run_judge`` so both compute the identical (provider, model,
+    rubric_version) cohort identity from a single source of truth, instead
+    of each constructing ``JudgeCohort(...)`` independently -- and so the
+    CLI never needs to import this module's rubric-version constant
+    directly.
+    """
+    return JudgeCohort(
+        provider=config.provider, model=config.model, rubric_version=RUBRIC_VERSION
+    )
 
 
 def run_judge(
     database_path: Path,
     config: JudgeConfig,
-    since: timedelta,
+    decided_since: datetime,
     max_cases: int | None,
     allow_self_judge: bool,
 ) -> JudgeReport:
@@ -186,20 +203,25 @@ def run_judge(
 
     Selects the de-duplicated calibration-backlog-then-recent candidate union
     for ``config``'s provider/model against the fixed
-    ``reasoning_quality_v1`` rubric, applies ``max_cases`` to that already
-    fixed-ordered union, judges each remaining candidate (refusing a detected
-    self-judge match unless ``allow_self_judge`` is set, and isolating any
-    per-decision provider or parse failure), evaluates the calibration gate
-    against the full cross-run calibration history, and persists one
-    ``eval_runs`` row plus its per-decision ``eval_results`` rows before
-    returning the report.
+    ``reasoning_quality_v1`` rubric (every decision with ``decided_at >=
+    decided_since`` is in the recent-gated group), applies ``max_cases`` to
+    that already fixed-ordered union, judges each remaining candidate
+    (refusing a detected self-judge match unless ``allow_self_judge`` is
+    set, and isolating any per-decision provider or parse failure),
+    evaluates the calibration gate against the full cross-run calibration
+    history, and persists one ``eval_runs`` row plus its per-decision
+    ``eval_results`` rows before returning the report.
+
+    ``decided_since`` is a precomputed cutoff, not a ``timedelta`` resolved
+    against "now" inside this function -- the caller (the CLI) computes it
+    once and passes the identical value to both its own preflight
+    ``judge_candidates()`` disclosure call and this function, so what was
+    disclosed for consent is guaranteed to use the same cutoff as what is
+    actually judged and sent to the provider.
     """
     repository = Repository(Database.open(database_path))
-    cohort = JudgeCohort(
-        provider=config.provider, model=config.model, rubric_version=_RUBRIC_VERSION
-    )
+    cohort = build_judge_cohort(config)
     run_at = datetime.now(UTC)
-    decided_since = run_at - since
 
     all_candidates = repository.judge_candidates(cohort, decided_since)
     backlog_count = sum(1 for candidate in all_candidates if candidate.calibration_backlog)
@@ -296,6 +318,7 @@ def run_judge(
         self_judge_unverified_count=len(unverified_decision_ids),
         self_judge_unverified_decision_ids=tuple(unverified_decision_ids),
         self_judge_bypassed_count=sum(1 for outcome in outcomes if outcome.self_judge_bypassed),
+        self_judge_refused_count=tally.self_judge_refused_count,
         outcomes=tuple(outcomes),
     )
 
@@ -309,6 +332,7 @@ class _RunTally:
     gated_selected: int
     gated_successes: int
     gated_scores: list[int]
+    self_judge_refused_count: int
 
 
 def _summarize_run(
@@ -321,6 +345,15 @@ def _summarize_run(
     tallies. This is *this invocation's* view only -- the cross-run
     calibration pair/kappa computation is separate (see
     ``Repository.judge_calibration_pairs``).
+
+    A self-judge refusal (see ``_SELF_JUDGE_REFUSAL``) is excluded entirely
+    from the calibration-attempted and gated-selected denominators -- it is
+    not evidence the judge itself malfunctioned, only that this cohort's
+    configured model matched a recorded LLM span model for that decision, so
+    counting it as a generic failure would silently skew
+    ``calibration_failure_rate``/``gated_failure_rate`` (and, in the common
+    single-agent-model case, could make every candidate look like a broken
+    judge). It is tallied separately as ``self_judge_refused_count`` instead.
     """
     outcomes_by_decision = {outcome.decision_id: outcome for outcome in outcomes}
     calibration_attempted = 0
@@ -328,8 +361,12 @@ def _summarize_run(
     gated_selected = 0
     gated_successes = 0
     gated_scores: list[int] = []
+    self_judge_refused_count = 0
     for candidate in candidates:
         outcome = outcomes_by_decision[candidate.decision.event.decision_id]
+        if outcome.error == _SELF_JUDGE_REFUSAL:
+            self_judge_refused_count += 1
+            continue
         succeeded = outcome.error is None
         if candidate.calibration_backlog:
             calibration_attempted += 1
@@ -347,6 +384,7 @@ def _summarize_run(
         gated_selected=gated_selected,
         gated_successes=gated_successes,
         gated_scores=gated_scores,
+        self_judge_refused_count=self_judge_refused_count,
     )
 
 

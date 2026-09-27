@@ -132,5 +132,17 @@ source_modules = ["glassbox.web"]
 # glassbox.web may legitimately import other glassbox.eval submodules later
 # (e.g. shared metrics), so only the judge stack itself is forbidden here --
 # not all of glassbox.eval, unlike the broader sdk-dependencies and
-# collector-dependencies contracts above.
-forbidden_modules = ["glassbox.eval.judge", "glassbox.sdk"]
+# collector-dependencies contracts above. The judge stack is four sibling
+# modules, not just glassbox.eval.judge itself: judge_config (loads dotenv),
+# judge_provider (the provider-SDK factories), and judge_models (the
+# eval-side re-export of the judge value types) all carry the same
+# optional-dependency/egress surface and must be listed explicitly --
+# import-linter's "forbidden" contract type does not extend a restriction to
+# sibling modules on its own.
+forbidden_modules = [
+  "glassbox.eval.judge",
+  "glassbox.eval.judge_config",
+  "glassbox.eval.judge_provider",
+  "glassbox.eval.judge_models",
+  "glassbox.sdk",
+]

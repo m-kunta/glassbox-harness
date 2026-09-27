@@ -4,7 +4,7 @@ import json
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -319,12 +319,19 @@ def _patch_run_judge(
 ) -> list[tuple[object, ...]]:
     calls: list[tuple[object, ...]] = []
 
-    def fake_run_judge(database_path, config, since, max_cases, allow_self_judge):  # type: ignore[no-untyped-def]
-        calls.append((database_path, config, since, max_cases, allow_self_judge))
+    def fake_run_judge(database_path, config, decided_since, max_cases, allow_self_judge):  # type: ignore[no-untyped-def]
+        calls.append((database_path, config, decided_since, max_cases, allow_self_judge))
         return report
 
     monkeypatch.setattr("glassbox.eval.judge.run_judge", fake_run_judge)
     return calls
+
+
+def _patch_run_judge_raising(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+    def fake_run_judge(database_path, config, decided_since, max_cases, allow_self_judge):  # type: ignore[no-untyped-def]
+        raise exc
+
+    monkeypatch.setattr("glassbox.eval.judge.run_judge", fake_run_judge)
 
 
 def test_serve_export_and_eval_never_import_the_judge_module(
@@ -512,7 +519,9 @@ def test_judge_command_prints_the_preflight_disclosure_for_a_loopback_provider(
     assert "base_url=http://127.0.0.1:11434" in error
     assert "calibration_backlog_count=0" in error
     assert "recent_gated_count=0" in error
-    assert "deduplicated_send_count=0" in error
+    assert "deduplicated_total=0" in error
+    assert "send_count=0" in error
+    assert "self_judge_unverified_count=0" in error
 
 
 def test_judge_command_returns_two_for_a_nonexistent_database_path(
@@ -611,6 +620,7 @@ def test_judge_command_passes_parsed_arguments_through_to_run_judge(
     _patch_judge_config(monkeypatch)
     calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
 
+    before = datetime.now(UTC)
     assert (
         main(
             [
@@ -624,12 +634,224 @@ def test_judge_command_passes_parsed_arguments_through_to_run_judge(
         )
         == 0
     )
+    after = datetime.now(UTC)
     capsys.readouterr()
 
-    from datetime import timedelta
-
-    [(database_path, config, since, max_cases, allow_self_judge)] = calls
+    [(database_path, config, decided_since, max_cases, allow_self_judge)] = calls
     assert database_path == Path("glassbox.sqlite3")
-    assert since == timedelta(minutes=30)
+    # `run_judge` now receives a precomputed cutoff (Finding 4), not the raw
+    # `--since` duration -- the CLI resolves it once against "now" itself.
+    assert isinstance(decided_since, datetime)
+    assert before - timedelta(minutes=30) <= decided_since <= after - timedelta(minutes=30)
     assert max_cases == 5
     assert allow_self_judge is True
+
+
+def test_judge_command_uses_an_identical_decided_since_for_disclosure_and_run_judge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Regression test for Finding 4: the CLI's preflight disclosure query and
+    the actual run_judge() call must use the exact same `decided_since` cutoff,
+    not two independently computed values that could drift apart if a
+    decision is written between the two calls."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+
+    preflight_decided_since: list[object] = []
+    original_judge_candidates = Repository.judge_candidates
+
+    def spy_judge_candidates(self, cohort, decided_since):  # type: ignore[no-untyped-def]
+        preflight_decided_since.append(decided_since)
+        return original_judge_candidates(self, cohort, decided_since)
+
+    monkeypatch.setattr(Repository, "judge_candidates", spy_judge_candidates)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert main(["judge", "--since", "7d"]) == 0
+    capsys.readouterr()
+
+    assert len(preflight_decided_since) == 1
+    [(_, _, run_judge_decided_since, _, _)] = calls
+    assert run_judge_decided_since == preflight_decided_since[0]
+
+
+def test_judge_command_returns_two_when_run_judge_raises_a_missing_dependency_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Regression test for Finding 1: an uncaught exception escaping
+    run_judge() (a missing optional SDK extra, a provider-SDK constructor
+    error, a SQLite error during persistence, ...) must exit 2 -- the
+    operational-error code used elsewhere in this command -- never exit 1,
+    which Python's own default for an uncaught exception collides with and
+    which this command's documented exit-code contract reserves for an
+    eligible calibrated-gate failure."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge_raising(monkeypatch, ModuleNotFoundError("No module named 'anthropic'"))
+
+    assert main(["judge", "--since", "7d"]) == 2
+
+    error = capsys.readouterr().err
+    assert "judge run failed" in error
+    assert "anthropic" in error
+
+
+def test_judge_command_returns_two_when_run_judge_raises_a_generic_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    Database.open(tmp_path / "glassbox.sqlite3").close()
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge_raising(
+        monkeypatch, RuntimeError("simulated sqlite error while persisting the run")
+    )
+
+    assert main(["judge", "--since", "7d"]) == 2
+
+    error = capsys.readouterr().err
+    assert "judge run failed" in error
+    assert "simulated sqlite error" in error
+
+
+_P2_STORE_ROOT = Path(__file__).parents[1] / "glassbox" / "store"
+_P2_JUDGE_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FCA"
+_P2_JUDGE_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FCB"
+_P2_JUDGE_TIMESTAMP = "2026-09-07T12:00:00Z"
+
+
+def _create_released_p2_database(path: Path) -> None:
+    """Write a database at the released P2 (strict schema + `feedback` table)
+    fingerprint, before the P3 judge-calibration columns existed -- mirrors
+    the fixture in ``tests/store/test_database.py``'s
+    ``_create_released_p2_database`` (Task 1), duplicated here rather than
+    imported since the ``tests`` tree has no ``__init__.py`` packages to
+    import across reliably."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            (_P2_STORE_ROOT / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+        )
+        connection.executescript(
+            (_P2_STORE_ROOT / "migrations" / "002_feedback.sql").read_text(encoding="utf-8")
+        )
+        connection.execute(
+            """
+            INSERT INTO traces (
+                trace_id, agent_name, agent_version, started_at, status, environment
+            )
+            VALUES (?, 'agent', 'version', ?, 'ok', 'dev')
+            """,
+            (_P2_JUDGE_TRACE_ID, _P2_JUDGE_TIMESTAMP),
+        )
+        connection.execute(
+            """
+            INSERT INTO decisions (
+                decision_id, trace_id, agent_name, agent_version, entity_type, entity_id,
+                decision_type, recommendation, rationale, rationale_citations, confidence,
+                alternatives_considered, decided_at
+            ) VALUES (?, ?, 'agent', 'version', 'sku_dc', 'sku-1', 'flag_exception',
+                      '{}', 'reason', '[]', 0.5, '[]', ?)
+            """,
+            (_P2_JUDGE_DECISION_ID, _P2_JUDGE_TRACE_ID, _P2_JUDGE_TIMESTAMP),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_judge_command_preflight_upgrades_a_legitimate_p2_database_to_p3(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Regression test for Finding 2: commit ffb22ea switched the preflight
+    read to Database.open_read_only(), which only accepts the database's
+    exact *current* schema fingerprint and has no upgrade logic. Every user
+    with a not-yet-upgraded P2 (or older) database got a misleading
+    "unsupported schema" error on their very first `glassbox judge`
+    invocation. The preflight read must use Database.open() (write-mode,
+    with upgrade logic) once the path is confirmed to exist, exactly like
+    every other Glassbox command -- so a legitimate P2 database still
+    upgrades correctly, and the missing/typo'd-path case (the bug ffb22ea
+    fixed) still fails fast without creating anything."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "glassbox.sqlite3"
+    _create_released_p2_database(database_path)
+    _patch_judge_config(monkeypatch)
+    calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    exit_code = main(["--database", str(database_path), "judge", "--since", "7d"])
+    error = capsys.readouterr().err
+
+    assert exit_code == 0, error
+    assert "unsupported schema" not in error
+    assert len(calls) == 1
+
+    # open_read_only() only accepts the exact current (P3) schema
+    # fingerprint, so a successful open here proves the upgrade actually
+    # happened during the preflight read.
+    upgraded = Database.open_read_only(database_path)
+    upgraded.close()
+
+
+def test_judge_command_preflight_discloses_the_self_judge_unverified_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Regression test for Finding 3: a candidate decision with no recorded
+    LLM span model must be visible in the CLI's preflight disclosure --
+    before egress -- not only in the final JudgeReport after a run has
+    already happened."""
+    from glassbox.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "glassbox.sqlite3"
+    database = Database.open(database_path)
+    repository = Repository(database)
+    decided_at = datetime.now(UTC) - timedelta(minutes=5)
+    trace_id = "01ARZ3NDEKTSV4RRFFQ69G5FDA"
+    decision_id = "01ARZ3NDEKTSV4RRFFQ69G5FDB"
+    repository.write_event(
+        TraceEvent(
+            trace_id=trace_id,
+            agent_name="replenishment-triage",
+            agent_version="test",
+            started_at=decided_at,
+            ended_at=decided_at,
+            environment="dev",
+        )
+    )
+    repository.write_event(
+        DecisionEvent(
+            decision_id=decision_id,
+            trace_id=trace_id,
+            agent_name="replenishment-triage",
+            agent_version="test",
+            entity_type="exception",
+            entity_id="EXC-1",
+            decision_type="triage",
+            recommendation={"action": "review"},
+            rationale="No LLM span recorded for this decision.",
+            rationale_citations=(),
+            confidence=0.8,
+            alternatives_considered=(),
+            decided_at=decided_at,
+        )
+    )
+    database.close()
+
+    _patch_judge_config(monkeypatch)
+    _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+
+    assert main(["--database", str(database_path), "judge", "--since", "1d"]) == 0
+
+    error = capsys.readouterr().err
+    assert "recent_gated_count=1" in error
+    assert "self_judge_unverified_count=1" in error

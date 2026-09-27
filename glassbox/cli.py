@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from glassbox.eval.runner import run_suite
-from glassbox.store import Database, JudgeCohort, ReadOnlyDatabaseError, Repository, TraceTree
+from glassbox.store import Database, ReadOnlyDatabaseError, Repository, TraceTree
 from glassbox.web.export import ExportError, render_decision_export, write_decision_export
 from glassbox.web.read_service import ReadService
 from glassbox.web.server import run_server
@@ -86,8 +86,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "judge":
         # Imported here, not at module scope, so `serve`/`export`/`eval` never
         # trigger loading the judge stack's optional dependency (`dotenv`).
-        from glassbox.eval.judge import _RUBRIC_VERSION, run_judge
+        from glassbox.eval.judge import build_judge_cohort, run_judge
         from glassbox.eval.judge_config import JudgeConfigError, load_judge_config
+        from glassbox.store.database import TimestampMigrationError
 
         database_path = Path(arguments.database)
         project_root = Path.cwd()
@@ -97,17 +98,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"glassbox: unable to configure judge: {exc}", file=sys.stderr)
             return 2
 
-        cohort = JudgeCohort(
-            provider=config.provider, model=config.model, rubric_version=_RUBRIC_VERSION
-        )
+        cohort = build_judge_cohort(config)
+        # Computed once and reused for both the preflight disclosure query
+        # below and the run_judge() call at the bottom of this branch, so
+        # what is disclosed for consent and what is actually judged use an
+        # identical cutoff -- computing it independently in each place could
+        # let a decision written between the two calls appear in one but not
+        # the other.
         decided_since = datetime.now(UTC) - arguments.since
-        # Read-only: a missing or invalid --database path must fail loudly here,
-        # before any candidate is counted or run_judge() ever opens it for
-        # writing -- never silently fabricate an empty database (that would
-        # defeat the whole point of this preflight check).
+
+        # A missing or invalid --database path must fail loudly here, before
+        # any candidate is counted or run_judge() ever opens it for writing --
+        # never silently fabricate an empty database (that would defeat the
+        # whole point of this preflight check). The file-existence check is
+        # deliberately separate from opening it (mirrors `_read_trace_tree`
+        # above): once the file is confirmed to exist, `Database.open()` --
+        # not `open_read_only()` -- is used for the preflight read too, so a
+        # legitimate not-yet-upgraded P2 (or older) database still upgrades
+        # on this, its first, `glassbox judge` invocation. `open_read_only()`
+        # only accepts the database's exact current schema fingerprint and
+        # has no upgrade logic, so using it here would reject every
+        # legitimate un-upgraded database as "unsupported schema".
+        if not database_path.is_file():
+            print(
+                f"glassbox: unable to read judge candidates: Glassbox database does not "
+                f"exist: {database_path}",
+                file=sys.stderr,
+            )
+            return 2
+
         try:
-            preflight_database = Database.open_read_only(database_path)
-        except (ReadOnlyDatabaseError, OSError, sqlite3.Error) as exc:
+            preflight_database = Database.open(database_path)
+        except (OSError, sqlite3.Error, TimestampMigrationError) as exc:
             print(f"glassbox: unable to read judge candidates: {exc}", file=sys.stderr)
             return 2
 
@@ -121,16 +143,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         backlog_count = sum(1 for candidate in candidates if candidate.calibration_backlog)
         recent_count = sum(1 for candidate in candidates if candidate.recent_gated)
+        self_judge_unverified_count = sum(
+            1 for candidate in candidates if not candidate.llm_models
+        )
+        deduplicated_total = len(candidates)
         send_count = (
-            len(candidates)
+            deduplicated_total
             if arguments.max_cases is None
-            else min(len(candidates), arguments.max_cases)
+            else min(deduplicated_total, arguments.max_cases)
         )
         print(
             "glassbox: judge preflight disclosure -- "
             f"provider={config.provider} model={config.model} base_url={config.base_url} "
             f"calibration_backlog_count={backlog_count} recent_gated_count={recent_count} "
-            f"deduplicated_send_count={send_count}",
+            f"deduplicated_total={deduplicated_total} send_count={send_count} "
+            f"self_judge_unverified_count={self_judge_unverified_count}",
             file=sys.stderr,
         )
 
@@ -142,13 +169,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
 
-        report = run_judge(
-            database_path,
-            config,
-            arguments.since,
-            arguments.max_cases,
-            arguments.allow_self_judge,
-        )
+        try:
+            report = run_judge(
+                database_path,
+                config,
+                decided_since,
+                arguments.max_cases,
+                arguments.allow_self_judge,
+            )
+        except Exception as exc:
+            # An operational crash here (a missing optional provider-SDK
+            # extra, a provider-SDK constructor error, a SQLite error during
+            # persistence, ...) must never exit 1 -- that exit code is
+            # reserved for an eligible *calibrated gate* failure (see the
+            # `report.status == "failed"` branch below). Left uncaught,
+            # Python's default exit code for an uncaught exception is also 1,
+            # which a CI pipeline using --require-calibrated could misread as
+            # a real quality-gate failure instead of an operational error.
+            print(f"glassbox: judge run failed: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
         if report.status == "failed":
             return 1

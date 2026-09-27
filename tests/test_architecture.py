@@ -97,7 +97,13 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         },
         "web-dependencies": {
             "source_modules": ["glassbox.web"],
-            "forbidden_modules": ["glassbox.eval.judge", "glassbox.sdk"],
+            "forbidden_modules": [
+                "glassbox.eval.judge",
+                "glassbox.eval.judge_config",
+                "glassbox.eval.judge_provider",
+                "glassbox.eval.judge_models",
+                "glassbox.sdk",
+            ],
         },
     }
 
@@ -226,6 +232,36 @@ def test_import_linter_forbids_sdk_collector_and_web_from_the_judge_module() -> 
         forbidden = by_source[source]
         assert "glassbox.eval.judge" in forbidden or "glassbox.eval" in forbidden, (
             f"{source} must be forbidden from importing glassbox.eval.judge"
+        )
+
+
+def test_import_linter_forbids_web_from_every_judge_sibling_module() -> None:
+    """The Global Constraint is "web must not import judge code" broadly, not
+    just `glassbox.eval.judge` itself. `judge_config` (loads `dotenv`),
+    `judge_provider` (the provider-SDK factories), and `judge_models` (the
+    eval-side re-export of the judge value types) are siblings that carry the
+    same optional-dependency/egress surface, and import-linter's "forbidden"
+    contract type does not automatically extend a restriction to sibling
+    modules -- each must be listed explicitly in `web-dependencies` for
+    `lint-imports` to actually catch a new import of one of them from
+    `glassbox.web`."""
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    contracts = config["tool"]["importlinter"]["contracts"]
+    web_contract = next(
+        contract
+        for contract in contracts
+        if contract["source_modules"] == ["glassbox.web"]
+    )
+    forbidden = set(web_contract["forbidden_modules"])
+
+    for judge_module in (
+        "glassbox.eval.judge",
+        "glassbox.eval.judge_config",
+        "glassbox.eval.judge_provider",
+        "glassbox.eval.judge_models",
+    ):
+        assert judge_module in forbidden, (
+            f"glassbox.web must be forbidden from importing {judge_module}"
         )
 
 
