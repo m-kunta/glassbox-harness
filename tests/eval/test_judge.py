@@ -663,6 +663,110 @@ def test_run_judge_isolates_a_dangling_evidence_citation_without_calling_the_pro
 
 
 # ---------------------------------------------------------------------------
+# Calibration-pairs bootstrap (this run's own fresh results must count)
+# ---------------------------------------------------------------------------
+
+
+class _EchoHumanScoreProvider:
+    """Always "agrees" by returning the score embedded in the decision's own
+    rationale text (see the test below) -- used instead of the strict,
+    call-order-scripted ``FakeProvider`` because ``judge_candidates`` does
+    not promise this test's insertion order, only a fixed (backlog-then-
+    recent, newest-first) sort that this test does not otherwise care about.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def judge(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append((system_prompt, user_prompt))
+        payload = json.loads(user_prompt[user_prompt.index("{") : user_prompt.rindex("}") + 1])
+        score = int(str(payload["rationale"]).rsplit("-", 1)[-1])
+        return _score_response(score)
+
+
+def test_run_judge_calibration_pairs_include_this_runs_own_newly_judged_backlog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: the very first invocation against a cohort, judging
+    exactly the 30 backlog decisions needed for calibration, must itself
+    report ``calibration_pairs == 30`` -- not 0. Reading only pre-persist
+    history would otherwise force an identical, no-op second invocation
+    before the tool ever admits calibration is possible."""
+    database_path = tmp_path / "glassbox.sqlite3"
+    repository = Repository(Database.open(database_path))
+    cohort = JudgeCohort(provider="openai", model="gpt-4o", rubric_version=_RUBRIC_VERSION)
+    far_past = datetime(2020, 1, 1, tzinfo=UTC)
+
+    # 30 decisions, none previously judged in this cohort, each with a human
+    # score. Scores cycle 1-5 so neither side of the pair set is degenerate.
+    # Each decision's rationale embeds its own human score so the fake judge
+    # below can echo it back for guaranteed perfect agreement, regardless of
+    # the order judge_candidates() happens to process them in.
+    human_scores = [((index % 5) + 1) for index in range(30)]
+    for index, human_score in enumerate(human_scores):
+        decision_id = _ulid(f"bootstrap-decision-{index}")
+        trace_id = _ulid(f"bootstrap-trace-{index}")
+        _write_decision(
+            repository,
+            trace_id=trace_id,
+            decision_id=decision_id,
+            decided_at=far_past,
+            rationale=f"bootstrap-calibration-seed-{human_score}",
+        )
+        repository.record_feedback(
+            FeedbackSubmission(
+                feedback_id=_ulid(f"bootstrap-feedback-{index}"),
+                decision_id=decision_id,
+                verdict="agree",
+                reason_code=None,
+                free_text=None,
+                corrected_recommendation=None,
+                created_at=far_past,
+                idempotency_key=f"bootstrap-feedback-key-{index}",
+                reasoning_quality_score=human_score,
+                reasoning_quality_rubric_version=cohort.rubric_version,
+            )
+        )
+
+    # Before this run, the repository's own cross-run history has nothing.
+    assert repository.judge_calibration_pairs(cohort) == ()
+
+    fake = _EchoHumanScoreProvider()
+    _patch_provider(monkeypatch, fake)
+
+    report = run_judge(
+        database_path,
+        _config(provider=cohort.provider, model=cohort.model),
+        since=timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
+    )
+
+    assert len(fake.calls) == 30
+    assert report.calibration_attempted == 30
+    assert report.calibration_succeeded == 30
+    # The bug being fixed: a pre-persist-only read would report 0 here.
+    assert report.calibration_pairs == 30
+    # Perfect judge/human agreement -> kappa is defined and maximal, proving
+    # kappa was computed from data that includes this run's own results
+    # (there was no prior history to compute it from at all).
+    assert report.kappa == 1.0
+    # Eligibility genuinely advanced past both calibration checks using this
+    # run's own fresh contributions; it only stops at the (unrelated) gated
+    # set being empty, since no decision here fell in the --since window.
+    assert report.status == "uncalibrated"
+    assert report.reason == "gated_set_too_small"
+
+    # A fresh, independent read of the repository (as Task 6's CLI would do
+    # on a later invocation) confirms this run's results were genuinely
+    # persisted, not merely reflected in the in-memory report.
+    assert sorted(repository.judge_calibration_pairs(cohort)) == sorted(
+        zip(human_scores, human_scores)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Status/reason decision tree
 # ---------------------------------------------------------------------------
 

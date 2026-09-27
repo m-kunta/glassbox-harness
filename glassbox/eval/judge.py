@@ -7,8 +7,9 @@ one prompt per selected decision from *only* the fields the P3 design allows
 groups), refuses a detected self-judge match unless explicitly bypassed,
 isolates per-decision provider/parse failures so one bad case never aborts a
 run, computes the calibration gate against the full cross-run calibration
-history, and persists exactly one run plus its per-decision results through
-the repository.
+history *as of after this run's own effects* (see ``_combine_calibration_pairs``),
+and persists exactly one run plus its per-decision results through the
+repository.
 """
 
 from __future__ import annotations
@@ -236,7 +237,9 @@ def run_judge(
         sum(tally.gated_scores) / len(tally.gated_scores) if tally.gated_scores else None
     )
 
-    calibration_pairs = repository.judge_calibration_pairs(cohort)
+    calibration_pairs = _combine_calibration_pairs(
+        repository.judge_calibration_pairs(cohort), candidates, outcomes
+    )
     expected = [pair[0] for pair in calibration_pairs]
     predicted = [pair[1] for pair in calibration_pairs]
     kappa = ordinal_linear_weighted_kappa(expected, predicted) if calibration_pairs else None
@@ -345,6 +348,52 @@ def _summarize_run(
         gated_successes=gated_successes,
         gated_scores=gated_scores,
     )
+
+
+def _combine_calibration_pairs(
+    historical_pairs: tuple[tuple[int, int], ...],
+    candidates: tuple[JudgeCandidate, ...],
+    outcomes: list[JudgeOutcome],
+) -> tuple[tuple[int, int], ...]:
+    """Return this cohort's calibration pairs as of *after* this run persists.
+
+    ``Repository.judge_calibration_pairs`` only sees already-committed rows,
+    so read on its own -- before this run's own results are persisted -- it
+    would omit any decision this very invocation judged for the first time.
+    Left uncorrected, the very first run against a cohort with exactly 30
+    backlog decisions, all judged successfully, would report 0 calibration
+    pairs (and refuse to gate) even though it just produced all 30 labels
+    itself, forcing an identical, no-op second invocation before the tool
+    ever admits calibration is possible. That is a real bug, not a
+    defensible reading of an ambiguous spec.
+
+    A calibration-backlog candidate is, by definition (see
+    ``JudgeCandidate.calibration_backlog``), a decision with a human score
+    and *no* existing successful judge result in this cohort, so it can
+    never already appear in ``historical_pairs``; appending this run's own
+    successful backlog outcomes is therefore a safe concatenation, not a
+    de-duplicating merge, and yields exactly the pairs a fresh post-persist
+    query would return for that decision.
+
+    This intentionally does not attempt to *refresh* a pair for a decision
+    that was already outside the backlog (i.e. already had a successful
+    in-cohort result from an earlier run) and happens to be re-judged again
+    within this same run as part of the recent-gated set: ``historical_pairs``
+    still reflects that decision's prior score until a later invocation
+    re-reads it. That narrower case is a pre-existing, one-invocation-behind
+    characteristic this fix does not extend to, since resolving it would
+    require ``judge_calibration_pairs`` to expose decision identity, which
+    the current interface deliberately does not.
+    """
+    outcomes_by_decision = {outcome.decision_id: outcome for outcome in outcomes}
+    fresh_pairs: list[tuple[int, int]] = []
+    for candidate in candidates:
+        if not candidate.calibration_backlog or candidate.human_score is None:
+            continue
+        outcome = outcomes_by_decision[candidate.decision.event.decision_id]
+        if outcome.error is None and outcome.score is not None:
+            fresh_pairs.append((candidate.human_score, outcome.score))
+    return historical_pairs + tuple(fresh_pairs)
 
 
 def _decide_status(
