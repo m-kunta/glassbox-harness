@@ -118,8 +118,8 @@ class ReadService:
 def encode_cursor(row: QueueRow, sort_column: QueueSort) -> str:
     """Encode a queue row's raw database sort key as an unpadded cursor."""
     value = row.sort_value
-    if sort_column == "decided_at" and not isinstance(value, str):
-        raise ValueError("timestamp cursor value must be a string")
+    if sort_column == "decided_at" and (isinstance(value, bool) or not isinstance(value, int)):
+        raise ValueError("timestamp cursor value must be an integer")
     if sort_column == "confidence" and (isinstance(value, bool) or not isinstance(value, float)):
         raise ValueError("confidence cursor value must be a float")
     payload = json.dumps(
@@ -143,7 +143,9 @@ def decode_cursor(value: str | None, sort_column: QueueSort) -> QueueCursor | No
     sort_value = payload["value"]
     if not isinstance(decision_id, str):
         raise ValueError("invalid queue cursor")
-    if sort_column == "decided_at" and not isinstance(sort_value, str):
+    if sort_column == "decided_at" and (
+        isinstance(sort_value, bool) or not isinstance(sort_value, int)
+    ):
         raise ValueError("invalid queue cursor")
     if sort_column == "confidence" and (
         isinstance(sort_value, bool) or not isinstance(sort_value, float)

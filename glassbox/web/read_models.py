@@ -145,7 +145,7 @@ class QueueRow:
     confidence_band: ConfidenceBand
     decided_at: str
     override_status: OverrideStatus
-    sort_value: str | float
+    sort_value: int | float
 
 
 @dataclass(frozen=True)

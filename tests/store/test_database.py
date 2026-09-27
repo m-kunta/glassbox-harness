@@ -17,6 +17,12 @@ STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
 FIRST_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SECOND_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 TIMESTAMP = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+P2_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBA"
+P2_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBB"
+P2_FEEDBACK_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBC"
+P2_EVAL_RUN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBD"
+P2_EVAL_RESULT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBE"
+P2_TIMESTAMP = "2026-09-07T12:00:00Z"
 
 
 def _create_pre_strict_database(path: Path) -> None:
@@ -41,6 +47,113 @@ def _create_released_strict_database(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _create_released_p2_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            (STORE_ROOT / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+        )
+        connection.executescript(
+            (STORE_ROOT / "migrations" / "002_feedback.sql").read_text(encoding="utf-8")
+        )
+        connection.execute(
+            """
+            INSERT INTO traces (
+                trace_id, agent_name, agent_version, started_at, status, environment
+            )
+            VALUES (?, 'agent', 'version', ?, 'ok', 'dev')
+            """,
+            (P2_TRACE_ID, P2_TIMESTAMP),
+        )
+        connection.execute(
+            """
+            INSERT INTO decisions (
+                decision_id, trace_id, agent_name, agent_version, entity_type, entity_id,
+                decision_type, recommendation, rationale, rationale_citations, confidence,
+                alternatives_considered, decided_at
+            ) VALUES (?, ?, 'agent', 'version', 'sku_dc', 'sku-1', 'flag_exception',
+                      '{}', 'reason', '[]', 0.5, '[]', ?)
+            """,
+            (P2_DECISION_ID, P2_TRACE_ID, P2_TIMESTAMP),
+        )
+        connection.execute(
+            """
+            INSERT INTO feedback (feedback_id, decision_id, verdict, created_at, idempotency_key)
+            VALUES (?, ?, 'agree', ?, 'p2-feedback-request')
+            """,
+            (P2_FEEDBACK_ID, P2_DECISION_ID, P2_TIMESTAMP),
+        )
+        connection.execute(
+            """
+            INSERT INTO eval_runs (eval_run_id, suite_id, suite_version, agent_version, run_at)
+            VALUES (?, 'supply-exceptions', 'v1', 'version', ?)
+            """,
+            (P2_EVAL_RUN_ID, P2_TIMESTAMP),
+        )
+        connection.execute(
+            """
+            INSERT INTO eval_results (
+                eval_result_id, eval_run_id, case_id, assertion_name, passed, run_at
+            ) VALUES (?, ?, 'case-1', 'is-valid', 1, ?)
+            """,
+            (P2_EVAL_RESULT_ID, P2_EVAL_RUN_ID, P2_TIMESTAMP),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_database_open_upgrades_released_p2_schema_to_p3(tmp_path: Path) -> None:
+    path = tmp_path / "p2.sqlite3"
+    _create_released_p2_database(path)
+
+    migrated = Database.open(path)
+    try:
+        connection = migrated.connection
+        assert connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 1
+        feedback_row = connection.execute(
+            "SELECT decision_id, verdict, reasoning_quality_score, "
+            "reasoning_quality_rubric_version FROM feedback WHERE feedback_id = ?",
+            (P2_FEEDBACK_ID,),
+        ).fetchone()
+        assert tuple(feedback_row) == (P2_DECISION_ID, "agree", None, None)
+
+        assert connection.execute("SELECT COUNT(*) FROM eval_runs").fetchone()[0] == 1
+        eval_run_row = connection.execute(
+            "SELECT run_kind, judge_provider, judge_model, rubric_version, judge_temperature, "
+            "self_judge_allowed, status, status_reason, judge_failure_count "
+            "FROM eval_runs WHERE eval_run_id = ?",
+            (P2_EVAL_RUN_ID,),
+        ).fetchone()
+        assert tuple(eval_run_row) == (
+            "deterministic",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        assert connection.execute("SELECT COUNT(*) FROM eval_results").fetchone()[0] == 1
+        eval_result_row = connection.execute(
+            "SELECT decision_id, self_judge_bypassed FROM eval_results WHERE eval_result_id = ?",
+            (P2_EVAL_RESULT_ID,),
+        ).fetchone()
+        assert tuple(eval_result_row) == (None, 0)
+
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        migrated.close()
+
+    readonly = Database.open_read_only(path)
+    readonly.close()
 
 
 def test_open_read_only_requires_an_existing_database(tmp_path: Path) -> None:

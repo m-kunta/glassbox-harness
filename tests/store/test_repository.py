@@ -39,6 +39,33 @@ OVERRIDE_IDS = (
 )
 FEEDBACK_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBF"
 
+TIMESTAMP_ORDER_FEEDBACK_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+TIMESTAMP_ORDER_FEEDBACK_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
+TIMESTAMP_ORDER_FEEDBACK_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FC2",
+    "01ARZ3NDEKTSV4RRFFQ69G5FC3",
+    "01ARZ3NDEKTSV4RRFFQ69G5FC4",
+)
+TIMESTAMP_ORDER_OVERRIDE_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FC5",
+    "01ARZ3NDEKTSV4RRFFQ69G5FC6",
+    "01ARZ3NDEKTSV4RRFFQ69G5FC7",
+)
+TIMESTAMP_ORDER_TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC8"
+TIMESTAMP_ORDER_DECISION_IDS = (
+    "01ARZ3NDEKTSV4RRFFQ69G5FC9",
+    "01ARZ3NDEKTSV4RRFFQ69G5FCA",
+    "01ARZ3NDEKTSV4RRFFQ69G5FCB",
+)
+
+# The three canonical UTC precisions the schema allows for one and the same
+# instant's second: whole seconds, milliseconds, and microseconds. Comparing
+# the raw RFC3339 text sorts "...:45Z" after "...:45.123...Z" (`Z` > `.` in
+# ASCII), even though the plain-seconds instant is chronologically earliest.
+TIMESTAMP_ORDER_SECONDS = datetime(2026, 9, 27, 12, 0, 45, 0, tzinfo=UTC)
+TIMESTAMP_ORDER_MILLIS = datetime(2026, 9, 27, 12, 0, 45, 123_000, tzinfo=UTC)
+TIMESTAMP_ORDER_MICROS = datetime(2026, 9, 27, 12, 0, 45, 123_456, tzinfo=UTC)
+
 
 def _feedback_submission(
     *,
@@ -512,3 +539,103 @@ def test_record_override_creates_a_linear_idempotent_history(tmp_path: Path) -> 
     assert stored_first.supersedes_override_id is None
     assert stored_second.supersedes_override_id == OVERRIDE_IDS[0]
     assert replay == stored_second
+
+
+def test_timestamp_order_uses_instants_not_rfc3339_text(tmp_path: Path) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+    trace, _, decision, _ = _events()
+
+    feedback_trace = trace.model_copy(
+        update={
+            "trace_id": TIMESTAMP_ORDER_FEEDBACK_TRACE_ID,
+            "started_at": TIMESTAMP_ORDER_SECONDS,
+        }
+    )
+    feedback_decision = decision.model_copy(
+        update={
+            "decision_id": TIMESTAMP_ORDER_FEEDBACK_DECISION_ID,
+            "trace_id": feedback_trace.trace_id,
+            "decided_at": TIMESTAMP_ORDER_SECONDS,
+        }
+    )
+    repository.write_event(feedback_trace)
+    repository.write_event(feedback_decision)
+
+    for feedback_id, created_at in zip(
+        TIMESTAMP_ORDER_FEEDBACK_IDS,
+        (TIMESTAMP_ORDER_MILLIS, TIMESTAMP_ORDER_SECONDS, TIMESTAMP_ORDER_MICROS),
+        strict=True,
+    ):
+        repository.record_feedback(
+            FeedbackSubmission(
+                feedback_id=feedback_id,
+                decision_id=feedback_decision.decision_id,
+                verdict="agree",
+                reason_code=None,
+                free_text=None,
+                corrected_recommendation=None,
+                created_at=created_at,
+                idempotency_key=f"timestamp-order-feedback-{feedback_id}",
+            )
+        )
+
+    feedback_records = repository.feedback_for_decision(feedback_decision.decision_id)
+    assert [record.feedback_id for record in feedback_records] == [
+        TIMESTAMP_ORDER_FEEDBACK_IDS[2],  # microseconds: newest first
+        TIMESTAMP_ORDER_FEEDBACK_IDS[0],  # milliseconds
+        TIMESTAMP_ORDER_FEEDBACK_IDS[1],  # seconds: oldest last
+    ]
+
+    for override_id, created_at in zip(
+        TIMESTAMP_ORDER_OVERRIDE_IDS,
+        (TIMESTAMP_ORDER_MICROS, TIMESTAMP_ORDER_SECONDS, TIMESTAMP_ORDER_MILLIS),
+        strict=True,
+    ):
+        repository.record_override(
+            OverrideSubmission(
+                override_id,
+                feedback_decision.decision_id,
+                "planner",
+                "accepted",
+                None,
+                None,
+                None,
+                created_at,
+                f"timestamp-order-override-{override_id}",
+            )
+        )
+
+    detail = repository.decision_detail(feedback_decision.decision_id)
+    assert detail is not None
+    assert [override.override_id for override in detail.overrides] == [
+        TIMESTAMP_ORDER_OVERRIDE_IDS[1],  # seconds: oldest first
+        TIMESTAMP_ORDER_OVERRIDE_IDS[2],  # milliseconds
+        TIMESTAMP_ORDER_OVERRIDE_IDS[0],  # microseconds: newest last
+    ]
+
+    decision_trace = trace.model_copy(
+        update={"trace_id": TIMESTAMP_ORDER_TRACE_ID, "started_at": TIMESTAMP_ORDER_SECONDS}
+    )
+    repository.write_event(decision_trace)
+    for decision_id, decided_at in zip(
+        TIMESTAMP_ORDER_DECISION_IDS,
+        (TIMESTAMP_ORDER_MICROS, TIMESTAMP_ORDER_SECONDS, TIMESTAMP_ORDER_MILLIS),
+        strict=True,
+    ):
+        repository.write_event(
+            decision.model_copy(
+                update={
+                    "decision_id": decision_id,
+                    "trace_id": decision_trace.trace_id,
+                    "decided_at": decided_at,
+                }
+            )
+        )
+
+    tree = repository.trace_tree(decision_trace.trace_id)
+    assert tree is not None
+    assert [item.event.decision_id for item in tree.decisions] == [
+        TIMESTAMP_ORDER_DECISION_IDS[1],  # seconds: earliest first
+        TIMESTAMP_ORDER_DECISION_IDS[2],  # milliseconds
+        TIMESTAMP_ORDER_DECISION_IDS[0],  # microseconds: latest last
+    ]

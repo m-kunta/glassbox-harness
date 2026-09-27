@@ -19,6 +19,14 @@ SUPERSEDING_OVERRIDE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB3"
 OUTCOME_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAZ"
 EVAL_RUN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 EVAL_RESULT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+FEEDBACK_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB8"
+JUDGE_EVAL_RUN_ID_A = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+JUDGE_EVAL_RUN_ID_B = "01ARZ3NDEKTSV4RRFFQ69G5FC3"
+JUDGE_EVAL_RUN_ID_C = "01ARZ3NDEKTSV4RRFFQ69G5FC4"
+JUDGE_EVAL_RESULT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC5"
+JUDGE_EVAL_RESULT_ID_INVALID = "01ARZ3NDEKTSV4RRFFQ69G5FC6"
+JUDGE_EVAL_RESULT_ID_MISSING_DECISION = "01ARZ3NDEKTSV4RRFFQ69G5FC7"
+MISSING_DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FZZ"
 TIMESTAMP = "2026-08-22T14:30:45.123Z"
 INVALID_TIMESTAMP = "2026-02-30T14:30:45Z"
 
@@ -123,6 +131,7 @@ def _valid_row(table: str) -> dict[str, object]:
             "suite_version": "v1",
             "agent_version": "version",
             "run_at": TIMESTAMP,
+            "run_kind": "deterministic",
         },
         "eval_results": {
             "eval_result_id": EVAL_RESULT_ID,
@@ -132,14 +141,21 @@ def _valid_row(table: str) -> dict[str, object]:
             "passed": 1,
             "run_at": TIMESTAMP,
         },
+        "feedback": {
+            "feedback_id": FEEDBACK_ID,
+            "decision_id": DECISION_ID,
+            "verdict": "agree",
+            "created_at": TIMESTAMP,
+            "idempotency_key": "request-1",
+        },
     }
     return dict(rows[table])
 
 
 def _insert_required_parents(connection: sqlite3.Connection, table: str) -> None:
-    if table in {"spans", "decisions", "evidence", "overrides", "outcomes"}:
+    if table in {"spans", "decisions", "evidence", "overrides", "outcomes", "feedback"}:
         _insert_trace(connection)
-    if table in {"evidence", "overrides", "outcomes"}:
+    if table in {"evidence", "overrides", "outcomes", "feedback"}:
         _insert_row(connection, "decisions", _valid_row("decisions"))
     if table == "eval_results":
         _insert_row(connection, "eval_runs", _valid_row("eval_runs"))
@@ -200,7 +216,9 @@ def _seed_all_legacy_records(connection: sqlite3.Connection) -> None:
     _insert_row(connection, "evidence", _valid_row("evidence"))
     _insert_row(connection, "overrides", _valid_row("overrides"))
     _insert_row(connection, "outcomes", _valid_row("outcomes"))
-    _insert_row(connection, "eval_runs", _valid_row("eval_runs"))
+    legacy_eval_run = _valid_row("eval_runs")
+    del legacy_eval_run["run_kind"]  # the pre-strict/001 schema predates run_kind
+    _insert_row(connection, "eval_runs", legacy_eval_run)
     _insert_row(connection, "eval_results", _valid_row("eval_results"))
 
 
@@ -459,7 +477,10 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     feedback_migration = (STORE_ROOT / "migrations" / "002_feedback.sql").read_text(
         encoding="utf-8"
     )
-    assert schema_sql == f"{initial_migration}\n{feedback_migration}"
+    judge_calibration_migration = (
+        STORE_ROOT / "migrations" / "003_judge_calibration.sql"
+    ).read_text(encoding="utf-8")
+    assert schema_sql == f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}"
 
 
 @pytest.mark.parametrize(
@@ -542,9 +563,13 @@ def test_schema_accepts_canonical_utc_timestamps(tmp_path: Path, timestamp: str)
         ("outcomes", "label", "unknown"),
         ("eval_runs", "eval_run_id", "not-a-ulid"),
         ("eval_runs", "run_at", INVALID_TIMESTAMP),
+        ("eval_runs", "run_kind", "unknown"),
         ("eval_results", "eval_result_id", "not-a-ulid"),
         ("eval_results", "passed", 2),
         ("eval_results", "run_at", INVALID_TIMESTAMP),
+        ("eval_results", "self_judge_bypassed", 2),
+        ("feedback", "feedback_id", "not-a-ulid"),
+        ("feedback", "verdict", "unknown"),
     ],
 )
 def test_schema_rejects_every_declared_check_constraint(
@@ -647,7 +672,7 @@ def test_schema_defines_foreign_keys_and_decision_scoped_evidence_keys(tmp_path:
         "evidence": {"decisions"},
         "overrides": {"decisions", "overrides"},
         "outcomes": {"decisions"},
-        "eval_results": {"eval_runs"},
+        "eval_results": {"eval_runs", "decisions"},
     }
     for table, parents in expected_foreign_keys.items():
         foreign_keys = {row[2] for row in connection.execute(f"PRAGMA foreign_key_list({table})")}
@@ -780,3 +805,146 @@ def test_superseded_override_restricts_deletion_of_its_predecessor(tmp_path: Pat
 
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("DELETE FROM overrides WHERE override_id = ?", (OVERRIDE_ID,))
+
+
+@pytest.mark.parametrize(
+    ("reasoning_quality_score", "reasoning_quality_rubric_version", "should_succeed"),
+    [
+        (None, None, True),
+        (3, "reasoning_quality_v1", True),
+        (0, "reasoning_quality_v1", False),
+        (6, "reasoning_quality_v1", False),
+        (3, None, False),
+        (None, "reasoning_quality_v1", False),
+    ],
+)
+def test_feedback_score_and_rubric_version_are_paired(
+    tmp_path: Path,
+    reasoning_quality_score: int | None,
+    reasoning_quality_rubric_version: str | None,
+    should_succeed: bool,
+) -> None:
+    connection = Database.open(tmp_path / "glassbox.sqlite3").connection
+    _insert_required_parents(connection, "feedback")
+    values = _valid_row("feedback")
+    values["reasoning_quality_score"] = reasoning_quality_score
+    values["reasoning_quality_rubric_version"] = reasoning_quality_rubric_version
+
+    if should_succeed:
+        _insert_row(connection, "feedback", values)
+        row = connection.execute(
+            "SELECT reasoning_quality_score, reasoning_quality_rubric_version "
+            "FROM feedback WHERE feedback_id = ?",
+            (values["feedback_id"],),
+        ).fetchone()
+        assert tuple(row) == (reasoning_quality_score, reasoning_quality_rubric_version)
+    else:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_row(connection, "feedback", values)
+
+
+def _complete_judge_eval_run(eval_run_id: str) -> dict[str, object]:
+    row = _valid_row("eval_runs")
+    row["eval_run_id"] = eval_run_id
+    row.update(
+        run_kind="judge",
+        judge_provider="anthropic",
+        judge_model="claude-sonnet-5",
+        rubric_version="reasoning_quality_v1",
+        judge_temperature=0,
+        self_judge_allowed=0,
+        status="passed",
+        status_reason="all rubric checks passed",
+        judge_failure_count=0,
+    )
+    return row
+
+
+def test_judge_run_requires_complete_provenance_and_decision_result(tmp_path: Path) -> None:
+    connection = Database.open(tmp_path / "glassbox.sqlite3").connection
+    _insert_decision(connection)
+
+    deterministic_run = _valid_row("eval_runs")
+    _insert_row(connection, "eval_runs", deterministic_run)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(
+            connection,
+            "eval_runs",
+            _valid_row("eval_runs")
+            | {"eval_run_id": JUDGE_EVAL_RUN_ID_A, "judge_provider": "anthropic"},
+        )
+
+    complete_judge_run = _complete_judge_eval_run(JUDGE_EVAL_RUN_ID_B)
+    _insert_row(connection, "eval_runs", complete_judge_run)
+
+    for field, value in (
+        ("judge_provider", None),
+        ("judge_model", None),
+        ("rubric_version", None),
+        ("judge_temperature", 0.2),
+        # A NULL self_judge_allowed/judge_failure_count is not explicitly
+        # rejected here: SQLite's CHECK treats an expression that evaluates to
+        # NULL (rather than false) as satisfied, and `NULL IN (0, 1)` /
+        # `NULL >= 0` both evaluate to NULL. Only an out-of-range *value*
+        # trips the CHECK, matching the plan's literal constraint text.
+        ("self_judge_allowed", 2),
+        ("status", "unknown"),
+        ("status_reason", None),
+        ("judge_failure_count", -1),
+    ):
+        incomplete_judge_run = dict(complete_judge_run) | {
+            "eval_run_id": JUDGE_EVAL_RUN_ID_C,
+            field: value,
+        }
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_row(connection, "eval_runs", incomplete_judge_run)
+
+    deterministic_result = _valid_row("eval_results") | {
+        "eval_run_id": deterministic_run["eval_run_id"]
+    }
+    _insert_row(connection, "eval_results", deterministic_result)
+    assert tuple(
+        connection.execute(
+            "SELECT decision_id, self_judge_bypassed FROM eval_results WHERE eval_result_id = ?",
+            (deterministic_result["eval_result_id"],),
+        ).fetchone()
+    ) == (None, 0)
+
+    judge_result = _valid_row("eval_results") | {
+        "eval_result_id": JUDGE_EVAL_RESULT_ID,
+        "eval_run_id": complete_judge_run["eval_run_id"],
+        "decision_id": DECISION_ID,
+        "self_judge_bypassed": 1,
+    }
+    _insert_row(connection, "eval_results", judge_result)
+    assert tuple(
+        connection.execute(
+            "SELECT decision_id, self_judge_bypassed FROM eval_results WHERE eval_result_id = ?",
+            (JUDGE_EVAL_RESULT_ID,),
+        ).fetchone()
+    ) == (DECISION_ID, 1)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(
+            connection,
+            "eval_results",
+            _valid_row("eval_results")
+            | {
+                "eval_result_id": JUDGE_EVAL_RESULT_ID_INVALID,
+                "eval_run_id": complete_judge_run["eval_run_id"],
+                "self_judge_bypassed": 2,
+            },
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(
+            connection,
+            "eval_results",
+            _valid_row("eval_results")
+            | {
+                "eval_result_id": JUDGE_EVAL_RESULT_ID_MISSING_DECISION,
+                "eval_run_id": complete_judge_run["eval_run_id"],
+                "decision_id": MISSING_DECISION_ID,
+            },
+        )

@@ -21,7 +21,7 @@ OverrideStatus: TypeAlias = Literal["none", "accepted", "modified", "rejected", 
 FeedbackVerdict: TypeAlias = Literal["agree", "disagree", "uncertain"]
 
 _SORT_COLUMNS: dict[QueueSort, str] = {
-    "decided_at": "d.decided_at",
+    "decided_at": "glassbox_timestamp_key(d.decided_at)",
     "confidence": "d.confidence",
 }
 _OVERRIDE_STATUSES = frozenset(("none", "accepted", "modified", "rejected", "inconsistent"))
@@ -58,9 +58,14 @@ class TraceTree:
 
 @dataclass(frozen=True)
 class QueueCursor:
-    """A stable boundary for one descending queue sort order."""
+    """A stable boundary for one descending queue sort order.
 
-    sort_value: str | float
+    ``sort_value`` is the raw database sort key for ``query.sort_column``: the
+    parsed ``glassbox_timestamp_key`` integer for ``"decided_at"``, or the raw
+    confidence float for ``"confidence"``.
+    """
+
+    sort_value: int | float
     decision_id: str
 
 
@@ -114,7 +119,7 @@ class QueueDecision:
 
     event: DecisionEvent
     override_status: OverrideStatus
-    sort_value: str | float
+    sort_value: int | float
 
 
 @dataclass(frozen=True)
@@ -193,14 +198,20 @@ class Repository:
             spans = tuple(
                 self._span_from_row(row)
                 for row in self._connection.execute(
-                    "SELECT * FROM spans WHERE trace_id = ? ORDER BY started_at, span_id",
+                    """
+                    SELECT * FROM spans WHERE trace_id = ?
+                    ORDER BY glassbox_timestamp_key(started_at), span_id
+                    """,
                     (trace_id,),
                 )
             )
             decisions = tuple(
                 self._stored_decision_from_row(row)
                 for row in self._connection.execute(
-                    "SELECT * FROM decisions WHERE trace_id = ? ORDER BY decided_at, decision_id",
+                    """
+                    SELECT * FROM decisions WHERE trace_id = ?
+                    ORDER BY glassbox_timestamp_key(decided_at), decision_id
+                    """,
                     (trace_id,),
                 )
             )
@@ -220,10 +231,14 @@ class Repository:
             conditions.append("d.decision_type = :decision_type")
             params["decision_type"] = query.decision_type
         if query.decided_from is not None:
-            conditions.append("d.decided_at >= :decided_from")
+            conditions.append(
+                "glassbox_timestamp_key(d.decided_at) >= glassbox_timestamp_key(:decided_from)"
+            )
             params["decided_from"] = self._timestamp_text(query.decided_from)
         if query.decided_before is not None:
-            conditions.append("d.decided_at < :decided_before")
+            conditions.append(
+                "glassbox_timestamp_key(d.decided_at) < glassbox_timestamp_key(:decided_before)"
+            )
             params["decided_before"] = self._timestamp_text(query.decided_before)
         if query.confidence_min is not None:
             conditions.append("d.confidence >= :confidence_min")
@@ -293,7 +308,7 @@ class Repository:
                 for override_row in self._connection.execute(
                     """
                     SELECT * FROM overrides WHERE decision_id = ?
-                    ORDER BY created_at, override_id
+                    ORDER BY glassbox_timestamp_key(created_at), override_id
                     """,
                     (decision_id,),
                 )
@@ -358,7 +373,7 @@ class Repository:
                 for row in self._connection.execute(
                     """
                     SELECT * FROM feedback WHERE decision_id = ?
-                    ORDER BY created_at DESC, feedback_id DESC
+                    ORDER BY glassbox_timestamp_key(created_at) DESC, feedback_id DESC
                     """,
                     (decision_id,),
                 )
@@ -518,7 +533,7 @@ class Repository:
             for evidence_row in self._connection.execute(
                 """
                 SELECT * FROM evidence WHERE decision_id = ?
-                ORDER BY retrieved_at, evidence_id, field_name
+                ORDER BY glassbox_timestamp_key(retrieved_at), evidence_id, field_name
                 """,
                 (decision_row["decision_id"],),
             )
@@ -531,7 +546,7 @@ class Repository:
         sort_value = row["sort_value"]
         if status not in _OVERRIDE_STATUSES:
             raise RuntimeError("database returned an invalid override status")
-        if not isinstance(sort_value, (str, float)):
+        if not isinstance(sort_value, (int, float)):
             raise RuntimeError("database returned an invalid queue sort value")
         return QueueDecision(
             Repository._decision_from_row(row),
@@ -629,8 +644,11 @@ class Repository:
         if query.cursor is not None:
             if not isinstance(query.cursor.decision_id, str):
                 raise ValueError("queue cursor decision ID must be a string")
-            if query.sort_column == "decided_at" and not isinstance(query.cursor.sort_value, str):
-                raise ValueError("timestamp queue cursor value must be a string")
+            if query.sort_column == "decided_at" and (
+                isinstance(query.cursor.sort_value, bool)
+                or not isinstance(query.cursor.sort_value, int)
+            ):
+                raise ValueError("timestamp queue cursor value must be an integer")
             if query.sort_column == "confidence" and (
                 isinstance(query.cursor.sort_value, bool)
                 or not isinstance(query.cursor.sort_value, float)

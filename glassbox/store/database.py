@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from threading import RLock
@@ -26,6 +27,9 @@ _INDEXES = (
 _BASE_SCHEMA_OBJECTS = _BASE_TABLES + _INDEXES
 _SCHEMA_OBJECTS = _TABLES + _INDEXES
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
+_JUDGE_CALIBRATION_TABLES = ("feedback", "eval_runs", "eval_results")
+_JUDGE_CALIBRATION_TABLE_PREFIX = "__glassbox_pre_judge_calibration_"
+_UTC_OFFSET = timedelta(0)
 
 
 class TimestampMigrationError(RuntimeError):
@@ -36,12 +40,44 @@ class ReadOnlyDatabaseError(RuntimeError):
     """A database cannot safely serve Glassbox's strict read-only contract."""
 
 
+def _timestamp_sort_key(value: str) -> int:
+    """Return a stable integer ordering key for one stored UTC RFC3339 timestamp.
+
+    Stored timestamps mix second/millisecond/microsecond precision (all valid
+    per the schema's CHECK constraints), so comparing the raw text sorts
+    ``...:45Z`` after ``...:45.123Z`` -- ``Z`` (0x5A) is greater than ``.``
+    (0x2E) in ASCII, even though the plain-seconds instant is chronologically
+    earlier. Parsing to an instant and re-deriving a single integer key fixes
+    this everywhere the repository orders or bounds by timestamp.
+    """
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() != _UTC_OFFSET:
+        raise ValueError("stored timestamp is not UTC")
+    return (
+        parsed.toordinal() * 86_400 + parsed.hour * 3_600 + parsed.minute * 60 + parsed.second
+    ) * 1_000_000 + parsed.microsecond
+
+
+def _register_timestamp_sort_key(connection: sqlite3.Connection) -> None:
+    """Register the shared timestamp-ordering function on *connection*.
+
+    Registered on every read and write connection so a query never falls back
+    to comparing raw RFC3339 text (see ``_timestamp_sort_key``).
+    """
+    connection.create_function("glassbox_timestamp_key", 1, _timestamp_sort_key, deterministic=True)
+
+
 class Database:
     """An initialized SQLite database with required connection pragmas."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
         self._operation_lock = RLock()
+        # Registered here -- not only in open()/open_read_only() -- so every
+        # Database, however its connection was constructed (e.g. the CLI's own
+        # live-WAL read connection), can run the repository's timestamp-ordered
+        # queries.
+        _register_timestamp_sort_key(connection)
 
     @classmethod
     def open(cls, path: Path | str, *, busy_timeout_ms: int = 5_000) -> Database:
@@ -112,13 +148,19 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
     if not schema_objects:
         connection.executescript(schema_sql)
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
+        _apply_judge_calibration_migration(connection)
         return
     if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
+        _apply_judge_calibration_migration(connection)
         return
     if schema_objects == _strict_schema_objects():
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
+        _apply_judge_calibration_migration(connection)
+        return
+    if schema_objects == _released_p2_schema_objects():
+        _apply_judge_calibration_migration(connection)
         return
     if schema_objects == _current_schema_objects():
         return
@@ -168,9 +210,21 @@ def _strict_schema_objects() -> dict[str, str]:
 
 
 @lru_cache
-def _current_schema_objects() -> dict[str, str]:
-    """Return the current strict schema, including append-only feedback."""
+def _released_p2_schema_objects() -> dict[str, str]:
+    """Return SQLite-normalized DDL for the complete released P2 schema.
+
+    P2 is the strict schema plus the append-only ``feedback`` table, before the
+    P3 judge-calibration columns existed.
+    """
     return _strict_schema_objects() | _released_schema_objects("002_feedback.sql", ("feedback",))
+
+
+@lru_cache
+def _current_schema_objects() -> dict[str, str]:
+    """Return the current strict schema, including P3 judge-calibration columns."""
+    return _released_p2_schema_objects() | _released_schema_objects(
+        "003_judge_calibration.sql", _JUDGE_CALIBRATION_TABLES
+    )
 
 
 def _released_schema_objects(
@@ -250,6 +304,83 @@ def _rebuild_pre_strict_schema(connection: sqlite3.Connection, schema_sql: str) 
 
 def _legacy_table_name(table: str) -> str:
     return f"{_LEGACY_TABLE_PREFIX}{table}"
+
+
+def _apply_judge_calibration_migration(connection: sqlite3.Connection) -> None:
+    """Atomically rebuild feedback/eval_runs/eval_results with P3 judge columns.
+
+    Foreign keys are disabled only during this single rebuild transaction
+    because eval_results references eval_runs, and both are renamed before
+    their replacements exist. A failed copy rolls back the renames as well as
+    the replacement tables, leaving the prior database intact for repair.
+    Safe to run against empty tables (a fresh database) or populated ones (an
+    upgrade from the released P2 schema): prior eval_runs rows become
+    ``run_kind = 'deterministic'`` and prior eval_results rows get
+    ``decision_id = NULL`` and ``self_judge_bypassed = 0``.
+    """
+    migration_sql = _migration_sql("003_judge_calibration.sql")
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for table in _JUDGE_CALIBRATION_TABLES:
+            connection.execute(
+                f"ALTER TABLE {table} RENAME TO {_judge_calibration_legacy_table_name(table)}"
+            )
+        _execute_schema_statements(connection, migration_sql)
+        connection.execute(
+            f"""
+            INSERT INTO feedback (
+                feedback_id, decision_id, verdict, reason_code, free_text,
+                corrected_recommendation, created_at, idempotency_key
+            )
+            SELECT
+                feedback_id, decision_id, verdict, reason_code, free_text,
+                corrected_recommendation, created_at, idempotency_key
+            FROM {_judge_calibration_legacy_table_name("feedback")}
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO eval_runs (
+                eval_run_id, suite_id, suite_version, agent_version, run_at, run_kind
+            )
+            SELECT
+                eval_run_id, suite_id, suite_version, agent_version, run_at, 'deterministic'
+            FROM {_judge_calibration_legacy_table_name("eval_runs")}
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO eval_results (
+                eval_result_id, eval_run_id, case_id, assertion_name, passed, score,
+                judge_rationale, run_at, decision_id, self_judge_bypassed
+            )
+            SELECT
+                eval_result_id, eval_run_id, case_id, assertion_name, passed, score,
+                judge_rationale, run_at, NULL, 0
+            FROM {_judge_calibration_legacy_table_name("eval_results")}
+            """
+        )
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise TimestampMigrationError(
+                "Cannot migrate to the P3 judge-calibration schema because feedback, "
+                "eval_runs, or eval_results contain foreign-key violations. Repair the "
+                "database before reopening it."
+            )
+        for table in _JUDGE_CALIBRATION_TABLES:
+            connection.execute(f"DROP TABLE {_judge_calibration_legacy_table_name(table)}")
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _judge_calibration_legacy_table_name(table: str) -> str:
+    return f"{_JUDGE_CALIBRATION_TABLE_PREFIX}{table}"
 
 
 def _execute_schema_statements(connection: sqlite3.Connection, schema_sql: str) -> None:
