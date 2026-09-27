@@ -624,6 +624,82 @@ class Repository:
             ).fetchall()
             return tuple(self._judge_candidate_from_row(row) for row in rows)
 
+    def judge_calibration_pairs(self, cohort: JudgeCohort) -> tuple[tuple[int, int], ...]:
+        """Return the cross-run (human_score, judge_score) calibration pairs for *cohort*.
+
+        Unlike :meth:`judge_candidates`, this is not bounded by ``--since`` and
+        does not exclude already-judged decisions -- it aggregates the full
+        history of both ledgers. For each decision that has *both* a human
+        reasoning-quality score for ``cohort.rubric_version`` and at least one
+        successful judge result in this exact provider/model/rubric cohort, it
+        pairs the newest human score (by parsed UTC instant, then
+        ``feedback_id`` descending) with the newest successful judge score in
+        this cohort (by parsed UTC ``run_at``, then ``eval_result_id``
+        descending). A decision missing either side, scored only under a
+        different rubric version, or judged only in a different cohort or
+        only unsuccessfully, contributes no pair. A re-run therefore replaces
+        a decision's calibration observation rather than adding to it. Pairs
+        are returned ordered by ``decision_id`` for a stable, deterministic
+        result.
+        """
+        self._validate_judge_cohort(cohort)
+        with self._operation_lock:
+            rows = self._connection.execute(
+                """
+                WITH latest_feedback AS (
+                    SELECT decision_id, reasoning_quality_score AS human_score
+                    FROM (
+                        SELECT
+                            decision_id,
+                            reasoning_quality_score,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY decision_id
+                                ORDER BY glassbox_timestamp_key(created_at) DESC, feedback_id DESC
+                            ) AS rn
+                        FROM feedback
+                        WHERE reasoning_quality_rubric_version = :rubric_version
+                          AND reasoning_quality_score IS NOT NULL
+                    )
+                    WHERE rn = 1
+                ),
+                latest_judge_result AS (
+                    SELECT decision_id, score AS judge_score
+                    FROM (
+                        SELECT
+                            er.decision_id AS decision_id,
+                            er.score AS score,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY er.decision_id
+                                ORDER BY glassbox_timestamp_key(er.run_at) DESC,
+                                    er.eval_result_id DESC
+                            ) AS rn
+                        FROM eval_results er
+                        JOIN eval_runs r ON r.eval_run_id = er.eval_run_id
+                        WHERE r.run_kind = 'judge'
+                          AND r.judge_provider = :provider
+                          AND r.judge_model = :model
+                          AND r.rubric_version = :rubric_version
+                          AND er.assertion_name = :assertion_name
+                          AND er.score IS NOT NULL
+                          AND er.decision_id IS NOT NULL
+                    )
+                    WHERE rn = 1
+                )
+                SELECT lf.decision_id AS decision_id, lf.human_score AS human_score,
+                    lj.judge_score AS judge_score
+                FROM latest_feedback lf
+                JOIN latest_judge_result lj ON lj.decision_id = lf.decision_id
+                ORDER BY lf.decision_id ASC
+                """,
+                {
+                    "rubric_version": cohort.rubric_version,
+                    "provider": cohort.provider,
+                    "model": cohort.model,
+                    "assertion_name": _JUDGE_ASSERTION_NAME,
+                },
+            ).fetchall()
+            return tuple((int(row["human_score"]), int(row["judge_score"])) for row in rows)
+
     def record_judge_run(self, run: JudgeRun, results: tuple[JudgeOutcome, ...]) -> None:
         """Persist one completed judge run and its per-decision results atomically."""
         self._validate_judge_run(run, results)

@@ -1114,6 +1114,154 @@ def test_judge_candidates_excludes_decisions_with_any_successful_result_in_cohor
     ]
 
 
+def test_judge_calibration_pairs_selects_newest_human_and_judge_score_per_decision(
+    tmp_path: Path,
+) -> None:
+    """The calibration pair set is aggregated across runs: for each qualifying
+    decision it pairs the newest human score with the newest successful judge
+    result in this exact cohort, ignoring decisions missing either side, a
+    different rubric version, a different cohort, or only failed results."""
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    far_past = datetime(2026, 1, 1, tzinfo=UTC)
+    other_cohort = JudgeCohort(
+        provider="claude", model="claude-3-5-sonnet", rubric_version="reasoning_quality_v1"
+    )
+
+    # Qualifies: newest human score (5, superseding an older 2) paired with
+    # the newest successful judge score (4, superseding an older 2) -- a
+    # re-run replaces the calibration observation rather than adding to it.
+    paired = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FF0",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FF1",
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FF2",
+        decision_id=paired.decision_id,
+        created_at=far_past,
+        score=2,
+        idempotency_key="calibration-pairs-old-human",
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FF3",
+        decision_id=paired.decision_id,
+        created_at=far_past + timedelta(days=2),
+        score=5,
+        idempotency_key="calibration-pairs-new-human",
+    )
+    _insert_judge_eval_run(database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FF4", run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FF5",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FF4",
+        decision_id=paired.decision_id,
+        run_at=far_past,
+        score=2,
+    )
+    _insert_judge_eval_run(
+        database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FF6", run_at=far_past + timedelta(days=1)
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FF7",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FF6",
+        decision_id=paired.decision_id,
+        run_at=far_past + timedelta(days=1),
+        score=4,
+    )
+
+    # Excluded: human score present, but only a failed judge result in this
+    # cohort (no successful result to pair with).
+    human_only = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FF8",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FF9",
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FFA",
+        decision_id=human_only.decision_id,
+        created_at=far_past,
+        score=3,
+        idempotency_key="calibration-pairs-human-only",
+    )
+    _insert_judge_eval_run(database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFB", run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FFC",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFB",
+        decision_id=human_only.decision_id,
+        run_at=far_past,
+        score=None,
+    )
+
+    # Excluded: a successful judge result exists, but in a different
+    # provider/model cohort than the one being queried.
+    other_cohort_decision = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FFD",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FFE",
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FFF",
+        decision_id=other_cohort_decision.decision_id,
+        created_at=far_past,
+        score=1,
+        idempotency_key="calibration-pairs-other-cohort",
+    )
+    _insert_judge_eval_run(
+        database,
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFG",
+        run_at=far_past,
+        cohort=other_cohort,
+    )
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FFH",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFG",
+        decision_id=other_cohort_decision.decision_id,
+        run_at=far_past,
+        score=1,
+    )
+
+    # Excluded: a successful judge result exists in this cohort, but there is
+    # no human score at all for this rubric version.
+    judge_only = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FFJ",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FFK",
+        decided_at=far_past,
+    )
+    _insert_judge_eval_run(database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFM", run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FFN",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FFM",
+        decision_id=judge_only.decision_id,
+        run_at=far_past,
+        score=3,
+    )
+
+    pairs = repository.judge_calibration_pairs(JUDGE_COHORT)
+
+    assert pairs == ((5, 4),)
+
+
+def test_judge_calibration_pairs_returns_empty_tuple_when_no_decision_qualifies(
+    tmp_path: Path,
+) -> None:
+    repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
+
+    assert repository.judge_calibration_pairs(JUDGE_COHORT) == ()
+
+
 def test_record_judge_run_persists_run_and_results_with_correct_nullability_and_flags(
     tmp_path: Path,
 ) -> None:
