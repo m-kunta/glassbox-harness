@@ -32,6 +32,10 @@ dev = [
   "types-jsonschema>=4.0",
   "types-PyYAML>=6.0",
 ]
+judge = ["python-dotenv>=1.0"]
+judge-claude = ["python-dotenv>=1.0", "anthropic>=0.45"]
+judge-openai = ["python-dotenv>=1.0", "openai>=1.0"]
+judge-gemini = ["python-dotenv>=1.0", "google-genai>=1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["glassbox"]
@@ -51,6 +55,14 @@ select = ["E", "F", "I"]
 python_version = "3.11"
 strict = true
 files = ["glassbox"]
+
+# These are optional extras (judge-claude/judge-openai/judge-gemini in
+# [project.optional-dependencies]); their SDKs are not installed by default
+# and glassbox/eval/judge_provider.py imports each one lazily inside its own
+# factory function, never at module scope.
+[[tool.mypy.overrides]]
+module = ["anthropic", "openai", "google", "google.genai"]
+ignore_missing_imports = true
 
 [tool.importlinter]
 root_package = "glassbox"

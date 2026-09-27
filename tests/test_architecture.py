@@ -174,3 +174,42 @@ def test_events_import_check_allows_nested_relative_imports_within_events(
     nested_module.write_text("from ..collector import Collector\n")
 
     assert _events_import_violations(tmp_path / "events") == []
+
+
+def test_package_metadata_declares_judge_extras() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    optional = config["project"]["optional-dependencies"]
+
+    assert optional["judge"] == ["python-dotenv>=1.0"]
+    assert optional["judge-claude"] == ["python-dotenv>=1.0", "anthropic>=0.45"]
+    assert optional["judge-openai"] == ["python-dotenv>=1.0", "openai>=1.0"]
+    assert optional["judge-gemini"] == ["python-dotenv>=1.0", "google-genai>=1.0"]
+
+
+def test_gitignore_excludes_the_judge_env_secrets_file() -> None:
+    entries = (PROJECT_ROOT / ".gitignore").read_text().splitlines()
+
+    assert ".env" in entries
+
+
+def _module_level_import_names(source_path: Path) -> set[str]:
+    """Return only top-level (not function/method-body) imported module names."""
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module)
+    return names
+
+
+def test_judge_provider_keeps_optional_provider_sdk_imports_lazy() -> None:
+    """Each optional judge SDK must be imported only inside its own factory
+    function, never at module import time, so glassbox.eval.judge_provider
+    stays importable without anthropic/openai/google-genai installed."""
+    source_path = PROJECT_ROOT / "glassbox" / "eval" / "judge_provider.py"
+    module_level_imports = _module_level_import_names(source_path)
+
+    forbidden = {"anthropic", "openai", "google", "google.genai"}
+    assert module_level_imports & forbidden == set()
