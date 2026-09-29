@@ -1065,6 +1065,144 @@ def test_run_judge_calibration_pairs_use_a_fresh_rejudge_score_not_the_stale_one
     assert (5, 1) not in persisted_pairs
 
 
+def test_run_judge_calibration_pairs_keep_the_historical_pair_when_a_rejudge_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: the mirror case of the "fresh score replaces stale
+    one" test above. A decision that already had a *successful* judge result
+    (so it has a real historical calibration pair) can be selected again
+    this run via the recent-gated ``--since`` window and have its re-judge
+    *fail* (a provider error, a parse failure, or a self-judge refusal).
+    That failed attempt must NOT exclude the decision's still-valid
+    historical pair -- only a *successfully* re-judged decision should ever
+    drop its stale pair (see ``run_judge``'s ``judged_decision_ids``, built
+    from ``outcome.error is None``, and ``_combine_calibration_pairs``,
+    which only adds a fresh pair for a successful outcome).
+
+    This guards against a plausible future refactor that changes the
+    exclusion set from "successfully judged this run" to "attempted this
+    run" (a one-line change: dropping the ``outcome.error is None`` filter
+    when building ``judged_decision_ids``) -- which would silently drop a
+    decision's still-good historical pair from calibration whenever its
+    re-judge attempt merely failed, with no persisted replacement to show
+    for it. Nothing else in this suite would catch that regression, since
+    every other calibration-pairs test's re-judged/backlog candidates
+    always succeed.
+    """
+    database_path = tmp_path / "glassbox.sqlite3"
+    repository = Repository(Database.open(database_path))
+    cohort = JudgeCohort(provider="openai", model="gpt-4o", rubric_version=_RUBRIC_VERSION)
+    far_past = datetime(2020, 1, 1, tzinfo=UTC)
+    recent = datetime.now(UTC) - timedelta(minutes=1)
+
+    # 29 pure historical pairs, perfectly matched, decided long ago -- never
+    # reselected by this run's judge_candidates() (not backlog: already
+    # successfully judged; not recent: decided_at is far in the past).
+    background_scores = [((index % 5) + 1) for index in range(29)]
+    _seed_calibration_history(
+        repository,
+        cohort=cohort,
+        pairs=[(score, score) for score in background_scores],
+        far_past=far_past,
+        seed="failed-rejudge-background",
+    )
+
+    # The 30th decision: an existing successful judge result of 1 against a
+    # human score of 5 (maximal disagreement) from a "prior run", with a
+    # recent decided_at so it falls inside this run's --since window and
+    # gets selected again as recent-gated (not backlog, since it already
+    # has a successful result).
+    rejudged_decision_id = _ulid("failed-rejudge-decision")
+    rejudged_trace_id = _ulid("failed-rejudge-trace")
+    _write_decision(
+        repository,
+        trace_id=rejudged_trace_id,
+        decision_id=rejudged_decision_id,
+        decided_at=recent,
+        rationale="Previously judged; this run's re-judge attempt fails.",
+    )
+    repository.record_feedback(
+        FeedbackSubmission(
+            feedback_id=_ulid("failed-rejudge-feedback"),
+            decision_id=rejudged_decision_id,
+            verdict="agree",
+            reason_code=None,
+            free_text=None,
+            corrected_recommendation=None,
+            created_at=recent,
+            idempotency_key="failed-rejudge-feedback-key",
+            reasoning_quality_score=5,
+            reasoning_quality_rubric_version=cohort.rubric_version,
+        )
+    )
+    repository.record_judge_run(
+        JudgeRun(
+            eval_run_id=_ulid("failed-rejudge-prior-run"),
+            cohort=cohort,
+            run_at=far_past,
+            status="uncalibrated",
+            status_reason="seed",
+            judge_failure_count=0,
+            self_judge_allowed=False,
+        ),
+        (
+            JudgeOutcome(
+                decision_id=rejudged_decision_id,
+                score=1,
+                rationale="prior run's still-valid historical score",
+                error=None,
+                self_judge_bypassed=False,
+            ),
+        ),
+    )
+
+    # Confirm the seed: the decision is not in the backlog (it already has a
+    # successful result) but is selected again as recent-gated, and its
+    # historical pair exists before this run.
+    candidates_before = repository.judge_candidates(
+        cohort, decided_since=datetime.now(UTC) - timedelta(days=1)
+    )
+    rejudged_candidate = next(
+        candidate
+        for candidate in candidates_before
+        if candidate.decision.event.decision_id == rejudged_decision_id
+    )
+    assert rejudged_candidate.calibration_backlog is False
+    assert rejudged_candidate.recent_gated is True
+    assert (5, 1) in repository.judge_calibration_pairs(cohort)
+
+    # This run's re-judge attempt for that decision fails outright.
+    fake = FakeProvider([RuntimeError("simulated provider failure")])
+    _patch_provider(monkeypatch, fake)
+
+    report = run_judge(
+        database_path,
+        _config(provider=cohort.provider, model=cohort.model),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
+    )
+
+    assert len(fake.calls) == 1
+    outcomes_by_decision = {outcome.decision_id: outcome for outcome in report.outcomes}
+    failed_outcome = outcomes_by_decision[rejudged_decision_id]
+    assert failed_outcome.error is not None
+    assert failed_outcome.score is None
+
+    # The bug this guards against: excluding "attempted" decisions (instead
+    # of only "successfully judged" ones) would drop this decision's still-
+    # valid (5, 1) historical pair with nothing to replace it, leaving only
+    # the 29 background pairs -- calibration_pairs == 29 and kappa == 1.0
+    # (no disagreement left to see). Correct behavior keeps all 30 pairs,
+    # including the (5, 1) disagreement, so kappa reflects it.
+    assert report.calibration_pairs == 30
+    assert report.kappa == pytest.approx(0.9166666666666667)
+
+    # The historical pair is still there on a fresh, independent read too --
+    # nothing was persisted for the failed outcome to overwrite it with.
+    assert (5, 1) in repository.judge_calibration_pairs(cohort)
+
+
 # ---------------------------------------------------------------------------
 # Status/reason decision tree
 # ---------------------------------------------------------------------------
