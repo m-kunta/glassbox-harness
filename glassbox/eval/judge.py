@@ -546,32 +546,53 @@ def _resolve_cited_evidence(
 ) -> tuple[dict[str, Any], ...] | str:
     """Resolve a decision's ordered rationale citations to evidence field groups.
 
+    ``evidence_id`` is a citation-*group* key, not a unique row key -- the
+    ``evidence`` table's real primary key is the composite ``(decision_id,
+    evidence_id, field_name)`` (see TODO.md's 2026-08-28 decision log entry:
+    ``gb.evidence(evidence_id=..., fields={...})`` emits one row per field
+    under one shared ``evidence_id``). Multiple ``EvidenceEvent`` rows can
+    therefore legitimately share one ``evidence_id`` with different
+    ``field_name``/``field_value`` pairs, so every field row belonging to a
+    citation's ``evidence_id`` is grouped and returned together -- never
+    collapsed down to a single field. Each field row's own
+    ``source_system``/``source_ref``/``weight``/``retrieved_at`` is preserved
+    individually rather than assumed to be identical across the group (the
+    schema allows them to vary per row, even though in practice they are
+    often shared). A group's fields are sorted by ``field_name`` for a
+    deterministic, testable result, independent of query/storage order.
+
     Returns the resolved evidence groups (in citation order) as plain JSON
-    dicts, or an error string when a citation has no matching evidence
-    record -- a dangling citation is reported as a visible per-case failure,
-    never silently dropped or fabricated.
+    dicts of the shape ``{"evidence_id": ..., "fields": [...]}``, or an error
+    string when a citation has no matching evidence record at all -- a
+    dangling citation is reported as a visible per-case failure, never
+    silently dropped or fabricated.
     """
-    by_id = {item.evidence_id: item for item in evidence}
+    by_id: dict[str, list[EvidenceEvent]] = {}
+    for item in evidence:
+        by_id.setdefault(item.evidence_id, []).append(item)
+
     resolved: list[dict[str, Any]] = []
     for citation in decision.rationale_citations:
-        item = by_id.get(citation)
-        if item is None:
+        group = by_id.get(citation)
+        if not group:
             return (
                 f"dangling evidence citation {citation!r} for decision "
                 f"{decision.decision_id!r}: no matching evidence record"
             )
-        dump = item.model_dump(mode="json")
-        resolved.append(
-            {
-                "evidence_id": dump["evidence_id"],
-                "source_system": dump["source_system"],
-                "source_ref": dump["source_ref"],
-                "field_name": dump["field_name"],
-                "field_value": dump["field_value"],
-                "weight": dump["weight"],
-                "retrieved_at": dump["retrieved_at"],
-            }
-        )
+        fields: list[dict[str, Any]] = []
+        for item in sorted(group, key=lambda event: event.field_name):
+            dump = item.model_dump(mode="json")
+            fields.append(
+                {
+                    "field_name": dump["field_name"],
+                    "field_value": dump["field_value"],
+                    "source_system": dump["source_system"],
+                    "source_ref": dump["source_ref"],
+                    "weight": dump["weight"],
+                    "retrieved_at": dump["retrieved_at"],
+                }
+            )
+        resolved.append({"evidence_id": citation, "fields": fields})
     return tuple(resolved)
 
 

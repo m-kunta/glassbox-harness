@@ -672,6 +672,162 @@ def test_run_judge_isolates_a_dangling_evidence_citation_without_calling_the_pro
     assert outcomes_by_decision[healthy_id].score == 4
 
 
+def test_run_judge_resolves_all_fields_for_a_multi_field_evidence_citation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: ``evidence_id`` is a citation-*group* key, not a
+    unique row key -- multiple ``EvidenceEvent`` rows can legitimately share
+    one ``evidence_id`` with different ``field_name``/``field_value`` pairs
+    (see TODO.md's 2026-08-28 decision log entry). A naive
+    ``{item.evidence_id: item for item in evidence}`` dict comprehension
+    silently keeps only the *last* row per ``evidence_id``, dropping the
+    other fields with no visible error. This asserts the judge's prompt
+    carries every field's value for a 3-field citation group, not just one."""
+    database_path = tmp_path / "glassbox.sqlite3"
+    repository = Repository(Database.open(database_path))
+    decided_at = datetime.now(UTC) - timedelta(minutes=1)
+    decision_id = _ulid("multi-field-decision")
+    trace_id = _ulid("multi-field-trace")
+
+    _write_decision(
+        repository,
+        trace_id=trace_id,
+        decision_id=decision_id,
+        decided_at=decided_at,
+        rationale_citations=("inventory_position",),
+    )
+    _write_evidence(
+        repository,
+        decision_id=decision_id,
+        evidence_id="inventory_position",
+        source_system="BY_Fulfillment",
+        source_ref="item_loc/123/DC04",
+        field_name="on_hand",
+        field_value="MULTI-FIELD-ON-HAND-17",
+        weight=0.8,
+        retrieved_at=decided_at,
+    )
+    _write_evidence(
+        repository,
+        decision_id=decision_id,
+        evidence_id="inventory_position",
+        source_system="BY_Fulfillment",
+        source_ref="item_loc/123/DC04",
+        field_name="lead_time_var",
+        field_value="MULTI-FIELD-LEAD-TIME-VAR-3",
+        weight=0.6,
+        retrieved_at=decided_at,
+    )
+    _write_evidence(
+        repository,
+        decision_id=decision_id,
+        evidence_id="inventory_position",
+        source_system="BY_Fulfillment",
+        source_ref="item_loc/123/DC04",
+        field_name="safety_stock",
+        field_value="MULTI-FIELD-SAFETY-STOCK-42",
+        weight=0.5,
+        retrieved_at=decided_at,
+    )
+
+    fake = FakeProvider([_score_response(4)])
+    _patch_provider(monkeypatch, fake)
+
+    run_judge(
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
+    )
+
+    assert len(fake.calls) == 1
+    _, user_prompt = fake.calls[0]
+    assert "MULTI-FIELD-ON-HAND-17" in user_prompt
+    assert "MULTI-FIELD-LEAD-TIME-VAR-3" in user_prompt
+    assert "MULTI-FIELD-SAFETY-STOCK-42" in user_prompt
+
+
+def test_resolve_cited_evidence_groups_all_fields_with_their_own_per_field_metadata() -> None:
+    """Direct unit test for ``_resolve_cited_evidence``'s grouped output shape:
+    every field row in a citation's ``evidence_id`` group is present, each
+    carrying its own field-level metadata -- never assumed identical across
+    the group, even though it is often identical in practice -- and fields
+    are ordered by ``field_name`` for a deterministic result regardless of
+    the input tuple's order."""
+    decision_id = _ulid("resolve-shape-decision")
+    trace_id = _ulid("resolve-shape-trace")
+    decided_at = datetime.now(UTC) - timedelta(minutes=1)
+    decision = DecisionEvent(
+        decision_id=decision_id,
+        trace_id=trace_id,
+        agent_name="replenishment-triage-ai",
+        agent_version="abc123",
+        entity_type="sku_dc",
+        entity_id="123-DC04",
+        decision_type="flag_exception",
+        recommendation={"action": "review"},
+        rationale="Reasoning for this decision.",
+        rationale_citations=("group-1",),
+        confidence=0.42,
+        alternatives_considered=(),
+        decided_at=decided_at,
+    )
+    # Deliberately supplied out of field_name order, and with distinct
+    # per-row source_system/source_ref/weight/retrieved_at, to prove neither
+    # is assumed shared across the group.
+    evidence = (
+        EvidenceEvent(
+            evidence_id="group-1",
+            decision_id=decision_id,
+            source_system="BY_Fulfillment",
+            source_ref="item_loc/123/DC04",
+            field_name="safety_stock",
+            field_value=42,
+            weight=0.5,
+            retrieved_at=decided_at,
+        ),
+        EvidenceEvent(
+            evidence_id="group-1",
+            decision_id=decision_id,
+            source_system="OMS",
+            source_ref="order/456",
+            field_name="on_hand",
+            field_value=17,
+            weight=0.8,
+            retrieved_at=decided_at - timedelta(minutes=5),
+        ),
+    )
+
+    resolved = judge_module._resolve_cited_evidence(decision, evidence)
+
+    assert resolved == (
+        {
+            "evidence_id": "group-1",
+            "fields": [
+                {
+                    "field_name": "on_hand",
+                    "field_value": 17,
+                    "source_system": "OMS",
+                    "source_ref": "order/456",
+                    "weight": 0.8,
+                    "retrieved_at": (decided_at - timedelta(minutes=5))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                },
+                {
+                    "field_name": "safety_stock",
+                    "field_value": 42,
+                    "source_system": "BY_Fulfillment",
+                    "source_ref": "item_loc/123/DC04",
+                    "weight": 0.5,
+                    "retrieved_at": decided_at.isoformat().replace("+00:00", "Z"),
+                },
+            ],
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Calibration-pairs bootstrap (this run's own fresh results must count)
 # ---------------------------------------------------------------------------
