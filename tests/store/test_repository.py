@@ -1262,6 +1262,83 @@ def test_judge_calibration_pairs_returns_empty_tuple_when_no_decision_qualifies(
     assert repository.judge_calibration_pairs(JUDGE_COHORT) == ()
 
 
+def test_judge_calibration_pairs_exclude_decision_ids_drops_a_qualifying_pair(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the P3a review fix: ``exclude_decision_ids`` drops
+    a decision's pair entirely from the result, regardless of what it would
+    otherwise compute for it. ``glassbox.eval.judge.run_judge()`` uses this
+    to keep a decision's stale, already-committed pair out of its own
+    pre-persist calibration read when that same decision was just re-judged
+    successfully within the same invocation (see judge.py's
+    ``_combine_calibration_pairs`` docstring)."""
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    far_past = datetime(2026, 1, 1, tzinfo=UTC)
+
+    excluded = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FG0",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FG1",
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FG2",
+        decision_id=excluded.decision_id,
+        created_at=far_past,
+        score=5,
+        idempotency_key="calibration-pairs-exclude-human",
+    )
+    _insert_judge_eval_run(database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FG3", run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FG4",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FG3",
+        decision_id=excluded.decision_id,
+        run_at=far_past,
+        score=1,
+    )
+
+    kept = _seed_decision_for_judge(
+        repository,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FG5",
+        decision_id="01ARZ3NDEKTSV4RRFFQ69G5FG6",
+        decided_at=far_past,
+    )
+    _seed_scored_feedback(
+        repository,
+        feedback_id="01ARZ3NDEKTSV4RRFFQ69G5FG7",
+        decision_id=kept.decision_id,
+        created_at=far_past,
+        score=3,
+        idempotency_key="calibration-pairs-exclude-kept-human",
+    )
+    _insert_judge_eval_run(database, eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FG8", run_at=far_past)
+    _insert_judge_eval_result(
+        database,
+        eval_result_id="01ARZ3NDEKTSV4RRFFQ69G5FG9",
+        eval_run_id="01ARZ3NDEKTSV4RRFFQ69G5FG8",
+        decision_id=kept.decision_id,
+        run_at=far_past,
+        score=3,
+    )
+
+    # decision_id ordering: "...FG1" sorts before "...FG6".
+    assert repository.judge_calibration_pairs(JUDGE_COHORT) == ((5, 1), (3, 3))
+
+    filtered = repository.judge_calibration_pairs(
+        JUDGE_COHORT, exclude_decision_ids=frozenset({excluded.decision_id})
+    )
+
+    assert filtered == ((3, 3),)
+
+    # An empty exclude set (the default) is a no-op, not an always-empty filter.
+    assert repository.judge_calibration_pairs(
+        JUDGE_COHORT, exclude_decision_ids=frozenset()
+    ) == ((5, 1), (3, 3))
+
+
 def test_record_judge_run_persists_run_and_results_with_correct_nullability_and_flags(
     tmp_path: Path,
 ) -> None:

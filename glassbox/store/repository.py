@@ -624,7 +624,12 @@ class Repository:
             ).fetchall()
             return tuple(self._judge_candidate_from_row(row) for row in rows)
 
-    def judge_calibration_pairs(self, cohort: JudgeCohort) -> tuple[tuple[int, int], ...]:
+    def judge_calibration_pairs(
+        self,
+        cohort: JudgeCohort,
+        *,
+        exclude_decision_ids: frozenset[str] = frozenset(),
+    ) -> tuple[tuple[int, int], ...]:
         """Return the cross-run (human_score, judge_score) calibration pairs for *cohort*.
 
         Unlike :meth:`judge_candidates`, this is not bounded by ``--since`` and
@@ -641,11 +646,38 @@ class Repository:
         a decision's calibration observation rather than adding to it. Pairs
         are returned ordered by ``decision_id`` for a stable, deterministic
         result.
+
+        ``exclude_decision_ids``, when non-empty, drops any decision in that
+        set from the result entirely, regardless of what this method would
+        otherwise compute for it. This exists for ``run_judge()``'s own
+        pre-persist calibration-pairs computation (see
+        ``glassbox.eval.judge._combine_calibration_pairs``): a decision this
+        invocation just judged successfully -- including one re-judged that
+        already had an older successful result in this cohort -- must not
+        contribute its *stale*, still-committed pair from this query, since
+        the caller supplies that decision's fresh, in-memory score itself.
+        This method still never exposes per-pair decision identity in its
+        return value; the exclusion is a query-time filter, not a widening of
+        the output shape.
         """
         self._validate_judge_cohort(cohort)
         with self._operation_lock:
+            params: dict[str, Any] = {
+                "rubric_version": cohort.rubric_version,
+                "provider": cohort.provider,
+                "model": cohort.model,
+                "assertion_name": _JUDGE_ASSERTION_NAME,
+            }
+            exclude_clause = ""
+            if exclude_decision_ids:
+                placeholders = ", ".join(
+                    f":exclude_{index}" for index in range(len(exclude_decision_ids))
+                )
+                exclude_clause = f"WHERE lf.decision_id NOT IN ({placeholders})"
+                for index, decision_id in enumerate(sorted(exclude_decision_ids)):
+                    params[f"exclude_{index}"] = decision_id
             rows = self._connection.execute(
-                """
+                f"""
                 WITH latest_feedback AS (
                     SELECT decision_id, reasoning_quality_score AS human_score
                     FROM (
@@ -689,14 +721,10 @@ class Repository:
                     lj.judge_score AS judge_score
                 FROM latest_feedback lf
                 JOIN latest_judge_result lj ON lj.decision_id = lf.decision_id
+                {exclude_clause}
                 ORDER BY lf.decision_id ASC
                 """,
-                {
-                    "rubric_version": cohort.rubric_version,
-                    "provider": cohort.provider,
-                    "model": cohort.model,
-                    "assertion_name": _JUDGE_ASSERTION_NAME,
-                },
+                params,
             ).fetchall()
             return tuple((int(row["human_score"]), int(row["judge_score"])) for row in rows)
 

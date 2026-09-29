@@ -218,109 +218,134 @@ def run_judge(
     ``judge_candidates()`` disclosure call and this function, so what was
     disclosed for consent is guaranteed to use the same cutoff as what is
     actually judged and sent to the provider.
+
+    The ``Database`` this function opens is always closed before returning
+    or raising -- the whole body below runs inside a ``try/finally`` so a
+    failure at any step (candidate selection, provider construction, the
+    judging loop, or persistence) still closes the connection, matching the
+    CLI's own preflight-connection-close pattern in ``glassbox/cli.py``.
     """
-    repository = Repository(Database.open(database_path))
-    cohort = build_judge_cohort(config)
-    run_at = datetime.now(UTC)
+    database = Database.open(database_path)
+    repository = Repository(database)
+    try:
+        cohort = build_judge_cohort(config)
+        run_at = datetime.now(UTC)
 
-    all_candidates = repository.judge_candidates(cohort, decided_since)
-    backlog_count = sum(1 for candidate in all_candidates if candidate.calibration_backlog)
-    recent_count = sum(1 for candidate in all_candidates if candidate.recent_gated)
-    candidates = all_candidates if max_cases is None else all_candidates[:max_cases]
+        all_candidates = repository.judge_candidates(cohort, decided_since)
+        backlog_count = sum(1 for candidate in all_candidates if candidate.calibration_backlog)
+        recent_count = sum(1 for candidate in all_candidates if candidate.recent_gated)
+        candidates = all_candidates if max_cases is None else all_candidates[:max_cases]
 
-    system_prompt = _build_system_prompt(_load_rubric_text(cohort.rubric_version))
-    target_normalized = normalize_model(config.model)
-    provider = create_judge_provider(config)
+        system_prompt = _build_system_prompt(_load_rubric_text(cohort.rubric_version))
+        target_normalized = normalize_model(config.model)
+        provider = create_judge_provider(config)
 
-    unverified_decision_ids: list[str] = []
-    outcomes: list[JudgeOutcome] = []
-    for candidate in candidates:
-        if not candidate.llm_models:
-            unverified_decision_ids.append(candidate.decision.event.decision_id)
-        outcomes.append(
-            _judge_one(
-                candidate,
-                provider=provider,
-                system_prompt=system_prompt,
-                target_normalized=target_normalized,
-                allow_self_judge=allow_self_judge,
+        unverified_decision_ids: list[str] = []
+        outcomes: list[JudgeOutcome] = []
+        for candidate in candidates:
+            if not candidate.llm_models:
+                unverified_decision_ids.append(candidate.decision.event.decision_id)
+            outcomes.append(
+                _judge_one(
+                    candidate,
+                    provider=provider,
+                    system_prompt=system_prompt,
+                    target_normalized=target_normalized,
+                    allow_self_judge=allow_self_judge,
+                )
             )
+
+        tally = _summarize_run(candidates, outcomes)
+
+        calibration_failed = tally.calibration_attempted - tally.calibration_succeeded
+        calibration_failure_rate = (
+            calibration_failed / tally.calibration_attempted
+            if tally.calibration_attempted
+            else 0.0
+        )
+        gated_failures = tally.gated_selected - tally.gated_successes
+        gated_failure_rate = (
+            gated_failures / tally.gated_selected if tally.gated_selected else 0.0
+        )
+        gated_mean = (
+            sum(tally.gated_scores) / len(tally.gated_scores) if tally.gated_scores else None
         )
 
-    tally = _summarize_run(candidates, outcomes)
+        # Every decision this run judged successfully must be excluded from
+        # the historical read below, so a decision re-judged this run (one
+        # that already had an older successful result in this cohort) never
+        # contributes its now-superseded pre-persist pair alongside its own
+        # fresh one -- see _combine_calibration_pairs's docstring.
+        judged_decision_ids = frozenset(
+            outcome.decision_id for outcome in outcomes if outcome.error is None
+        )
+        historical_pairs = repository.judge_calibration_pairs(
+            cohort, exclude_decision_ids=judged_decision_ids
+        )
+        calibration_pairs = _combine_calibration_pairs(historical_pairs, candidates, outcomes)
+        expected = [pair[0] for pair in calibration_pairs]
+        predicted = [pair[1] for pair in calibration_pairs]
+        kappa = ordinal_linear_weighted_kappa(expected, predicted) if calibration_pairs else None
+        kappa_interval = (
+            bootstrap_kappa_interval(expected, predicted)
+            if calibration_pairs
+            else BootstrapInterval(low=None, high=None, skipped=0)
+        )
 
-    calibration_failed = tally.calibration_attempted - tally.calibration_succeeded
-    calibration_failure_rate = (
-        calibration_failed / tally.calibration_attempted if tally.calibration_attempted else 0.0
-    )
-    gated_failures = tally.gated_selected - tally.gated_successes
-    gated_failure_rate = gated_failures / tally.gated_selected if tally.gated_selected else 0.0
-    gated_mean = (
-        sum(tally.gated_scores) / len(tally.gated_scores) if tally.gated_scores else None
-    )
+        status, reason = _decide_status(
+            calibration_pairs=len(calibration_pairs),
+            kappa=kappa,
+            gated_successes=tally.gated_successes,
+            gated_failure_rate=gated_failure_rate,
+            gated_mean=gated_mean,
+        )
 
-    calibration_pairs = _combine_calibration_pairs(
-        repository.judge_calibration_pairs(cohort), candidates, outcomes
-    )
-    expected = [pair[0] for pair in calibration_pairs]
-    predicted = [pair[1] for pair in calibration_pairs]
-    kappa = ordinal_linear_weighted_kappa(expected, predicted) if calibration_pairs else None
-    kappa_interval = (
-        bootstrap_kappa_interval(expected, predicted)
-        if calibration_pairs
-        else BootstrapInterval(low=None, high=None, skipped=0)
-    )
+        eval_run_id = _new_eval_run_id()
+        judge_failure_count = sum(1 for outcome in outcomes if outcome.error is not None)
+        run = JudgeRun(
+            eval_run_id=eval_run_id,
+            cohort=cohort,
+            run_at=run_at,
+            status=status,
+            status_reason=reason,
+            judge_failure_count=judge_failure_count,
+            self_judge_allowed=allow_self_judge,
+        )
+        repository.record_judge_run(run, tuple(outcomes))
 
-    status, reason = _decide_status(
-        calibration_pairs=len(calibration_pairs),
-        kappa=kappa,
-        gated_successes=tally.gated_successes,
-        gated_failure_rate=gated_failure_rate,
-        gated_mean=gated_mean,
-    )
-
-    eval_run_id = _new_eval_run_id()
-    judge_failure_count = sum(1 for outcome in outcomes if outcome.error is not None)
-    run = JudgeRun(
-        eval_run_id=eval_run_id,
-        cohort=cohort,
-        run_at=run_at,
-        status=status,
-        status_reason=reason,
-        judge_failure_count=judge_failure_count,
-        self_judge_allowed=allow_self_judge,
-    )
-    repository.record_judge_run(run, tuple(outcomes))
-
-    return JudgeReport(
-        status=status,
-        reason=reason,
-        cohort=cohort,
-        run_at=run_at,
-        eval_run_id=eval_run_id,
-        self_judge_allowed=allow_self_judge,
-        candidates_backlog_count=backlog_count,
-        candidates_recent_count=recent_count,
-        candidates_deduplicated_count=len(all_candidates),
-        candidates_judged_count=len(candidates),
-        calibration_attempted=tally.calibration_attempted,
-        calibration_succeeded=tally.calibration_succeeded,
-        calibration_failed=calibration_failed,
-        calibration_failure_rate=calibration_failure_rate,
-        calibration_pairs=len(calibration_pairs),
-        kappa=kappa,
-        kappa_interval=kappa_interval,
-        gated_selected=tally.gated_selected,
-        gated_successes=tally.gated_successes,
-        gated_failures=gated_failures,
-        gated_failure_rate=gated_failure_rate,
-        gated_mean=gated_mean,
-        self_judge_unverified_count=len(unverified_decision_ids),
-        self_judge_unverified_decision_ids=tuple(unverified_decision_ids),
-        self_judge_bypassed_count=sum(1 for outcome in outcomes if outcome.self_judge_bypassed),
-        self_judge_refused_count=tally.self_judge_refused_count,
-        outcomes=tuple(outcomes),
-    )
+        return JudgeReport(
+            status=status,
+            reason=reason,
+            cohort=cohort,
+            run_at=run_at,
+            eval_run_id=eval_run_id,
+            self_judge_allowed=allow_self_judge,
+            candidates_backlog_count=backlog_count,
+            candidates_recent_count=recent_count,
+            candidates_deduplicated_count=len(all_candidates),
+            candidates_judged_count=len(candidates),
+            calibration_attempted=tally.calibration_attempted,
+            calibration_succeeded=tally.calibration_succeeded,
+            calibration_failed=calibration_failed,
+            calibration_failure_rate=calibration_failure_rate,
+            calibration_pairs=len(calibration_pairs),
+            kappa=kappa,
+            kappa_interval=kappa_interval,
+            gated_selected=tally.gated_selected,
+            gated_successes=tally.gated_successes,
+            gated_failures=gated_failures,
+            gated_failure_rate=gated_failure_rate,
+            gated_mean=gated_mean,
+            self_judge_unverified_count=len(unverified_decision_ids),
+            self_judge_unverified_decision_ids=tuple(unverified_decision_ids),
+            self_judge_bypassed_count=sum(
+                1 for outcome in outcomes if outcome.self_judge_bypassed
+            ),
+            self_judge_refused_count=tally.self_judge_refused_count,
+            outcomes=tuple(outcomes),
+        )
+    finally:
+        database.close()
 
 
 @dataclass(frozen=True)
@@ -405,28 +430,33 @@ def _combine_calibration_pairs(
     ever admits calibration is possible. That is a real bug, not a
     defensible reading of an ambiguous spec.
 
-    A calibration-backlog candidate is, by definition (see
-    ``JudgeCandidate.calibration_backlog``), a decision with a human score
-    and *no* existing successful judge result in this cohort, so it can
-    never already appear in ``historical_pairs``; appending this run's own
-    successful backlog outcomes is therefore a safe concatenation, not a
-    de-duplicating merge, and yields exactly the pairs a fresh post-persist
-    query would return for that decision.
+    ``historical_pairs`` must already have every decision this run judged
+    *successfully* excluded from it -- ``run_judge`` fetches it via
+    ``Repository.judge_calibration_pairs(cohort,
+    exclude_decision_ids=<this run's successfully judged decision ids>)`` for
+    exactly this reason. Without that exclusion, a decision that was already
+    outside the calibration backlog (i.e. already had a successful in-cohort
+    result from an earlier run) and happens to be re-judged again within this
+    same run as part of the recent-gated set would keep contributing its
+    *stale* pre-persist pair here, alongside its own fresh one -- both a
+    duplicate and a use of superseded data for the same decision. Excluding
+    it from ``historical_pairs`` up front, then adding exactly one fresh pair
+    per successfully judged candidate below, means every decision
+    contributes at most one pair to this run's report, and it is always the
+    freshest one: a first-time backlog decision (never in
+    ``historical_pairs`` to begin with, added fresh here) and a re-judged
+    previously-successful decision (excluded from ``historical_pairs``, added
+    fresh here in its place) are both handled by the same mechanism.
 
-    This intentionally does not attempt to *refresh* a pair for a decision
-    that was already outside the backlog (i.e. already had a successful
-    in-cohort result from an earlier run) and happens to be re-judged again
-    within this same run as part of the recent-gated set: ``historical_pairs``
-    still reflects that decision's prior score until a later invocation
-    re-reads it. That narrower case is a pre-existing, one-invocation-behind
-    characteristic this fix does not extend to, since resolving it would
-    require ``judge_calibration_pairs`` to expose decision identity, which
-    the current interface deliberately does not.
+    Every successfully judged candidate with a known human score contributes
+    a fresh pair here -- not only calibration-backlog candidates, since a
+    recent-gated candidate that was re-judged this run needs its fresh pair
+    counted too (see above).
     """
     outcomes_by_decision = {outcome.decision_id: outcome for outcome in outcomes}
     fresh_pairs: list[tuple[int, int]] = []
     for candidate in candidates:
-        if not candidate.calibration_backlog or candidate.human_score is None:
+        if candidate.human_score is None:
             continue
         outcome = outcomes_by_decision[candidate.decision.event.decision_id]
         if outcome.error is None and outcome.score is not None:

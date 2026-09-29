@@ -11,6 +11,7 @@ import pytest
 import glassbox.eval.judge as judge_module
 from glassbox.eval.judge import normalize_model, run_judge
 from glassbox.eval.judge_config import JudgeConfig
+from glassbox.eval.judge_provider import JudgeProvider
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
 from glassbox.store.repository import (
@@ -932,6 +933,138 @@ def test_run_judge_calibration_pairs_include_this_runs_own_newly_judged_backlog(
     )
 
 
+def test_run_judge_calibration_pairs_use_a_fresh_rejudge_score_not_the_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a decision that already had a *successful* judge
+    result from an earlier run (so it is no longer in the calibration
+    backlog) can still be selected again this run via the recent-gated
+    ``--since`` window and produce a new score. This run's own calibration
+    gate must use that fresh score, not the stale one ``historical_pairs``
+    would otherwise still carry for it.
+
+    29 decisions are seeded as pure historical calibration pairs (far in the
+    past, excluded from this run's candidate selection since they are
+    neither backlog -- already successfully judged -- nor recent). A 30th
+    decision is seeded the same way (an existing successful judge result of
+    ``1`` against a human score of ``5`` -- maximal disagreement) but with a
+    *recent* ``decided_at``, so it is selected this run as recent-gated
+    (not backlog, since it already has a successful result). The fake
+    provider returns ``5`` for it this run -- perfect agreement with its
+    human score. With the bug (stale historical concatenation, gated to
+    backlog-only fresh pairs), this decision contributes nothing fresh and
+    ``historical_pairs`` still carries its old ``(5, 1)`` pair, so kappa
+    reflects one disagreement out of 30 pairs (< 1.0). Fixed, its stale pair
+    is excluded from the historical read and its fresh ``(5, 5)`` pair is
+    added instead, so all 30 pairs agree and kappa is exactly ``1.0``.
+    """
+    database_path = tmp_path / "glassbox.sqlite3"
+    repository = Repository(Database.open(database_path))
+    cohort = JudgeCohort(provider="openai", model="gpt-4o", rubric_version=_RUBRIC_VERSION)
+    far_past = datetime(2020, 1, 1, tzinfo=UTC)
+    recent = datetime.now(UTC) - timedelta(minutes=1)
+
+    # 29 pure historical pairs, perfectly matched, decided long ago -- never
+    # reselected by this run's judge_candidates() (not backlog: already
+    # successfully judged; not recent: decided_at is far in the past).
+    background_scores = [((index % 5) + 1) for index in range(29)]
+    _seed_calibration_history(
+        repository,
+        cohort=cohort,
+        pairs=[(score, score) for score in background_scores],
+        far_past=far_past,
+        seed="stale-rejudge-background",
+    )
+
+    # The 30th decision: an existing successful judge result of 1 against a
+    # human score of 5 (maximal disagreement) from a "prior run", but with a
+    # recent decided_at so it falls inside this run's --since window.
+    rejudged_decision_id = _ulid("stale-rejudge-decision")
+    rejudged_trace_id = _ulid("stale-rejudge-trace")
+    _write_decision(
+        repository,
+        trace_id=rejudged_trace_id,
+        decision_id=rejudged_decision_id,
+        decided_at=recent,
+        rationale="Previously judged, now re-judged with a different score.",
+    )
+    repository.record_feedback(
+        FeedbackSubmission(
+            feedback_id=_ulid("stale-rejudge-feedback"),
+            decision_id=rejudged_decision_id,
+            verdict="agree",
+            reason_code=None,
+            free_text=None,
+            corrected_recommendation=None,
+            created_at=recent,
+            idempotency_key="stale-rejudge-feedback-key",
+            reasoning_quality_score=5,
+            reasoning_quality_rubric_version=cohort.rubric_version,
+        )
+    )
+    repository.record_judge_run(
+        JudgeRun(
+            eval_run_id=_ulid("stale-rejudge-prior-run"),
+            cohort=cohort,
+            run_at=far_past,
+            status="uncalibrated",
+            status_reason="seed",
+            judge_failure_count=0,
+            self_judge_allowed=False,
+        ),
+        (
+            JudgeOutcome(
+                decision_id=rejudged_decision_id,
+                score=1,
+                rationale="prior run's now-stale score",
+                error=None,
+                self_judge_bypassed=False,
+            ),
+        ),
+    )
+
+    # Confirm the seed: the decision is not in the backlog (it already has a
+    # successful result) but is selected again as recent-gated.
+    candidates_before = repository.judge_candidates(
+        cohort, decided_since=datetime.now(UTC) - timedelta(days=1)
+    )
+    rejudged_candidate = next(
+        candidate
+        for candidate in candidates_before
+        if candidate.decision.event.decision_id == rejudged_decision_id
+    )
+    assert rejudged_candidate.calibration_backlog is False
+    assert rejudged_candidate.recent_gated is True
+    assert rejudged_candidate.human_score == 5
+
+    fake = FakeProvider([_score_response(5, rationale="fresh agreement")])
+    _patch_provider(monkeypatch, fake)
+
+    report = run_judge(
+        database_path,
+        _config(provider=cohort.provider, model=cohort.model),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
+    )
+
+    assert len(fake.calls) == 1
+    outcomes_by_decision = {outcome.decision_id: outcome for outcome in report.outcomes}
+    assert outcomes_by_decision[rejudged_decision_id].score == 5
+
+    # The bug being fixed: with the stale (5, 1) pair still counted, kappa
+    # would reflect one disagreement out of 30 pairs and not equal 1.0.
+    assert report.calibration_pairs == 30
+    assert report.kappa == 1.0
+
+    # A fresh, independent post-persist read also reflects the new score,
+    # not the old one -- proving it was actually persisted, not just used
+    # in-memory for this run's own report.
+    persisted_pairs = repository.judge_calibration_pairs(cohort)
+    assert (5, 5) in persisted_pairs
+    assert (5, 1) not in persisted_pairs
+
+
 # ---------------------------------------------------------------------------
 # Status/reason decision tree
 # ---------------------------------------------------------------------------
@@ -1208,3 +1341,113 @@ def test_judge_report_to_dict_is_json_serializable_with_expected_shape(
     assert reloaded["gated"]["succeeded"] == 1
     assert reloaded["self_judge"]["unverified_count"] == 1
     assert reloaded["self_judge"]["refused_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Database connection lifecycle (run_judge must always close its own Database)
+# ---------------------------------------------------------------------------
+
+
+def _tracking_close(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Patch ``Database.close`` to record every call while still closing for
+    real, mirroring the idiom ``tests/test_cli.py`` uses for its own
+    preflight-connection-close regression test."""
+    close_calls: list[object] = []
+    original_close = Database.close
+
+    def tracking_close(self: Database) -> None:
+        close_calls.append(self)
+        original_close(self)
+
+    monkeypatch.setattr(Database, "close", tracking_close)
+    return close_calls
+
+
+def test_run_judge_closes_the_database_connection_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: run_judge() must close the Database connection it
+    opens on the ordinary successful return path -- not merely leave it open
+    until process exit -- mirroring the CLI's own preflight-connection-close
+    fix (tests/test_cli.py's
+    test_judge_command_closes_the_preflight_connection_even_when_the_query_fails)."""
+    database_path = tmp_path / "glassbox.sqlite3"
+    Database.open(database_path).close()
+    close_calls = _tracking_close(monkeypatch)
+
+    fake = FakeProvider([])
+    _patch_provider(monkeypatch, fake)
+
+    report = run_judge(
+        database_path,
+        _config(),
+        decided_since=datetime.now(UTC) - timedelta(days=1),
+        max_cases=None,
+        allow_self_judge=False,
+    )
+
+    assert report.candidates_judged_count == 0
+    assert len(close_calls) == 1
+
+
+def test_run_judge_closes_the_database_connection_when_provider_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a failure anywhere inside run_judge() -- here, the
+    provider factory itself, which runs before the per-candidate judging
+    loop and so is never isolated by _judge_one()'s own try/except -- must
+    still close the Database connection opened at the top of the function."""
+    database_path = tmp_path / "glassbox.sqlite3"
+    Database.open(database_path).close()
+    close_calls = _tracking_close(monkeypatch)
+
+    def raising_create_judge_provider(config: JudgeConfig) -> JudgeProvider:
+        raise RuntimeError("simulated provider construction failure")
+
+    monkeypatch.setattr(judge_module, "create_judge_provider", raising_create_judge_provider)
+
+    with pytest.raises(RuntimeError, match="simulated provider construction failure"):
+        run_judge(
+            database_path,
+            _config(),
+            decided_since=datetime.now(UTC) - timedelta(days=1),
+            max_cases=None,
+            allow_self_judge=False,
+        )
+
+    assert len(close_calls) == 1
+
+
+def test_run_judge_closes_the_database_connection_when_persistence_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a failure in the final persistence step
+    (record_judge_run) -- after the judging loop has already produced
+    outcomes -- must still close the Database connection."""
+    database_path = tmp_path / "glassbox.sqlite3"
+    repository = Repository(Database.open(database_path))
+    recent = datetime.now(UTC) - timedelta(minutes=1)
+    _seed_recent_decision(repository, decided_at=recent, seed="close-on-persist-failure")
+
+    close_calls = _tracking_close(monkeypatch)
+
+    fake = FakeProvider([_score_response(4)])
+    _patch_provider(monkeypatch, fake)
+
+    def raising_record_judge_run(
+        self: Repository, run: JudgeRun, results: tuple[JudgeOutcome, ...]
+    ) -> None:
+        raise RuntimeError("simulated persistence failure")
+
+    monkeypatch.setattr(Repository, "record_judge_run", raising_record_judge_run)
+
+    with pytest.raises(RuntimeError, match="simulated persistence failure"):
+        run_judge(
+            database_path,
+            _config(),
+            decided_since=datetime.now(UTC) - timedelta(days=1),
+            max_cases=None,
+            allow_self_judge=False,
+        )
+
+    assert len(close_calls) == 1
