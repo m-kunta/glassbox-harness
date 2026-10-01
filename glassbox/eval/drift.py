@@ -6,13 +6,24 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import tomllib
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Literal, Sequence, TypeAlias
+from typing import Callable, Literal, Mapping, Sequence, TypeAlias, cast
+
+from glassbox.store import Database, Repository
+from glassbox.store.repository import (
+    DriftBaselineInsert,
+    DriftBaselineRecord,
+    DriftDecisionSample,
+    DriftResultInsert,
+    DriftRunInsert,
+    DriftTraceSample,
+)
 
 SignalName: TypeAlias = Literal["confidence", "decision_type", "trace_latency_ms", "trace_cost_usd"]
 DriftStatus: TypeAlias = Literal["healthy", "watch", "drift_detected", "insufficient_data"]
@@ -28,6 +39,17 @@ SIGNAL_NAMES: tuple[SignalName, ...] = (
     "trace_latency_ms",
     "trace_cost_usd",
 )
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def _new_drift_ulid(timestamp: datetime) -> str:
+    """Mint a canonical ULID using the run's captured UTC instant."""
+    value = (int(timestamp.timestamp() * 1_000) << 80) | secrets.randbits(80)
+    encoded = ""
+    for _ in range(26):
+        value, remainder = divmod(value, 32)
+        encoded = _ULID_ALPHABET[remainder] + encoded
+    return encoded
 
 
 class DriftPolicyError(ValueError):
@@ -332,6 +354,11 @@ def policy_hash(policy: DriftPolicy) -> str:
     return policy.policy_hash
 
 
+def default_policy_path() -> Path:
+    """Return the checked-in drift policy location."""
+    return Path(__file__).parent / "policies" / "drift_v1.toml"
+
+
 def _confidence_bin(value: float, bounds: tuple[float, ...]) -> int:
     if not math.isfinite(value) or not 0 <= value <= 1:
         raise ValueError("confidence must be finite and between 0 and 1")
@@ -603,3 +630,238 @@ def calculate_report(
         _decisions_per_trace(recent_traces),
         tuple(reports),
     )
+
+
+def _source_decisions(source: Sequence[DriftDecisionSample]) -> tuple[DecisionSample, ...]:
+    return tuple(
+        DecisionSample(
+            sample.agent_name,
+            sample.agent_version,
+            sample.confidence,
+            sample.decision_type,
+            sample.decided_at,
+        )
+        for sample in source
+    )
+
+
+def _source_traces(source: Sequence[DriftTraceSample]) -> tuple[TraceSample, ...]:
+    return tuple(
+        TraceSample(
+            sample.agent_name,
+            sample.agent_version,
+            sample.latency_ms,
+            sample.total_cost_usd,
+            sample.started_at,
+            sample.decision_count,
+        )
+        for sample in source
+    )
+
+
+def _material_from_record(record: DriftBaselineRecord) -> BaselineMaterial:
+    if set(record.reference) != set(SIGNAL_NAMES):
+        raise DriftPolicyError("stored drift baseline has incomplete signal material")
+
+    def signal_from_reference(name: SignalName) -> BaselineSignal:
+        value = cast(Mapping[str, object], record.reference[name])
+        return BaselineSignal(
+            name=name,
+            count=cast(int, value["count"]),
+            labels=tuple(cast(Sequence[str], value["labels"])),
+            counts=tuple(cast(Sequence[int], value["counts"])),
+            proportions=tuple(cast(Sequence[float], value["proportions"])),
+            mean=cast(float | None, value["mean"]),
+            standard_deviation=cast(float | None, value["standard_deviation"]),
+        )
+
+    signals = tuple(signal_from_reference(name) for name in SIGNAL_NAMES)
+    counts = cast(dict[str, dict[str, int]], record.version_counts["versions"])
+    versions = tuple(
+        (version, entry["decisions"], entry["traces"]) for version, entry in sorted(counts.items())
+    )
+    return BaselineMaterial(
+        record.policy_version,
+        record.policy_hash,
+        record.baseline_start,
+        record.baseline_end,
+        record.agent_name,
+        record.baseline_id,
+        signals,
+        versions,
+        cast(float | None, record.version_counts["decisions_per_trace"]),
+    )
+
+
+def create_baseline(
+    database_path: Path,
+    agent_name: str,
+    policy: DriftPolicy,
+    *,
+    supersede: bool,
+    clock: Callable[[], datetime],
+) -> DriftBaselineRecord:
+    """Calculate one historical baseline and append its immutable snapshot."""
+    if not database_path.is_file():
+        raise FileNotFoundError(database_path)
+    created_at = clock()
+    database = Database.open(database_path)
+    try:
+        repository = Repository(database)
+        source = repository.drift_source_data(
+            agent_name,
+            policy.baseline_start,
+            policy.baseline_end,
+            policy.baseline_start,
+            policy.baseline_end,
+        )
+        material = calculate_baseline(
+            policy,
+            _source_decisions(source.baseline_decisions),
+            _source_traces(source.baseline_traces),
+        )
+        for signal in material.signals:
+            floor = policy.signal(signal.name).minimum_baseline_samples
+            if signal.count < floor:
+                raise DriftPolicyError(
+                    f"{signal.name} baseline has {signal.count} samples; requires {floor}"
+                )
+        request = DriftBaselineInsert(
+            baseline_id=_new_drift_ulid(created_at),
+            agent_name=agent_name,
+            policy_version=policy.policy_version,
+            policy_hash=policy.policy_hash,
+            baseline_start=policy.baseline_start,
+            baseline_end=policy.baseline_end,
+            created_at=created_at,
+            version_counts={
+                "versions": _version_map(material.version_counts),
+                "decisions_per_trace": material.decisions_per_trace,
+            },
+            reference={signal.name: asdict(signal) for signal in material.signals},
+        )
+        return repository.record_drift_baseline(request, supersede=supersede)
+    finally:
+        database.close()
+
+
+def _missing_baseline_report(
+    policy: DriftPolicy,
+    agent_name: str,
+    as_of: datetime,
+    reason: InsufficientReason,
+) -> DriftReport:
+    signals = tuple(
+        DriftSignalReport(
+            signal.name,
+            signal.population,
+            signal.algorithm,
+            0,
+            0,
+            None,
+            signal.warning_threshold,
+            signal.alert_threshold,
+            "insufficient_data",
+            reason,
+            {},
+        )
+        for signal in policy.signals
+    )
+    return DriftReport(
+        "insufficient_data",
+        reason,
+        as_of,
+        policy.baseline_start,
+        policy.baseline_end,
+        as_of - policy.recent_duration,
+        as_of,
+        policy.policy_version,
+        policy.policy_hash,
+        agent_name,
+        None,
+        (),
+        (),
+        None,
+        None,
+        signals,
+    )
+
+
+def run_drift_report(
+    database_path: Path,
+    agent_name: str,
+    policy: DriftPolicy,
+    *,
+    clock: Callable[[], datetime],
+    persist: bool,
+) -> DriftReport:
+    """Use one instant for querying, calculation, output, and optional persistence."""
+    as_of = clock()
+    recent_start = as_of - policy.recent_duration
+    database = (
+        Database.open(database_path)
+        if persist and database_path.is_file()
+        else Database.open_read_only(database_path)
+    )
+    try:
+        repository = Repository(database)
+        state = repository.drift_baseline_state(agent_name, policy.policy_hash)
+        if state.status == "malformed":
+            raise DriftPolicyError("drift baseline history is malformed")
+        if state.baseline is None:
+            other_policy = database.connection.execute(
+                "SELECT 1 FROM drift_baselines WHERE agent_name = ? AND policy_hash != ? LIMIT 1",
+                (agent_name, policy.policy_hash),
+            ).fetchone()
+            reason: InsufficientReason = (
+                "policy_changed_requires_rebaseline" if other_policy else "baseline_not_created"
+            )
+            return _missing_baseline_report(policy, agent_name, as_of, reason)
+        baseline = _material_from_record(state.baseline)
+        source = repository.drift_recent_source_data(agent_name, recent_start, as_of)
+        report = calculate_report(
+            policy,
+            baseline,
+            _source_decisions(source.recent_decisions),
+            _source_traces(source.recent_traces),
+            as_of,
+        )
+        if persist:
+            run = DriftRunInsert(
+                drift_run_id=_new_drift_ulid(as_of),
+                baseline_id=cast(str, report.baseline_id),
+                agent_name=agent_name,
+                policy_version=report.policy_version,
+                policy_hash=report.policy_hash,
+                as_of=report.as_of,
+                recent_start=report.recent_start,
+                recent_end=report.recent_end,
+                status=report.status,
+                status_reason=report.reason,
+                version_counts=_version_map(report.recent_versions),
+                context={
+                    "baseline_versions": _version_map(report.baseline_versions),
+                    "baseline_decisions_per_trace": report.baseline_decisions_per_trace,
+                    "recent_decisions_per_trace": report.recent_decisions_per_trace,
+                },
+            )
+            results = tuple(
+                DriftResultInsert(
+                    drift_result_id=_new_drift_ulid(as_of),
+                    signal_name=signal.name,
+                    population=signal.population,
+                    algorithm=signal.algorithm,
+                    status=signal.status,
+                    baseline_count=signal.baseline_count,
+                    recent_count=signal.recent_count,
+                    metric_value=signal.value,
+                    warning_threshold=signal.warning_threshold,
+                    alert_threshold=signal.alert_threshold,
+                    details=signal.details,
+                )
+                for signal in report.signals
+            )
+            repository.record_drift_run(run, results)
+        return report
+    finally:
+        database.close()

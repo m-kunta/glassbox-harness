@@ -122,6 +122,34 @@ def test_drift_source_populations_and_agent_selection(drift_repository: Reposito
     assert source.recent_traces[0].agent_version == "v2"
 
 
+def test_drift_recent_source_uses_only_recent_bounds(drift_repository: Repository) -> None:
+    connection = drift_repository._connection
+    for index, stamp in enumerate(("2026-09-01T00:00:00Z", "2026-09-08T00:00:00Z")):
+        connection.execute(
+            "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
+            "status, environment) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev')",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FJ{index}", stamp),
+        )
+        connection.execute(
+            "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
+            "entity_type, entity_id, decision_type, recommendation, rationale, "
+            "rationale_citations, confidence, alternatives_considered, decided_at) "
+            "VALUES (?, ?, 'agent-a', 'v1', 'sku', 'one', 'flag', '{}', 'r', '[]', 0.5, '[]', ?)",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FK{index}", f"01ARZ3NDEKTSV4RRFFQ69G5FJ{index}", stamp),
+        )
+    connection.commit()
+    queries: list[str] = []
+    connection.set_trace_callback(queries.append)
+    try:
+        source = drift_repository.drift_recent_source_data("agent-a", DRIFT_MID, DRIFT_END)
+    finally:
+        connection.set_trace_callback(None)
+    assert source.baseline_decisions == source.baseline_traces == ()
+    assert len(source.recent_decisions) == len(source.recent_traces) == 1
+    assert len(queries) == 2
+    assert all("2026-09-01" not in query for query in queries)
+
+
 def test_drift_baseline_heads_are_immutable_and_classified(drift_repository: Repository) -> None:
     first = drift_repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"))
     assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "active"
@@ -168,19 +196,19 @@ def test_drift_baseline_sql_failure_rolls_back(drift_repository: Repository) -> 
     assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "absent"
 
 
-
 def test_drift_baseline_rejects_non_json_reference_before_sql(
     drift_repository: Repository,
 ) -> None:
     request = dataclasses.replace(
         _drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"),
-        reference={**_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0").reference,
-                   "confidence": {"mean": float("nan")}},
+        reference={
+            **_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0").reference,
+            "confidence": {"mean": float("nan")},
+        },
     )
     with pytest.raises(ValueError, match="non-finite"):
         drift_repository.record_drift_baseline(request)
     assert not drift_repository._connection.in_transaction
-
 
 
 def test_drift_baseline_rejects_multiple_and_zero_heads(drift_repository: Repository) -> None:

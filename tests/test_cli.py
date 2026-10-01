@@ -18,6 +18,99 @@ DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 TIMESTAMP = datetime(2026, 8, 22, 14, 30, 45, tzinfo=UTC)
 
 
+def test_drift_cli_detected_status_is_json_and_exit_zero(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from glassbox.eval.drift import create_baseline, load_policy
+    from tests.eval.test_drift import AS_OF, _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, recent_at=datetime.now(UTC).replace(microsecond=0) - timedelta(days=2))
+    policy = load_policy(
+        Path(__file__).resolve().parent.parent / "glassbox/eval/policies/drift_v1.toml"
+    )
+    create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    assert main(["--database", str(path), "drift", "--agent", "agent-a"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "drift_detected"
+    assert payload["policy_hash"] == policy.policy_hash
+
+
+def test_drift_cli_baseline_and_operational_exits(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_drift import _seed_drift
+
+    missing = tmp_path / "missing.sqlite3"
+    assert main(["--database", str(missing), "drift", "--agent", "agent-a"]) == 2
+    assert "unable to run drift command" in capsys.readouterr().err
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, recent_at=datetime.now(UTC).replace(microsecond=0) - timedelta(days=2))
+    baseline_args = ["--database", str(path), "drift", "baseline", "--agent", "agent-a"]
+    assert main(baseline_args) == 0
+    assert main(baseline_args) == 2
+    assert main(baseline_args + ["--supersede-baseline"]) == 0
+    assert "unable to run drift command" in capsys.readouterr().err
+
+
+def test_drift_cli_insufficient_baseline_exits_two(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_drift import _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, baseline_decisions=99)
+    assert main(["--database", str(path), "drift", "baseline", "--agent", "agent-a"]) == 2
+    assert capsys.readouterr().err.strip() == "glassbox: unable to run drift command"
+
+
+def test_drift_cli_malformed_baseline_exits_two(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_drift import _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    assert main(["--database", str(path), "drift", "baseline", "--agent", "agent-a"]) == 0
+    capsys.readouterr()
+    database = Database.open(path)
+    try:
+        database.connection.execute("UPDATE drift_baselines SET reference_json = '{}' ")
+        database.connection.commit()
+    finally:
+        database.close()
+    assert main(["--database", str(path), "drift", "--agent", "agent-a"]) == 2
+    assert capsys.readouterr().err.strip() == "glassbox: unable to run drift command"
+
+
+def test_drift_cli_policy_override_and_insufficient_baseline(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_drift import POLICY_PATH, _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, recent_at=datetime.now(UTC).replace(microsecond=0) - timedelta(days=2))
+    assert main(["--database", str(path), "drift", "--agent", "agent-a"]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "baseline_not_created"
+    custom = tmp_path / "custom.toml"
+    custom.write_text(
+        POLICY_PATH.read_text().replace("warning_threshold = 0.10", "warning_threshold = 0.11")
+    )
+    args = [
+        "--database",
+        str(path),
+        "drift",
+        "baseline",
+        "--agent",
+        "agent-a",
+        "--policy",
+        str(custom),
+    ]
+    assert main(args) == 0
+    capsys.readouterr()
+    assert main(["--database", str(path), "drift", "--agent", "agent-a"]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "policy_changed_requires_rebaseline"
+    assert (
+        main(["--database", str(path), "drift", "--agent", "agent-a", "--policy", str(custom)]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "drift_detected"
+
+
 def _repository_with_trace(path: Path) -> Database:
     database = Database.open(path)
     repository = Repository(database)

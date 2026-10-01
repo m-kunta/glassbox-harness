@@ -663,8 +663,10 @@ class Repository:
         baseline_end: datetime,
         recent_start: datetime,
         recent_end: datetime,
+        *,
+        include_baseline: bool = True,
     ) -> DriftSourceData:
-        """Load independent decision and trace populations for both half-open windows."""
+        """Load independent decision and trace populations for half-open windows."""
         if not agent_name.strip():
             raise ValueError("drift agent name must be non-empty")
         if baseline_end <= baseline_start or recent_end <= recent_start:
@@ -720,11 +722,24 @@ class Repository:
 
         with self._operation_lock:
             return DriftSourceData(
-                decisions(bounds[0], bounds[1]),
-                traces(bounds[0], bounds[1]),
+                decisions(bounds[0], bounds[1]) if include_baseline else (),
+                traces(bounds[0], bounds[1]) if include_baseline else (),
                 decisions(bounds[2], bounds[3]),
                 traces(bounds[2], bounds[3]),
             )
+
+    def drift_recent_source_data(
+        self, agent_name: str, recent_start: datetime, recent_end: datetime
+    ) -> DriftSourceData:
+        """Load only the recent populations when baseline material is already saved."""
+        return self.drift_source_data(
+            agent_name,
+            recent_start,
+            recent_end,
+            recent_start,
+            recent_end,
+            include_baseline=False,
+        )
 
     def drift_baseline_state(self, agent_name: str, policy_hash: str) -> DriftBaselineState:
         """Classify exact-policy baseline history as absent, active, or malformed."""

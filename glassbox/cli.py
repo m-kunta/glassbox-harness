@@ -51,7 +51,78 @@ def main(argv: Sequence[str] | None = None) -> int:
     judge_command.add_argument("--allow-self-judge", action="store_true")
     judge_command.add_argument("--confirm-egress", action="store_true")
     judge_command.add_argument("--require-calibrated", action="store_true")
+    drift_command = commands.add_parser("drift", help="create or inspect agent drift reports")
+    drift_command.add_argument("--agent")
+    drift_command.add_argument("--policy", type=Path)
+    drift_subcommands = drift_command.add_subparsers(dest="drift_command")
+    baseline_command = drift_subcommands.add_parser(
+        "baseline", help="materialize an immutable baseline"
+    )
+    baseline_command.add_argument("--agent", required=True)
+    baseline_command.add_argument("--policy", type=Path)
+    baseline_command.add_argument("--supersede-baseline", action="store_true")
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "drift":
+        from glassbox.eval.drift import (
+            DriftPolicyError,
+            create_baseline,
+            default_policy_path,
+            load_policy,
+            run_drift_report,
+        )
+        from glassbox.store.database import TimestampMigrationError
+        from glassbox.store.repository import DriftBaselineConflictError
+
+        if arguments.drift_command is None and not arguments.agent:
+            print("glassbox: unable to run drift command", file=sys.stderr)
+            return 2
+        try:
+            policy = load_policy(arguments.policy or default_policy_path())
+            database_path = Path(arguments.database)
+            if arguments.drift_command == "baseline":
+                baseline = create_baseline(
+                    database_path,
+                    arguments.agent,
+                    policy,
+                    supersede=arguments.supersede_baseline,
+                    clock=lambda: datetime.now(UTC),
+                )
+                payload: dict[str, object] = {
+                    "baseline_id": baseline.baseline_id,
+                    "agent_name": baseline.agent_name,
+                    "policy_version": baseline.policy_version,
+                    "policy_hash": baseline.policy_hash,
+                    "baseline_window": {
+                        "start": baseline.baseline_start.isoformat(),
+                        "end": baseline.baseline_end.isoformat(),
+                    },
+                    "created_at": baseline.created_at.isoformat(),
+                    "supersedes_baseline_id": baseline.supersedes_baseline_id,
+                }
+            else:
+                payload = run_drift_report(
+                    database_path,
+                    arguments.agent,
+                    policy,
+                    clock=lambda: datetime.now(UTC),
+                    persist=True,
+                ).to_dict()
+        except (
+            DriftPolicyError,
+            DriftBaselineConflictError,
+            ReadOnlyDatabaseError,
+            TimestampMigrationError,
+            OSError,
+            sqlite3.Error,
+            ValueError,
+            KeyError,
+            TypeError,
+        ):
+            print("glassbox: unable to run drift command", file=sys.stderr)
+            return 2
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        return 0
 
     if arguments.command == "eval":
         try:
@@ -143,9 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         backlog_count = sum(1 for candidate in candidates if candidate.calibration_backlog)
         recent_count = sum(1 for candidate in candidates if candidate.recent_gated)
-        self_judge_unverified_count = sum(
-            1 for candidate in candidates if not candidate.llm_models
-        )
+        self_judge_unverified_count = sum(1 for candidate in candidates if not candidate.llm_models)
         deduplicated_total = len(candidates)
         send_count = (
             deduplicated_total

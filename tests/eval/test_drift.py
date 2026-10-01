@@ -16,14 +16,181 @@ from glassbox.eval.drift import (
     _status,
     calculate_baseline,
     calculate_report,
+    create_baseline,
     load_policy,
     policy_hash,
+    run_drift_report,
 )
+from glassbox.store import Database, Repository
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "glassbox/eval/policies/drift_v1.toml"
 BASELINE_AT = datetime(2026, 2, 1, tzinfo=UTC)
 RECENT_AT = datetime(2026, 7, 30, tzinfo=UTC)
 AS_OF = datetime(2026, 8, 1, tzinfo=UTC)
+
+
+def _seed_drift(
+    path: Path, *, baseline_decisions: int = 100, recent_at: datetime = RECENT_AT
+) -> None:
+    database = Database.open(path)
+    try:
+        connection = database.connection
+        for index in range(50):
+            trace_id = f"{index + 1:026X}"
+            connection.execute(
+                "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
+                "status, environment, latency_ms, total_cost_usd) "
+                "VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev', ?, ?)",
+                (
+                    trace_id,
+                    BASELINE_AT.isoformat().replace("+00:00", "Z"),
+                    9.0 if index % 2 else 11.0,
+                    0.9 if index % 2 else 1.1,
+                ),
+            )
+        for index in range(baseline_decisions):
+            connection.execute(
+                "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
+                "entity_type, entity_id, decision_type, recommendation, rationale, "
+                "rationale_citations, confidence, alternatives_considered, decided_at) "
+                "VALUES (?, ?, 'agent-a', 'v1', 'sku', 'one', 'review', '{}', 'r', "
+                "'[]', 0.05, '[]', ?)",
+                (
+                    f"{index + 1000:026X}",
+                    f"{index % 50 + 1:026X}",
+                    BASELINE_AT.isoformat().replace("+00:00", "Z"),
+                ),
+            )
+        for index in range(20):
+            trace_id = f"{index + 2000:026X}"
+            connection.execute(
+                "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
+                "status, environment, latency_ms, total_cost_usd) "
+                "VALUES (?, 'agent-a', 'v2', ?, 'ok', 'dev', 30.0, 4.0)",
+                (trace_id, recent_at.isoformat().replace("+00:00", "Z")),
+            )
+        for index in range(30):
+            connection.execute(
+                "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
+                "entity_type, entity_id, decision_type, recommendation, rationale, "
+                "rationale_citations, confidence, alternatives_considered, decided_at) "
+                "VALUES (?, ?, 'agent-a', 'v2', 'sku', 'one', 'order', '{}', 'r', "
+                "'[]', 0.95, '[]', ?)",
+                (
+                    f"{index + 3000:026X}",
+                    f"{index % 20 + 2000:026X}",
+                    recent_at.isoformat().replace("+00:00", "Z"),
+                ),
+            )
+        connection.commit()
+    finally:
+        database.close()
+
+
+def test_run_drift_report_captures_as_of_once_and_persists_exact_snapshot(
+    tmp_path: Path, policy, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    baseline = create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    calls = 0
+
+    def clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        return AS_OF
+
+    source_bounds: list[tuple[datetime, datetime]] = []
+    original_source = Repository.drift_recent_source_data
+
+    def track_source(self, agent, recent_start, recent_end):  # type: ignore[no-untyped-def]
+        source_bounds.append((recent_start, recent_end))
+        return original_source(self, agent, recent_start, recent_end)
+
+    monkeypatch.setattr(Repository, "drift_recent_source_data", track_source)
+
+    report = run_drift_report(path, "agent-a", policy, clock=clock, persist=True)
+    assert calls == 1
+    assert source_bounds == [(AS_OF - policy.recent_duration, AS_OF)]
+    assert report.as_of == report.recent_end == AS_OF
+    assert report.baseline_id == baseline.baseline_id
+    assert report.status == "drift_detected"
+    database = Database.open_read_only(path)
+    try:
+        rows = database.connection.execute("SELECT * FROM drift_runs").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["baseline_id"] == report.baseline_id
+        assert rows[0]["as_of"] == AS_OF.isoformat().replace("+00:00", "Z")
+        assert rows[0]["recent_end"] == rows[0]["as_of"]
+        assert rows[0]["policy_hash"] == policy.policy_hash
+        results = database.connection.execute("SELECT * FROM drift_results").fetchall()
+        assert len(results) == 4
+        assert {row["signal_name"] for row in results} == set(report.to_dict()["signals"])
+        for row in results:
+            signal = report.signal(row["signal_name"])
+            assert row["status"] == signal.status
+            assert row["baseline_count"] == signal.baseline_count
+            assert row["recent_count"] == signal.recent_count
+            assert row["metric_value"] == signal.value
+    finally:
+        database.close()
+
+    run_drift_report(path, "agent-a", policy, clock=lambda: AS_OF, persist=False)
+    database = Database.open_read_only(path)
+    try:
+        assert database.connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 1
+    finally:
+        database.close()
+
+
+def test_baseline_rejects_insufficient_named_signal_and_duplicate(tmp_path: Path, policy) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, baseline_decisions=99)
+    with pytest.raises(DriftPolicyError, match="confidence"):
+        create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    database = Database.open(path)
+    try:
+        database.connection.execute(
+            "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
+            "entity_type, entity_id, decision_type, recommendation, rationale, "
+            "rationale_citations, confidence, alternatives_considered, decided_at) "
+            "VALUES (?, ?, 'agent-a', 'v1', 'sku', 'one', 'review', '{}', 'r', "
+            "'[]', 0.05, '[]', ?)",
+            (f"{9999:026X}", f"{1:026X}", BASELINE_AT.isoformat().replace("+00:00", "Z")),
+        )
+        database.connection.commit()
+    finally:
+        database.close()
+    first = create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    with pytest.raises(ValueError):
+        create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    second = create_baseline(path, "agent-a", policy, supersede=True, clock=lambda: AS_OF)
+    assert second.supersedes_baseline_id == first.baseline_id
+
+
+def test_report_without_matching_baseline_is_in_memory_and_policy_aware(
+    tmp_path: Path, policy
+) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    report = run_drift_report(path, "agent-a", policy, clock=lambda: AS_OF, persist=True)
+    assert (report.status, report.reason) == ("insufficient_data", "baseline_not_created")
+    create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+    changed_path = tmp_path / "changed.toml"
+    changed_path.write_text(
+        POLICY_PATH.read_text().replace("warning_threshold = 0.10", "warning_threshold = 0.11")
+    )
+    changed = load_policy(changed_path)
+    report = run_drift_report(path, "agent-a", changed, clock=lambda: AS_OF, persist=True)
+    assert (report.status, report.reason) == (
+        "insufficient_data",
+        "policy_changed_requires_rebaseline",
+    )
+    database = Database.open_read_only(path)
+    try:
+        assert database.connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 0
+    finally:
+        database.close()
 
 
 @pytest.fixture
