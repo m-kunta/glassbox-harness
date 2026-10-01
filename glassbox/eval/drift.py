@@ -251,7 +251,10 @@ def load_policy(path: Path) -> DriftPolicy:
     duration_text = mapping["recent_duration"]
     if not isinstance(duration_text, str) or not re.fullmatch(r"[1-9]\d*d", duration_text):
         raise DriftPolicyError("recent_duration must be positive whole days, e.g. 7d")
-    duration = timedelta(days=int(duration_text[:-1]))
+    try:
+        duration = timedelta(days=int(duration_text[:-1]))
+    except (OverflowError, ValueError) as exc:
+        raise DriftPolicyError("recent_duration is too large") from exc
     signals: list[SignalPolicy] = []
     for name in SIGNAL_NAMES:
         raw = mapping[name]
@@ -384,11 +387,17 @@ def calculate_baseline(
     def trace_stat(name: SignalName, values: list[float]) -> BaselineSignal:
         if any(not math.isfinite(value) for value in values):
             raise ValueError(f"{name} samples must be finite")
+        average = mean(values) if values else None
+        deviation = stdev(values) if len(values) >= 2 else None
+        if (average is not None and not math.isfinite(average)) or (
+            deviation is not None and not math.isfinite(deviation)
+        ):
+            raise ValueError(f"{name} baseline statistics must be finite")
         return BaselineSignal(
             name,
             len(values),
-            mean=mean(values) if values else None,
-            standard_deviation=stdev(values) if len(values) >= 2 else None,
+            mean=average,
+            standard_deviation=deviation,
         )
 
     signals = (
@@ -415,12 +424,23 @@ def calculate_baseline(
 
 
 def _psi(baseline: tuple[int, ...], recent: tuple[int, ...], smoothing: float) -> float:
-    baseline_total = sum(baseline) + smoothing * len(baseline)
-    recent_total = sum(recent) + smoothing * len(recent)
-    return sum(
-        ((r + smoothing) / recent_total - (b + smoothing) / baseline_total)
-        * math.log(((r + smoothing) / recent_total) / ((b + smoothing) / baseline_total))
-        for b, r in zip(baseline, recent)
+    def log_smoothed(count: int) -> float:
+        larger = max(count, smoothing)
+        smaller = min(count, smoothing)
+        return math.log(larger) + math.log1p(smaller / larger)
+
+    def log_total(log_counts: tuple[float, ...]) -> float:
+        largest = max(log_counts)
+        return largest + math.log(math.fsum(math.exp(value - largest) for value in log_counts))
+
+    baseline_logs = tuple(log_smoothed(count) for count in baseline)
+    recent_logs = tuple(log_smoothed(count) for count in recent)
+    baseline_total = log_total(baseline_logs)
+    recent_total = log_total(recent_logs)
+    return math.fsum(
+        (math.exp(r - recent_total) - math.exp(b - baseline_total))
+        * ((r - recent_total) - (b - baseline_total))
+        for b, r in zip(baseline_logs, recent_logs)
     )
 
 
@@ -469,15 +489,12 @@ def calculate_report(
                 "recent_counts": list(current_counts),
             }
         elif name == "decision_type":
-            current_counts = tuple(
-                sum(
-                    1
-                    for sample in recent_decisions
-                    if (sample.decision_type if sample.decision_type in old.labels else "other")
-                    == label
-                )
-                for label in old.labels
-            )
+            categories = set(old.labels)
+            category_counts = dict.fromkeys(old.labels, 0)
+            for sample in recent_decisions:
+                category = sample.decision_type if sample.decision_type in categories else "other"
+                category_counts[category] += 1
+            current_counts = tuple(category_counts[label] for label in old.labels)
             values = []
             details = {
                 "categories": list(old.labels),
@@ -526,6 +543,8 @@ def calculate_report(
                 and rule.reference_value is not None
             )
             metric = _cusum(values, old.mean, old.standard_deviation, rule.reference_value)
+        if metric is not None and not math.isfinite(metric):
+            raise ValueError(f"{name} produced a non-finite drift metric")
         status: DriftStatus = (
             "insufficient_data"
             if reason

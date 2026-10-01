@@ -1,5 +1,8 @@
 """Pure drift policy and metric contract tests."""
 
+import json
+import math
+from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
@@ -221,3 +224,67 @@ def test_diagnostics_are_immutable_and_json_safe(policy) -> None:  # type: ignor
         report.status = "healthy"
     with pytest.raises(KeyError):
         report.signal("unknown")
+
+
+def test_large_finite_smoothing_keeps_psi_and_json_finite(tmp_path: Path) -> None:
+    path = tmp_path / "large-smoothing.toml"
+    path.write_text(
+        POLICY_PATH.read_text().replace("smoothing = 0.0001", "smoothing = 1e308"),
+        encoding="utf-8",
+    )
+    policy = load_policy(path)
+    baseline = calculate_baseline(policy, decisions(0.5, "known", 100), ())
+    report = calculate_report(
+        policy, baseline, decisions(0.5, "unknown", 30, recent=True), (), AS_OF
+    )
+    metric = report.signal("decision_type").value
+    assert metric is not None and math.isfinite(metric)
+    json.dumps(report.to_dict(), allow_nan=False)
+
+
+def test_nonfinite_cusum_metric_is_rejected_before_serialization(policy) -> None:  # type: ignore[no-untyped-def]
+    baseline_traces = tuple(
+        TraceSample("a", "v1", 0.0 if i % 2 else 2e-100, 0.9 if i % 2 else 1.1, BASELINE_AT, 1)
+        for i in range(50)
+    )
+    baseline = calculate_baseline(policy, (), baseline_traces)
+    with pytest.raises(ValueError, match="non-finite"):
+        calculate_report(policy, baseline, (), traces(1e308, 1.0, 20, recent=True), AS_OF)
+
+
+def test_oversized_recent_duration_is_policy_error(tmp_path: Path) -> None:
+    path = tmp_path / "huge-duration.toml"
+    path.write_text(
+        POLICY_PATH.read_text().replace(
+            'recent_duration = "7d"', 'recent_duration = "1000000000d"'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(DriftPolicyError, match="recent_duration"):
+        load_policy(path)
+
+
+def test_decision_categories_count_recent_samples_once(policy) -> None:  # type: ignore[no-untyped-def]
+    class CountedSequence(Sequence[DecisionSample]):
+        def __init__(self, samples: tuple[DecisionSample, ...]) -> None:
+            self.samples = samples
+            self.iterations = 0
+
+        def __len__(self) -> int:
+            return len(self.samples)
+
+        def __getitem__(self, index: int) -> DecisionSample:
+            return self.samples[index]
+
+        def __iter__(self) -> Iterator[DecisionSample]:
+            self.iterations += 1
+            yield from self.samples
+
+    baseline_decisions = tuple(
+        DecisionSample("a", "v1", 0.5, f"kind-{i % 8}", BASELINE_AT) for i in range(100)
+    )
+    recent = CountedSequence(decisions(0.5, "unseen", 30, recent=True))
+    baseline = calculate_baseline(policy, baseline_decisions, ())
+    report = calculate_report(policy, baseline, recent, (), AS_OF)
+    assert report.signal("decision_type").details["recent_counts"] == [0] * 8 + [30]
+    assert recent.iterations <= 3  # confidence, decision type, and version diagnostics
