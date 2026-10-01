@@ -162,6 +162,55 @@ def test_health_is_public_and_contains_no_decision_data(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def _drift_table_counts(path: Path) -> tuple[int, int, int]:
+    database = Database.open_read_only(path)
+    try:
+        return tuple(
+            int(database.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            for table in ("drift_baselines", "drift_runs", "drift_results")
+        )  # type: ignore[return-value]
+    finally:
+        database.close()
+
+
+def test_drift_requires_the_existing_login_session(tmp_path: Path) -> None:
+    response = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1").get(
+        "/drift", follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_live_drift_lists_known_agents_without_baselines_and_writes_nothing(tmp_path: Path) -> None:
+    database_path, _, _ = seeded_database(tmp_path)
+    before = _drift_table_counts(database_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1")
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get("/drift")
+
+    assert response.status_code == 200
+    assert "planner" in response.text
+    assert _drift_table_counts(database_path) == before
+
+
+def test_live_drift_renders_insufficient_data_guidance_and_unknown_agents_are_not_found(
+    tmp_path: Path,
+) -> None:
+    database_path, _, _ = seeded_database(tmp_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1")
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get("/drift?agent=planner")
+
+    assert response.status_code == 200
+    assert "Calculated now" in response.text
+    assert "historical baseline window has too little usable data" in response.text
+    assert "Trace-level" in response.text
+    assert client.get("/drift?agent=no-such-agent").status_code == 404
+
+
 def test_failed_login_is_generic_and_does_not_set_a_cookie(tmp_path: Path) -> None:
     response = TestClient(app_for(Clock(), tmp_path), base_url="http://127.0.0.1").post(
         "/login", data={"access_token": "wrong"}
@@ -214,9 +263,7 @@ def test_idle_session_is_rejected_after_its_timeout(tmp_path: Path) -> None:
 
 def test_authenticated_decision_and_trace_routes_render_persisted_telemetry(tmp_path: Path) -> None:
     database_path, decision_id, trace_id = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1")
     client.post("/login", data={"access_token": TOKEN})
 
     decision = client.get(f"/decision/{decision_id}")
@@ -244,7 +291,7 @@ def test_decision_card_renders_a_readable_brief_without_python_values(tmp_path: 
     assert "0.25" in response.text
     assert "Is Estimated" in response.text
     assert "No" in response.text
-    assert '{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}' not in response.text
+    assert "{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}" not in response.text
     assert "FrozenDict" not in response.text
     assert "object at 0x" not in response.text
     assert re.search(r'href="/static/glassbox\.css\?v=\d+"', response.text)
@@ -260,9 +307,7 @@ def test_missing_decision_and_trace_render_generic_not_found(tmp_path: Path) -> 
 
 def test_feedback_form_enforces_request_guards_and_uses_prg(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -279,16 +324,22 @@ def test_feedback_form_enforces_request_guards_and_uses_prg(tmp_path: Path) -> N
     url = f"/decision/{decision_id}/feedback"
 
     assert client.post(url, data=payload, headers={"host": "wrong"}).status_code == 400
-    assert client.post(
-        url,
-        data=payload | {"csrf_token": "wrong"},
-        headers={"host": "127.0.0.1:8787"},
-    ).status_code == 400
-    assert client.post(
-        url,
-        data=payload,
-        headers={"host": "127.0.0.1:8787", "origin": "http://evil.example"},
-    ).status_code == 400
+    assert (
+        client.post(
+            url,
+            data=payload | {"csrf_token": "wrong"},
+            headers={"host": "127.0.0.1:8787"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            url,
+            data=payload,
+            headers={"host": "127.0.0.1:8787", "origin": "http://evil.example"},
+        ).status_code
+        == 400
+    )
 
     response = client.post(url, data=payload, follow_redirects=False)
 
@@ -315,9 +366,7 @@ def test_feedback_form_maps_reasoning_quality_score_selection(
     expected_version: str | None,
 ) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -351,9 +400,7 @@ def test_feedback_form_rejects_invalid_reasoning_quality_scores(
     tmp_path: Path, raw_score: str
 ) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -383,9 +430,7 @@ def test_feedback_score_replay_is_idempotent_but_a_changed_score_is_rejected(
     tmp_path: Path,
 ) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -420,9 +465,7 @@ def test_decision_card_renders_the_reasoning_quality_selector_help_and_history(
     tmp_path: Path,
 ) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -449,9 +492,7 @@ def test_decision_card_renders_the_reasoning_quality_selector_help_and_history(
 
 def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -490,9 +531,7 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
 
 def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -516,9 +555,7 @@ def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> Non
 
 def test_override_for_missing_decision_is_not_found(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
@@ -575,9 +612,7 @@ def test_card_exposes_inconsistent_override_history(tmp_path: Path) -> None:
     finally:
         database.close()
 
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     response = client.get(f"/decision/{decision_id}")
 
@@ -589,9 +624,7 @@ def test_card_exposes_inconsistent_override_history(tmp_path: Path) -> None:
 
 def test_exact_override_post_replay_redirects_without_another_history_row(tmp_path: Path) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
-    client = TestClient(
-        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
-    )
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
     card = client.get(f"/decision/{decision_id}")
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)

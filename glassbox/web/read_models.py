@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
+from glassbox.eval.drift import DriftReport, DriftSignalReport
 from glassbox.events import EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.events.models import canonical_dumps
 from glassbox.store.repository import (
@@ -156,6 +158,166 @@ class QueuePage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class DriftLandingView:
+    """The known cohorts a local operator may inspect."""
+
+    agents: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DriftSignalView:
+    """One display-ready signal; no persistence or policy objects escape here."""
+
+    name: str
+    population_label: str
+    algorithm: str
+    status: str
+    metric: str
+    thresholds: str
+    baseline_count: int
+    recent_count: int
+    detail_rows: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True)
+class DriftReportView:
+    agent_name: str
+    status: str
+    action: str
+    calculated_at: str
+    policy_version: str
+    policy_hash: str
+    baseline_id: str | None
+    baseline_range: str
+    recent_range: str
+    baseline_versions: tuple[AttributeView, ...]
+    recent_versions: tuple[AttributeView, ...]
+    decisions_per_trace: str
+    signals: tuple[DriftSignalView, ...]
+
+
+_DRIFT_ACTIONS = {
+    "baseline_not_created": "No baseline exists for this agent. Run glassbox drift baseline.",
+    "policy_changed_requires_rebaseline": (
+        "A baseline exists for this agent under a different policy. "
+        "Materialize a baseline for the changed policy."
+    ),
+    "baseline_window_too_small": (
+        "The historical baseline window has too little usable data. "
+        "Wait for more activity or choose a wider baseline window, then create a baseline."
+    ),
+    "recent_window_too_small": (
+        "The recent window has too little usable data. Wait for more recent activity."
+    ),
+    None: "No operator action is required.",
+}
+
+_DRIFT_SIGNAL_NAMES = {
+    "confidence": "Decision confidence",
+    "decision_type": "Decision type",
+    "trace_latency_ms": "Trace latency",
+    "trace_cost_usd": "Trace cost",
+}
+
+
+def _drift_number(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "Not calculated"
+    if not math.isfinite(float(value)):
+        return "Not calculated"
+    return f"{float(value):.4g}"
+
+
+def _drift_versions(values: tuple[tuple[str, int, int], ...]) -> tuple[AttributeView, ...]:
+    return tuple(
+        AttributeView(version, f"{decisions} decisions · {traces} traces")
+        for version, decisions, traces in values
+    )
+
+
+def _utc_text(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _drift_details(signal: DriftSignalReport) -> tuple[tuple[str, str, str], ...]:
+    if signal.algorithm == "psi":
+        labels = signal.details.get("bins", signal.details.get("categories", []))
+        baseline = signal.details.get("baseline_counts", [])
+        recent = signal.details.get("recent_counts", [])
+        if (
+            isinstance(labels, list)
+            and isinstance(baseline, list)
+            and isinstance(recent, list)
+            and len(labels) == len(baseline) == len(recent)
+        ):
+            return tuple(
+                (str(label), str(old), str(new))
+                for label, old, new in zip(labels, baseline, recent)
+            )
+        return ()
+    path = signal.details.get("cusum_path", [])
+    if not isinstance(path, list):
+        return ()
+    rows: list[tuple[str, str, str]] = []
+    for entry in path:
+        if not isinstance(entry, dict):
+            continue
+        rows.append(
+            (
+                f"Sample {entry.get('sample', '?')}",
+                _drift_number(entry.get("positive")),
+                _drift_number(entry.get("negative")),
+            )
+        )
+    return tuple(rows)
+
+
+def build_drift_report_view(report: DriftReport) -> DriftReportView:
+    """Render drift math as literal, non-agent-specific planner language."""
+    signals = tuple(
+        DriftSignalView(
+            _DRIFT_SIGNAL_NAMES[signal.name],
+            "Decision-level" if signal.population == "decision" else "Trace-level",
+            signal.algorithm.upper(),
+            signal.status.replace("_", " ").title(),
+            _drift_number(signal.value),
+            (
+                f"Watch ≥ {_drift_number(signal.warning_threshold)} · "
+                f"Alert ≥ {_drift_number(signal.alert_threshold)}"
+            ),
+            signal.baseline_count,
+            signal.recent_count,
+            _drift_details(signal),
+        )
+        for signal in report.signals
+    )
+    decisions_per_trace = "Not available"
+    if (
+        report.baseline_decisions_per_trace is not None
+        or report.recent_decisions_per_trace is not None
+    ):
+        decisions_per_trace = (
+            f"Baseline {_drift_number(report.baseline_decisions_per_trace)} · "
+            f"Recent {_drift_number(report.recent_decisions_per_trace)}"
+        )
+    return DriftReportView(
+        report.agent_name or "Unknown agent",
+        report.status.replace("_", " ").title(),
+        _DRIFT_ACTIONS[report.reason],
+        report.as_of.isoformat().replace("+00:00", "Z"),
+        report.policy_version,
+        report.policy_hash,
+        report.baseline_id,
+        f"{_utc_text(report.baseline_start)} to {_utc_text(report.baseline_end)}",
+        f"{_utc_text(report.recent_start)} to {_utc_text(report.recent_end)}",
+        _drift_versions(report.baseline_versions),
+        _drift_versions(report.recent_versions),
+        decisions_per_trace,
+        signals,
+    )
+
+
 def confidence_band(confidence: float) -> ConfidenceBand:
     """Return the single display/filter band for a valid confidence value."""
     if not math.isfinite(confidence) or not 0 <= confidence <= 1:
@@ -181,7 +343,7 @@ def recommendation_summary(recommendation: object, *, limit: int = 160) -> str:
     if limit < 1:
         raise ValueError("summary limit must be positive")
     text = canonical_dumps(recommendation)
-    return text if len(text) <= limit else f"{text[:limit - 1]}…"
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
 def _json_display(value: object) -> str:

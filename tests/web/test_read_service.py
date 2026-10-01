@@ -94,6 +94,38 @@ def test_read_service_opens_a_fresh_read_only_database_per_call(
     assert calls == [path, path]
 
 
+def test_live_drift_uses_a_fresh_read_only_connection_and_never_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _strict_database_with_decision(tmp_path)
+    service = ReadService(path)
+    calls: list[Path] = []
+    real_open_read_only = Database.open_read_only
+
+    def recording_open_read_only(database_path: Path | str, **kwargs: object) -> Database:
+        calls.append(Path(database_path))
+        return real_open_read_only(database_path, **kwargs)
+
+    def forbidden_open(*args: object, **kwargs: object) -> Database:
+        raise AssertionError("live drift must not open a write database")
+
+    monkeypatch.setattr(Database, "open_read_only", recording_open_read_only)
+    monkeypatch.setattr(Database, "open", forbidden_open)
+
+    landing = service.drift_agents()
+    report = service.drift_report("agent", clock=lambda: TIMESTAMP)
+
+    assert landing.agents == ("agent",)
+    assert report is not None
+    assert report.status == "Insufficient Data"
+    assert "historical baseline window" in report.action
+    assert {signal.population_label for signal in report.signals} == {
+        "Decision-level",
+        "Trace-level",
+    }
+    assert calls == [path, path]
+
+
 def test_read_service_parses_dates_bands_and_fixed_sort_aliases(tmp_path: Path) -> None:
     service = ReadService(_strict_database_with_decision(tmp_path))
 

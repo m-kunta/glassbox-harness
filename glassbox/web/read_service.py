@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+from glassbox.eval.drift import default_policy_path, load_policy, run_live_drift_report
 from glassbox.store import Database, Repository
 from glassbox.store.repository import OverrideStatus, QueueCursor, QueueQuery, QueueSort
 
 from .read_models import (
     ConfidenceBand,
     DecisionCard,
+    DriftLandingView,
+    DriftReportView,
     QueuePage,
     QueueRow,
     TraceView,
     build_decision_card,
+    build_drift_report_view,
     build_trace_view,
     confidence_band,
     confidence_bounds,
@@ -26,6 +31,10 @@ from .read_models import (
 )
 
 _SORT_ALIASES: dict[str, QueueSort] = {"timestamp": "decided_at", "confidence": "confidence"}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,32 @@ class ReadService:
             encode_cursor(rows[-1], sort_column) if len(decisions) > len(visible) else None
         )
         return QueuePage(rows, next_cursor)
+
+    def drift_agents(self) -> DriftLandingView:
+        """Return every observed agent cohort through a fresh read-only connection."""
+        database = Database.open_read_only(self._database_path)
+        try:
+            return DriftLandingView(Repository(database).drift_agent_names())
+        finally:
+            database.close()
+
+    def drift_report(
+        self, agent_name: str, *, clock: Callable[[], datetime] = _utc_now
+    ) -> DriftReportView | None:
+        """Calculate one live, non-persisted report for an observed agent cohort."""
+        if not agent_name.strip():
+            return None
+        policy = load_policy(default_policy_path())
+        as_of = clock()
+        database = Database.open_read_only(self._database_path)
+        try:
+            repository = Repository(database)
+            if agent_name not in repository.drift_agent_names():
+                return None
+            report = run_live_drift_report(repository, agent_name, policy, as_of=as_of)
+            return build_drift_report_view(report)
+        finally:
+            database.close()
 
     def decision_card(self, decision_id: str) -> DecisionCard | None:
         """Return one display-ready decision card, if it exists."""
@@ -170,9 +205,7 @@ def _date_bounds(
         raise ValueError("queue date range is not ordered")
     decided_from = None if start is None else datetime.combine(start, datetime.min.time(), UTC)
     decided_before = (
-        None
-        if end is None
-        else datetime.combine(end + timedelta(days=1), datetime.min.time(), UTC)
+        None if end is None else datetime.combine(end + timedelta(days=1), datetime.min.time(), UTC)
     )
     return (decided_from, decided_before)
 

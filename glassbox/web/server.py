@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 
+from glassbox.eval.drift import DriftPolicyError
 from glassbox.store import Database, ReadOnlyDatabaseError, Repository
 from glassbox.store.repository import FeedbackSubmission, OverrideSubmission
 
@@ -92,9 +93,7 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
     sessions = SessionStore(config.session_idle_timeout, clock=clock)
     app = FastAPI()
     app.state.sessions = sessions
-    app.mount(
-        "/static", StaticFiles(directory=str(static_directory)), name="static"
-    )
+    app.mount("/static", StaticFiles(directory=str(static_directory)), name="static")
 
     @app.middleware("http")
     async def require_session(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -189,6 +188,34 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         except (ReadOnlyDatabaseError, sqlite3.Error):
             return unavailable(request)
         return templates.TemplateResponse(request, "queue.html", {"page": page})
+
+    @app.get("/drift")
+    def drift(request: Request) -> Response:
+        agent_name = request.query_params.get("agent")
+        try:
+            if agent_name is None:
+                return templates.TemplateResponse(
+                    request,
+                    "drift.html",
+                    {"landing": service().drift_agents(), "report": None},
+                )
+            report = service().drift_report(agent_name, clock=clock)
+        except DriftPolicyError:
+            return unavailable(request)
+        except ValueError:
+            return invalid_request(request)
+        except (ReadOnlyDatabaseError, sqlite3.Error):
+            return unavailable(request)
+        if report is None:
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {"title": "Not found", "message": "The requested drift cohort was not found."},
+                status_code=404,
+            )
+        return templates.TemplateResponse(
+            request, "drift.html", {"landing": None, "report": report}
+        )
 
     @app.get("/decision/{decision_id}")
     def decision_card(request: Request, decision_id: str) -> Response:

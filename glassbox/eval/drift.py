@@ -472,12 +472,21 @@ def _psi(baseline: tuple[int, ...], recent: tuple[int, ...], smoothing: float) -
 
 
 def _cusum(values: Sequence[float], center: float, deviation: float, reference: float) -> float:
+    path = _cusum_path(values, center, deviation, reference)
+    return max((max(positive, abs(negative)) for positive, negative in path), default=0.0)
+
+
+def _cusum_path(
+    values: Sequence[float], center: float, deviation: float, reference: float
+) -> tuple[tuple[float, float], ...]:
     positive = negative = 0.0
+    path: list[tuple[float, float]] = []
     for value in values:
         residual = (value - center) / deviation
         positive = max(0.0, positive + residual - reference)
         negative = min(0.0, negative + residual + reference)
-    return max(positive, abs(negative))
+        path.append((positive, negative))
+    return tuple(path)
 
 
 def _status(value: float, policy: SignalPolicy) -> DriftStatus:
@@ -569,7 +578,12 @@ def calculate_report(
                 and old.standard_deviation is not None
                 and rule.reference_value is not None
             )
-            metric = _cusum(values, old.mean, old.standard_deviation, rule.reference_value)
+            path = _cusum_path(values, old.mean, old.standard_deviation, rule.reference_value)
+            metric = max((max(positive, abs(negative)) for positive, negative in path), default=0.0)
+            details["cusum_path"] = [
+                {"sample": index + 1, "positive": positive, "negative": negative}
+                for index, (positive, negative) in enumerate(path)
+            ]
         if metric is not None and not math.isfinite(metric):
             raise ValueError(f"{name} produced a non-finite drift metric")
         status: DriftStatus = (
@@ -890,6 +904,67 @@ def _missing_baseline_report(
     )
 
 
+def run_live_drift_report(
+    repository: Repository,
+    agent_name: str,
+    policy: DriftPolicy,
+    *,
+    as_of: datetime,
+) -> DriftReport:
+    """Calculate a current report through an existing read-only repository.
+
+    This deliberately has no database-opening or persistence capability: the
+    web UI is an observation of the current data, whereas the CLI records an
+    auditable drift-run snapshot.
+    """
+    if not isinstance(as_of, datetime) or as_of.tzinfo is None or as_of.utcoffset() != timedelta(0):
+        raise ValueError("as_of must be UTC")
+    recent_start = as_of - policy.recent_duration
+    state = repository.drift_baseline_state(agent_name, policy.policy_hash)
+    if state.status == "malformed":
+        raise DriftPolicyError("drift baseline history is malformed")
+    if state.baseline is not None:
+        baseline = _material_from_record(state.baseline, policy)
+        source = repository.drift_recent_source_data(agent_name, recent_start, as_of)
+        return calculate_report(
+            policy,
+            baseline,
+            _source_decisions(source.recent_decisions),
+            _source_traces(source.recent_traces),
+            as_of,
+        )
+    if repository.has_drift_baseline(agent_name):
+        return _missing_baseline_report(
+            policy, agent_name, as_of, "policy_changed_requires_rebaseline"
+        )
+
+    # An unmaterialized baseline can still tell the operator whether the
+    # historical window is too small, rather than misleadingly saying merely
+    # that no baseline has been created.
+    source = repository.drift_source_data(
+        agent_name,
+        policy.baseline_start,
+        policy.baseline_end,
+        recent_start,
+        as_of,
+    )
+    material = calculate_baseline(
+        policy,
+        _source_decisions(source.baseline_decisions),
+        _source_traces(source.baseline_traces),
+    )
+    provisional = calculate_report(
+        policy,
+        material,
+        _source_decisions(source.recent_decisions),
+        _source_traces(source.recent_traces),
+        as_of,
+    )
+    if provisional.reason == "baseline_window_too_small":
+        return provisional
+    return _missing_baseline_report(policy, agent_name, as_of, "baseline_not_created")
+
+
 def run_drift_report(
     database_path: Path,
     agent_name: str,
@@ -902,7 +977,6 @@ def run_drift_report(
     as_of = clock()
     if not isinstance(as_of, datetime) or as_of.tzinfo is None or as_of.utcoffset() != timedelta(0):
         raise ValueError("as_of must be UTC")
-    recent_start = as_of - policy.recent_duration
     database = (
         Database.open(database_path)
         if persist and database_path.is_file()
@@ -910,31 +984,13 @@ def run_drift_report(
     )
     try:
         repository = Repository(database)
-        state = repository.drift_baseline_state(agent_name, policy.policy_hash)
-        if state.status == "malformed":
-            raise DriftPolicyError("drift baseline history is malformed")
-        if state.baseline is None:
-            other_policy = database.connection.execute(
-                "SELECT 1 FROM drift_baselines WHERE agent_name = ? AND policy_hash != ? LIMIT 1",
-                (agent_name, policy.policy_hash),
-            ).fetchone()
-            reason: InsufficientReason = (
-                "policy_changed_requires_rebaseline" if other_policy else "baseline_not_created"
-            )
-            return _missing_baseline_report(policy, agent_name, as_of, reason)
-        baseline = _material_from_record(state.baseline, policy)
-        source = repository.drift_recent_source_data(agent_name, recent_start, as_of)
-        report = calculate_report(
-            policy,
-            baseline,
-            _source_decisions(source.recent_decisions),
-            _source_traces(source.recent_traces),
-            as_of,
-        )
+        report = run_live_drift_report(repository, agent_name, policy, as_of=as_of)
         if persist:
+            if report.baseline_id is None:
+                return report
             run = DriftRunInsert(
                 drift_run_id=_new_drift_ulid(as_of),
-                baseline_id=cast(str, report.baseline_id),
+                baseline_id=report.baseline_id,
                 agent_name=agent_name,
                 policy_version=report.policy_version,
                 policy_hash=report.policy_hash,

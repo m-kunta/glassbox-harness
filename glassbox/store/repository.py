@@ -746,6 +746,14 @@ class Repository:
         with self._operation_lock:
             return self._drift_baseline_state_locked(agent_name, policy_hash)
 
+    def has_drift_baseline(self, agent_name: str) -> bool:
+        """Return whether *agent_name* has a baseline under any policy revision."""
+        with self._operation_lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM drift_baselines WHERE agent_name = ? LIMIT 1", (agent_name,)
+            ).fetchone()
+        return row is not None
+
     def active_drift_baseline(
         self, agent_name: str, policy_hash: str
     ) -> DriftBaselineRecord | None:
