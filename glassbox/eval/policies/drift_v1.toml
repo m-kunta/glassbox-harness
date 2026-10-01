@@ -1,0 +1,40 @@
+policy_version = "drift_v1"
+baseline_start = "2026-01-01T00:00:00Z"
+baseline_end = "2026-06-01T00:00:00Z"
+recent_duration = "7d"
+
+[confidence]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 100
+minimum_recent_samples = 30
+bin_boundaries = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+warning_threshold = 0.10
+alert_threshold = 0.20
+
+[decision_type]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 100
+minimum_recent_samples = 30
+smoothing = 0.0001
+warning_threshold = 0.10
+alert_threshold = 0.20
+
+[trace_latency_ms]
+population = "trace"
+algorithm = "cusum"
+minimum_baseline_samples = 50
+minimum_recent_samples = 20
+reference_value = 0.5
+warning_threshold = 3.0
+alert_threshold = 5.0
+
+[trace_cost_usd]
+population = "trace"
+algorithm = "cusum"
+minimum_baseline_samples = 50
+minimum_recent_samples = 20
+reference_value = 0.5
+warning_threshold = 3.0
+alert_threshold = 5.0
