@@ -178,6 +178,34 @@ least **10** successful judgments with a failure rate no higher than **5%**.
 Once calibrated, the run's status is `failed` if the gated set's mean score
 falls below **3.5**, otherwise `passed`.
 
+## Monitor agent drift
+
+Drift monitoring compares an agent cohort's recent decision and trace behavior
+with an immutable historical baseline. Materialize a baseline once enough
+historical telemetry exists, then create an audit snapshot or inspect the
+live read-only report:
+
+```shell
+glassbox drift baseline --agent replenishment-triage-ai
+glassbox drift --agent replenishment-triage-ai
+glassbox serve
+# visit http://127.0.0.1:8787/drift after local login
+```
+
+The checked-in policy is
+[`glassbox/eval/policies/drift_v1.toml`](glassbox/eval/policies/drift_v1.toml).
+Use `--policy PATH` only with the CLI when testing or adopting a different
+versioned policy; the local web app always uses the checked-in default.
+Baselines are immutable. Re-run baseline creation with `--supersede-baseline`
+only when deliberately replacing an existing policy cohort with a new,
+linked baseline.
+
+CLI reports are persisted audit snapshots. The `/drift` view is calculated
+now, uses a read-only database connection, and never records a drift run.
+Both views keep confidence and decision type at decision level, while latency
+and cost remain trace-level so batch size is visible rather than silently
+treated as per-decision cost.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:

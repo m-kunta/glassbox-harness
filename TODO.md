@@ -94,10 +94,13 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [x] Add the operational override workflow: planner accept/modify/reject actions write `overrides`, exercising P2.2's existing head/inconsistency display for the first time.
 
-## P3 — LLM evaluation (deferred)
+## P3 — LLM evaluation
 
 - [x] Calibrate the LLM judge against human labels and enforce agreement thresholds.
-- [ ] Add drift monitoring and counterfactual providers.
+- [x] Add policy-governed drift monitoring with immutable baselines, CLI audit snapshots, and a read-only local report.
+- [ ] Add counterfactual providers.
+- [ ] Add Discord notification delivery for operational alerts.
+- [ ] Add scheduling and CI gating once monitoring has an approved operational policy.
 
 ## P4 — Outcome reconciliation (deferred)
 

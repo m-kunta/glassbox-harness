@@ -210,6 +210,41 @@ def _module_level_import_names(source_path: Path) -> set[str]:
     return names
 
 
+def _all_absolute_import_names(source_root: Path) -> set[str]:
+    """Return absolute imports made anywhere below one package directory."""
+    names: set[str] = set()
+    for source_path in source_root.rglob("*.py"):
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.add(node.module)
+    return names
+
+
+def test_web_uses_only_the_single_public_drift_module(tmp_path: Path) -> None:
+    imports = _all_absolute_import_names(PROJECT_ROOT / "glassbox" / "web")
+    drift_imports = {name for name in imports if name.startswith("glassbox.eval.drift")}
+
+    assert drift_imports <= {"glassbox.eval.drift"}
+
+    mutation = tmp_path / "web" / "bad_import.py"
+    mutation.parent.mkdir()
+    mutation.write_text("from glassbox.eval.drift_policy import load_policy\n")
+    mutated_imports = _all_absolute_import_names(tmp_path / "web")
+    mutated_drift_imports = {
+        name for name in mutated_imports if name.startswith("glassbox.eval.drift")
+    }
+    assert not mutated_drift_imports <= {"glassbox.eval.drift"}
+
+
+def test_cli_keeps_drift_imports_inside_the_drift_dispatch_branch() -> None:
+    imports = _module_level_import_names(PROJECT_ROOT / "glassbox" / "cli.py")
+
+    assert "glassbox.eval.drift" not in imports
+
+
 def test_import_linter_forbids_sdk_collector_and_web_from_the_judge_module() -> None:
     """`glassbox.eval.judge` runs the P3a calibrated judge and must never be
     reachable from the tracing SDK, the collector, or the web app -- those
@@ -248,9 +283,7 @@ def test_import_linter_forbids_web_from_every_judge_sibling_module() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
     contracts = config["tool"]["importlinter"]["contracts"]
     web_contract = next(
-        contract
-        for contract in contracts
-        if contract["source_modules"] == ["glassbox.web"]
+        contract for contract in contracts if contract["source_modules"] == ["glassbox.web"]
     )
     forbidden = set(web_contract["forbidden_modules"])
 
