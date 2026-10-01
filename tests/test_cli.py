@@ -79,6 +79,79 @@ def test_drift_cli_malformed_baseline_exits_two(tmp_path: Path, capsys) -> None:
     assert capsys.readouterr().err.strip() == "glassbox: unable to run drift command"
 
 
+@pytest.mark.parametrize(
+    "malformation",
+    (
+        "empty_histogram_counts",
+        "histogram_dimensions",
+        "negative_histogram_count",
+        "nonfinite_trace_mean",
+        "overflow_trace_mean",
+        "trace_count_semantics",
+        "reference_not_mapping",
+        "versions_not_mapping",
+        "negative_version_count",
+        "invalid_decisions_per_trace",
+    ),
+)
+def test_drift_malformed_saved_material_is_policy_error_and_cli_exit_two(
+    tmp_path: Path, capsys, malformation: str
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from glassbox.eval.drift import DriftPolicyError, load_policy, run_drift_report
+    from tests.eval.test_drift import AS_OF, POLICY_PATH, _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    assert main(["--database", str(path), "drift", "baseline", "--agent", "agent-a"]) == 0
+    capsys.readouterr()
+    database = Database.open(path)
+    try:
+        connection = database.connection
+        reference = json.loads(
+            connection.execute("SELECT reference_json FROM drift_baselines").fetchone()[0]
+        )
+        versions = json.loads(
+            connection.execute("SELECT version_counts_json FROM drift_baselines").fetchone()[0]
+        )
+        if malformation == "empty_histogram_counts":
+            reference["confidence"]["counts"] = []
+        elif malformation == "histogram_dimensions":
+            reference["confidence"]["labels"] = []
+        elif malformation == "negative_histogram_count":
+            reference["confidence"]["counts"][0] = -1
+        elif malformation == "nonfinite_trace_mean":
+            reference["trace_latency_ms"]["mean"] = "nan"
+        elif malformation == "overflow_trace_mean":
+            reference["trace_latency_ms"]["mean"] = 10**1000
+        elif malformation == "trace_count_semantics":
+            reference["trace_latency_ms"]["count"] = 0
+        elif malformation == "reference_not_mapping":
+            reference["confidence"] = []
+        elif malformation == "versions_not_mapping":
+            versions["versions"] = []
+        elif malformation == "negative_version_count":
+            versions["versions"]["v1"]["traces"] = -1
+        else:
+            versions["decisions_per_trace"] = -1
+        connection.execute(
+            "UPDATE drift_baselines SET reference_json = ?, version_counts_json = ?",
+            (json.dumps(reference), json.dumps(versions)),
+        )
+        connection.commit()
+    finally:
+        database.close()
+
+    with pytest.raises(DriftPolicyError, match="stored drift baseline"):
+        run_drift_report(
+            path, "agent-a", load_policy(POLICY_PATH), clock=lambda: AS_OF, persist=False
+        )
+    assert main(["--database", str(path), "drift", "--agent", "agent-a"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "glassbox: unable to run drift command"
+
+
 def test_drift_cli_policy_override_and_insufficient_baseline(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     from glassbox.cli import main
     from tests.eval.test_drift import POLICY_PATH, _seed_drift

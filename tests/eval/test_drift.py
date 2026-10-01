@@ -4,7 +4,7 @@ import json
 import math
 from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -191,6 +191,22 @@ def test_report_without_matching_baseline_is_in_memory_and_policy_aware(
         assert database.connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 0
     finally:
         database.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_as_of",
+    (
+        datetime(2026, 8, 1),
+        datetime(2026, 8, 1, tzinfo=timezone(timedelta(hours=-4))),
+    ),
+)
+def test_run_drift_report_rejects_non_utc_clock_without_a_baseline(
+    tmp_path: Path, policy, invalid_as_of: datetime
+) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    with pytest.raises(ValueError, match="as_of must be UTC"):
+        run_drift_report(path, "agent-a", policy, clock=lambda: invalid_as_of, persist=True)
 
 
 @pytest.fixture

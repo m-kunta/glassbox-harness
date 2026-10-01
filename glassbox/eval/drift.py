@@ -659,26 +659,129 @@ def _source_traces(source: Sequence[DriftTraceSample]) -> tuple[TraceSample, ...
     )
 
 
-def _material_from_record(record: DriftBaselineRecord) -> BaselineMaterial:
-    if set(record.reference) != set(SIGNAL_NAMES):
-        raise DriftPolicyError("stored drift baseline has incomplete signal material")
+def _stored_mapping(value: object, fields: set[str], name: str) -> Mapping[str, object]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise DriftPolicyError(f"stored drift baseline has invalid {name}")
+    return value
+
+
+def _stored_count(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DriftPolicyError(f"stored drift baseline has invalid {name}")
+    return value
+
+
+def _stored_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise DriftPolicyError(f"stored drift baseline has invalid {name}")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise DriftPolicyError(f"stored drift baseline has invalid {name}") from exc
+    if not math.isfinite(number):
+        raise DriftPolicyError(f"stored drift baseline has invalid {name}")
+    return number
+
+
+def _material_from_record(record: DriftBaselineRecord, policy: DriftPolicy) -> BaselineMaterial:
+    reference = _stored_mapping(record.reference, set(SIGNAL_NAMES), "reference")
+    signal_fields = {
+        "name",
+        "count",
+        "labels",
+        "counts",
+        "proportions",
+        "mean",
+        "standard_deviation",
+    }
 
     def signal_from_reference(name: SignalName) -> BaselineSignal:
-        value = cast(Mapping[str, object], record.reference[name])
-        return BaselineSignal(
-            name=name,
-            count=cast(int, value["count"]),
-            labels=tuple(cast(Sequence[str], value["labels"])),
-            counts=tuple(cast(Sequence[int], value["counts"])),
-            proportions=tuple(cast(Sequence[float], value["proportions"])),
-            mean=cast(float | None, value["mean"]),
-            standard_deviation=cast(float | None, value["standard_deviation"]),
+        value = _stored_mapping(reference[name], signal_fields, f"{name} reference")
+        if value["name"] != name:
+            raise DriftPolicyError(f"stored drift baseline has invalid {name} name")
+        count = _stored_count(value["count"], f"{name} count")
+        if count < policy.signal(name).minimum_baseline_samples:
+            raise DriftPolicyError(f"stored drift baseline has invalid {name} count")
+        labels_raw, counts_raw, proportions_raw = (
+            value["labels"],
+            value["counts"],
+            value["proportions"],
         )
+        if not all(isinstance(item, list) for item in (labels_raw, counts_raw, proportions_raw)):
+            raise DriftPolicyError(f"stored drift baseline has invalid {name} arrays")
+        labels_list = cast(list[object], labels_raw)
+        counts_list = cast(list[object], counts_raw)
+        proportions_list = cast(list[object], proportions_raw)
+        if name in ("confidence", "decision_type"):
+            if (
+                not labels_list
+                or len(labels_list) != len(counts_list)
+                or len(labels_list) != len(proportions_list)
+                or any(not isinstance(label, str) or not label for label in labels_list)
+                or len(set(labels_list)) != len(labels_list)
+            ):
+                raise DriftPolicyError(f"stored drift baseline has invalid {name} histogram")
+            labels = cast(tuple[str, ...], tuple(labels_list))
+            if name == "confidence":
+                bounds = policy.signal(name).bin_boundaries
+                expected = tuple(
+                    f"[{a}, {b}{']' if i == len(bounds) - 2 else ')'}"
+                    for i, (a, b) in enumerate(zip(bounds, bounds[1:]))
+                )
+                if labels != expected:
+                    raise DriftPolicyError("stored drift baseline has invalid confidence bins")
+            elif labels != tuple(sorted(labels[:-1])) + ("other",):
+                raise DriftPolicyError("stored drift baseline has invalid decision_type labels")
+            counts = tuple(_stored_count(item, f"{name} histogram count") for item in counts_list)
+            proportions = tuple(
+                _stored_number(item, f"{name} proportion") for item in proportions_list
+            )
+            if (
+                sum(counts) != count
+                or any(
+                    not math.isclose(proportion, tally / count, rel_tol=1e-12, abs_tol=1e-12)
+                    for tally, proportion in zip(counts, proportions, strict=True)
+                )
+                or value["mean"] is not None
+                or value["standard_deviation"] is not None
+            ):
+                raise DriftPolicyError(f"stored drift baseline has invalid {name} histogram")
+            return BaselineSignal(name, count, labels, counts, proportions)
+
+        if labels_list or counts_list or proportions_list:
+            raise DriftPolicyError(f"stored drift baseline has invalid {name} trace arrays")
+        average = _stored_number(value["mean"], f"{name} mean")
+        deviation = _stored_number(value["standard_deviation"], f"{name} deviation")
+        return BaselineSignal(name, count, mean=average, standard_deviation=deviation)
 
     signals = tuple(signal_from_reference(name) for name in SIGNAL_NAMES)
-    counts = cast(dict[str, dict[str, int]], record.version_counts["versions"])
-    versions = tuple(
-        (version, entry["decisions"], entry["traces"]) for version, entry in sorted(counts.items())
+    counts_material = _stored_mapping(
+        record.version_counts, {"versions", "decisions_per_trace"}, "version counts"
+    )
+    raw_versions = counts_material["versions"]
+    if not isinstance(raw_versions, dict):
+        raise DriftPolicyError("stored drift baseline has invalid versions")
+    versions_list: list[tuple[str, int, int]] = []
+    for version, raw in raw_versions.items():
+        if not isinstance(version, str) or not version:
+            raise DriftPolicyError("stored drift baseline has invalid version name")
+        entry = _stored_mapping(raw, {"decisions", "traces"}, f"{version} counts")
+        versions_list.append(
+            (
+                version,
+                _stored_count(entry["decisions"], f"{version} decisions"),
+                _stored_count(entry["traces"], f"{version} traces"),
+            )
+        )
+    versions = tuple(sorted(versions_list))
+    if (
+        sum(decisions for _, decisions, _ in versions) != signals[0].count
+        or signals[0].count != signals[1].count
+        or any(signal.count > sum(traces for _, _, traces in versions) for signal in signals[2:])
+    ):
+        raise DriftPolicyError("stored drift baseline has inconsistent version counts")
+    decisions_per_trace = _stored_number(
+        counts_material["decisions_per_trace"], "decisions per trace"
     )
     return BaselineMaterial(
         record.policy_version,
@@ -689,7 +792,7 @@ def _material_from_record(record: DriftBaselineRecord) -> BaselineMaterial:
         record.baseline_id,
         signals,
         versions,
-        cast(float | None, record.version_counts["decisions_per_trace"]),
+        decisions_per_trace,
     )
 
 
@@ -797,6 +900,8 @@ def run_drift_report(
 ) -> DriftReport:
     """Use one instant for querying, calculation, output, and optional persistence."""
     as_of = clock()
+    if not isinstance(as_of, datetime) or as_of.tzinfo is None or as_of.utcoffset() != timedelta(0):
+        raise ValueError("as_of must be UTC")
     recent_start = as_of - policy.recent_duration
     database = (
         Database.open(database_path)
@@ -817,7 +922,7 @@ def run_drift_report(
                 "policy_changed_requires_rebaseline" if other_policy else "baseline_not_created"
             )
             return _missing_baseline_report(policy, agent_name, as_of, reason)
-        baseline = _material_from_record(state.baseline)
+        baseline = _material_from_record(state.baseline, policy)
         source = repository.drift_recent_source_data(agent_name, recent_start, as_of)
         report = calculate_report(
             policy,
