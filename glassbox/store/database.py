@@ -18,13 +18,16 @@ _BASE_TABLES = (
     "eval_runs",
     "eval_results",
 )
-_TABLES = _BASE_TABLES + ("feedback",)
-_INDEXES = (
+_BASE_INDEXES = (
     "idx_decisions_agent_decided_at",
     "idx_decisions_entity",
     "idx_decisions_type_confidence",
 )
-_BASE_SCHEMA_OBJECTS = _BASE_TABLES + _INDEXES
+_DRIFT_TABLES = ("drift_baselines", "drift_runs", "drift_results")
+_DRIFT_INDEXES = ("idx_drift_baselines_agent_policy", "idx_drift_runs_agent_created")
+_TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES
+_INDEXES = _BASE_INDEXES + _DRIFT_INDEXES
+_BASE_SCHEMA_OBJECTS = _BASE_TABLES + _BASE_INDEXES
 _SCHEMA_OBJECTS = _TABLES + _INDEXES
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 _JUDGE_CALIBRATION_TABLES = ("feedback", "eval_runs", "eval_results")
@@ -149,18 +152,25 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
         connection.executescript(schema_sql)
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
+        _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
         return
     if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
+        _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
         return
     if schema_objects == _strict_schema_objects():
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
+        _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
         return
     if schema_objects == _released_p2_schema_objects():
         _apply_judge_calibration_migration(connection)
+        _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        return
+    if schema_objects == _released_p3a_schema_objects():
+        _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
         return
     if schema_objects == _current_schema_objects():
         return
@@ -182,13 +192,15 @@ def _glassbox_schema_sql(connection: sqlite3.Connection) -> dict[str, str]:
     letting CREATE TABLE/INDEX crash with a raw OperationalError.
     """
     table_placeholders = ", ".join("?" for _ in _TABLES)
+    reserved_name_placeholders = ", ".join("?" for _ in _SCHEMA_OBJECTS)
     rows = connection.execute(
         "SELECT name, sql FROM sqlite_master "
         "WHERE sql IS NOT NULL AND ("
-        f"(type IN ('table', 'view') AND name IN ({table_placeholders})) "
+        f"(type IN ('table', 'view') AND name IN ({reserved_name_placeholders})) "
         "OR (type IN ('index', 'trigger') "
-        f"AND (tbl_name IN ({table_placeholders}) OR name IN ({table_placeholders}))))",
-        _TABLES + _TABLES + _TABLES,
+        f"AND (tbl_name IN ({table_placeholders}) "
+        f"OR name IN ({reserved_name_placeholders}))))",
+        _SCHEMA_OBJECTS + _TABLES + _SCHEMA_OBJECTS,
     )
     return {name: sql for name, sql in rows if sql is not None}
 
@@ -221,7 +233,15 @@ def _released_p2_schema_objects() -> dict[str, str]:
 
 @lru_cache
 def _current_schema_objects() -> dict[str, str]:
-    """Return the current strict schema, including P3 judge-calibration columns."""
+    """Return the current strict schema, including P3b drift tables."""
+    return _released_p3a_schema_objects() | _released_schema_objects(
+        "004_drift_monitoring.sql", _DRIFT_TABLES + _DRIFT_INDEXES
+    )
+
+
+@lru_cache
+def _released_p3a_schema_objects() -> dict[str, str]:
+    """Return the exact released P3a judge-calibration schema."""
     return _released_p2_schema_objects() | _released_schema_objects(
         "003_judge_calibration.sql", _JUDGE_CALIBRATION_TABLES
     )

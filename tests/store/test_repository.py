@@ -10,6 +10,10 @@ import pytest
 from glassbox.events import DecisionEvent, EvidenceEvent, SpanEvent, TraceEvent
 from glassbox.store import Database, Repository
 from glassbox.store.repository import (
+    DriftBaselineConflictError,
+    DriftBaselineInsert,
+    DriftResultInsert,
+    DriftRunInsert,
     FeedbackSubmission,
     JudgeCohort,
     JudgeOutcome,
@@ -18,6 +22,238 @@ from glassbox.store.repository import (
     QueueCursor,
     QueueQuery,
 )
+
+DRIFT_START = datetime(2026, 9, 1, tzinfo=UTC)
+DRIFT_MID = datetime(2026, 9, 8, tzinfo=UTC)
+DRIFT_END = datetime(2026, 9, 15, tzinfo=UTC)
+DRIFT_HASH = "a" * 64
+DRIFT_SIGNALS = ("confidence", "decision_type", "trace_latency_ms", "trace_cost_usd")
+
+
+@pytest.fixture
+def drift_repository(tmp_path: Path) -> Repository:
+    return Repository(Database.open(tmp_path / "drift.sqlite3"))
+
+
+def _drift_baseline(baseline_id: str) -> DriftBaselineInsert:
+    return DriftBaselineInsert(
+        baseline_id=baseline_id,
+        agent_name="agent-a",
+        policy_version="v1",
+        policy_hash=DRIFT_HASH,
+        baseline_start=DRIFT_START,
+        baseline_end=DRIFT_MID,
+        created_at=DRIFT_END,
+        version_counts={"v1": {"decisions": 3, "traces": 1}},
+        reference={name: {"count": 1} for name in DRIFT_SIGNALS},
+    )
+
+
+def _drift_run(baseline_id: str) -> DriftRunInsert:
+    return DriftRunInsert(
+        drift_run_id="01ARZ3NDEKTSV4RRFFQ69G5FE2",
+        baseline_id=baseline_id,
+        agent_name="agent-a",
+        policy_version="v1",
+        policy_hash=DRIFT_HASH,
+        as_of=DRIFT_END,
+        recent_start=DRIFT_MID,
+        recent_end=DRIFT_END,
+        status="healthy",
+        status_reason=None,
+        version_counts={},
+        context={},
+    )
+
+
+def _drift_results() -> tuple[DriftResultInsert, ...]:
+    return tuple(
+        DriftResultInsert(
+            drift_result_id=f"01ARZ3NDEKTSV4RRFFQ69G5FE{index + 3}",
+            signal_name=name,
+            population="decision" if index < 2 else "trace",
+            algorithm="psi" if index < 2 else "cusum",
+            status="healthy",
+            baseline_count=1,
+            recent_count=1,
+            metric_value=None if index == 3 else 0.0,
+            warning_threshold=0.1,
+            alert_threshold=0.2,
+            details={},
+        )
+        for index, name in enumerate(DRIFT_SIGNALS)
+    )
+
+
+def test_drift_source_populations_and_agent_selection(drift_repository: Repository) -> None:
+    connection = drift_repository._connection
+    for index, (name, start, version) in enumerate(
+        (
+            ("agent-a", "2026-09-01T00:00:00Z", "v1"),
+            ("agent-a", "2026-09-08T00:00:00Z", "v2"),
+            ("agent-b", "2026-09-02T00:00:00Z", "v1"),
+        )
+    ):
+        trace_id = f"01ARZ3NDEKTSV4RRFFQ69G5FF{index}"
+        connection.execute(
+            "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
+            "status, environment, latency_ms) VALUES (?, ?, ?, ?, 'ok', 'dev', NULL)",
+            (trace_id, name, version, start),
+        )
+        for number in range(3 if index == 0 else 1):
+            connection.execute(
+                "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
+                "entity_type, entity_id, decision_type, recommendation, rationale, "
+                "rationale_citations, confidence, alternatives_considered, decided_at) "
+                "VALUES (?, ?, ?, ?, 'sku', 'one', 'flag', '{}', 'r', '[]', 0.5, '[]', ?)",
+                (f"01ARZ3NDEKTSV4RRFFQ69G5FG{index * 3 + number}", trace_id, name, version, start),
+            )
+    connection.commit()
+    source = drift_repository.drift_source_data(
+        "agent-a", DRIFT_START, DRIFT_MID, DRIFT_MID, DRIFT_END
+    )
+    assert drift_repository.drift_agent_names() == ("agent-a", "agent-b")
+    assert len(source.baseline_decisions) == 3
+    assert len(source.baseline_traces) == 1
+    assert source.baseline_traces[0].decision_count == 3
+    assert source.baseline_traces[0].latency_ms is None
+    assert source.baseline_traces[0].total_cost_usd is None
+    assert len(source.recent_decisions) == len(source.recent_traces) == 1
+    assert source.recent_traces[0].agent_version == "v2"
+
+
+def test_drift_baseline_heads_are_immutable_and_classified(drift_repository: Repository) -> None:
+    first = drift_repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"))
+    assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "active"
+    with pytest.raises(DriftBaselineConflictError):
+        drift_repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE1"))
+    second = drift_repository.record_drift_baseline(
+        _drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE1"), supersede=True
+    )
+    assert second.supersedes_baseline_id == first.baseline_id
+    assert drift_repository.active_drift_baseline("agent-a", DRIFT_HASH) == second
+    assert drift_repository.drift_baseline_state("agent-b", DRIFT_HASH).status == "absent"
+    assert (
+        drift_repository._connection.execute("SELECT count(*) FROM drift_baselines").fetchone()[0]
+        == 2
+    )
+
+
+def test_drift_run_rolls_back_invalid_result(drift_repository: Repository) -> None:
+    baseline = drift_repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"))
+    results = _drift_results()
+    run = drift_repository.record_drift_run(_drift_run(baseline.baseline_id), results)
+    assert run.baseline_id == baseline.baseline_id
+    assert (
+        drift_repository._connection.execute("SELECT count(*) FROM drift_results").fetchone()[0]
+        == 4
+    )
+    bad_run = dataclasses.replace(
+        _drift_run(baseline.baseline_id), drift_run_id="01ARZ3NDEKTSV4RRFFQ69G5FE9"
+    )
+    bad_result = dataclasses.replace(
+        results[0], drift_result_id="01ARZ3NDEKTSV4RRFFQ69G5FEA", signal_name="bad"
+    )
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        drift_repository.record_drift_run(bad_run, (bad_result, *results[1:]))
+    assert (
+        drift_repository._connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 1
+    )
+
+
+def test_drift_baseline_sql_failure_rolls_back(drift_repository: Repository) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        drift_repository.record_drift_baseline(_drift_baseline("invalid"))
+    assert not drift_repository._connection.in_transaction
+    assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "absent"
+
+
+
+def test_drift_baseline_rejects_non_json_reference_before_sql(
+    drift_repository: Repository,
+) -> None:
+    request = dataclasses.replace(
+        _drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"),
+        reference={**_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0").reference,
+                   "confidence": {"mean": float("nan")}},
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        drift_repository.record_drift_baseline(request)
+    assert not drift_repository._connection.in_transaction
+
+
+
+def test_drift_baseline_rejects_multiple_and_zero_heads(drift_repository: Repository) -> None:
+    first_id = "01ARZ3NDEKTSV4RRFFQ69G5FE0"
+    second_id = "01ARZ3NDEKTSV4RRFFQ69G5FE1"
+    drift_repository.record_drift_baseline(_drift_baseline(first_id))
+    connection = drift_repository._connection
+    connection.execute(
+        """INSERT INTO drift_baselines
+        SELECT ?, agent_name, policy_version, policy_hash, baseline_start, baseline_end,
+               created_at, version_counts_json, reference_json, NULL
+        FROM drift_baselines WHERE baseline_id = ?""",
+        (second_id, first_id),
+    )
+    connection.commit()
+    assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "malformed"
+    with pytest.raises(DriftBaselineConflictError):
+        drift_repository.record_drift_baseline(
+            _drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FEB"), supersede=True
+        )
+    connection.execute("DELETE FROM drift_baselines WHERE baseline_id = ?", (second_id,))
+    connection.execute(
+        "UPDATE drift_baselines SET supersedes_baseline_id = baseline_id WHERE baseline_id = ?",
+        (first_id,),
+    )
+    connection.commit()
+    assert drift_repository.drift_baseline_state("agent-a", DRIFT_HASH).status == "malformed"
+    with pytest.raises(DriftBaselineConflictError):
+        drift_repository.active_drift_baseline("agent-a", DRIFT_HASH)
+
+
+def test_drift_run_sql_failure_rolls_back_and_foreign_keys_restrict(
+    drift_repository: Repository,
+) -> None:
+    baseline = drift_repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"))
+    results = _drift_results()
+    bad_results = (dataclasses.replace(results[0], drift_result_id="bad"), *results[1:])
+    with pytest.raises(sqlite3.IntegrityError):
+        drift_repository.record_drift_run(_drift_run(baseline.baseline_id), bad_results)
+    assert (
+        drift_repository._connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 0
+    )
+    drift_repository.record_drift_run(_drift_run(baseline.baseline_id), results)
+    with pytest.raises(sqlite3.IntegrityError):
+        drift_repository._connection.execute(
+            "DELETE FROM drift_baselines WHERE baseline_id = ?", (baseline.baseline_id,)
+        )
+    drift_repository._connection.rollback()
+
+
+def test_drift_source_bounds_use_timestamp_keys(drift_repository: Repository) -> None:
+    connection = drift_repository._connection
+    for index, stamp in enumerate(
+        (
+            "2026-09-01T00:00:45Z",
+            "2026-09-01T00:00:45.123Z",
+            "2026-09-01T00:00:45.123456Z",
+        )
+    ):
+        connection.execute(
+            "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
+            "status, environment) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev')",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FH{index}", stamp),
+        )
+    connection.commit()
+    lower = datetime(2026, 9, 1, 0, 0, 45, 100_000, tzinfo=UTC)
+    upper = datetime(2026, 9, 1, 0, 0, 45, 123_456, tzinfo=UTC)
+    source = drift_repository.drift_source_data("agent-a", lower, upper, upper, DRIFT_MID)
+    assert len(source.baseline_traces) == 1
+    assert source.baseline_traces[0].started_at.microsecond == 123_000
+    assert len(source.recent_traces) == 1
+    assert source.recent_traces[0].started_at.microsecond == 123_456
+
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -1334,9 +1570,10 @@ def test_judge_calibration_pairs_exclude_decision_ids_drops_a_qualifying_pair(
     assert filtered == ((3, 3),)
 
     # An empty exclude set (the default) is a no-op, not an always-empty filter.
-    assert repository.judge_calibration_pairs(
-        JUDGE_COHORT, exclude_decision_ids=frozenset()
-    ) == ((5, 1), (3, 3))
+    assert repository.judge_calibration_pairs(JUDGE_COHORT, exclude_decision_ids=frozenset()) == (
+        (5, 1),
+        (3, 3),
+    )
 
 
 def test_record_judge_run_persists_run_and_results_with_correct_nullability_and_flags(

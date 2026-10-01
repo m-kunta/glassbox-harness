@@ -156,6 +156,106 @@ def test_database_open_upgrades_released_p2_schema_to_p3(tmp_path: Path) -> None
     readonly.close()
 
 
+def test_drift_migration_upgrades_exact_p3a_once_and_read_only_never_upgrades(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p3a.sqlite3"
+    database = Database.open(path)
+    database.close()
+    connection = sqlite3.connect(path)
+    connection.execute("DROP INDEX idx_drift_runs_agent_created")
+    connection.execute("DROP INDEX idx_drift_baselines_agent_policy")
+    connection.execute("DROP TABLE drift_results")
+    connection.execute("DROP TABLE drift_runs")
+    connection.execute("DROP TABLE drift_baselines")
+    connection.commit()
+    connection.close()
+    with pytest.raises(ReadOnlyDatabaseError):
+        Database.open_read_only(path)
+    untouched = sqlite3.connect(path)
+    assert (
+        untouched.execute("SELECT name FROM sqlite_master WHERE name = 'drift_runs'").fetchone()
+        is None
+    )
+    untouched.close()
+    upgraded = Database.open(path)
+    assert (
+        upgraded.connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'drift_runs'"
+        ).fetchone()
+        is not None
+    )
+    upgraded.close()
+    reopened = Database.open(path)
+    reopened.close()
+    readonly = Database.open_read_only(path)
+    readonly.close()
+
+
+@pytest.mark.parametrize(
+    "collision_sql",
+    (
+        "CREATE INDEX idx_drift_runs_agent_created ON unrelated(id)",
+        "CREATE TABLE idx_drift_runs_agent_created (id TEXT)",
+    ),
+)
+def test_drift_migration_rejects_reserved_index_name_on_foreign_table(
+    tmp_path: Path, collision_sql: str
+) -> None:
+    path = tmp_path / "collision.sqlite3"
+    database = Database.open(path)
+    database.close()
+    connection = sqlite3.connect(path)
+    connection.execute("DROP INDEX idx_drift_runs_agent_created")
+    connection.execute("DROP INDEX idx_drift_baselines_agent_policy")
+    connection.execute("DROP TABLE drift_results")
+    connection.execute("DROP TABLE drift_runs")
+    connection.execute("DROP TABLE drift_baselines")
+    connection.execute("CREATE TABLE unrelated (id TEXT)")
+    connection.execute(collision_sql)
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        Database.open(path)
+
+
+def test_drift_schema_rejects_invalid_timestamp_json_and_ulid(tmp_path: Path) -> None:
+    from glassbox.store.repository import DriftBaselineInsert
+
+    path = tmp_path / "drift-checks.sqlite3"
+    database = Database.open(path)
+    repository = Repository(database)
+    baseline = DriftBaselineInsert(
+        baseline_id="01ARZ3NDEKTSV4RRFFQ69G5FE0",
+        agent_name="agent",
+        policy_version="v1",
+        policy_hash="a" * 64,
+        baseline_start=TIMESTAMP,
+        baseline_end=TIMESTAMP + timedelta(days=1),
+        created_at=TIMESTAMP + timedelta(days=2),
+        version_counts={},
+        reference={
+            name: {}
+            for name in ("confidence", "decision_type", "trace_latency_ms", "trace_cost_usd")
+        },
+    )
+    repository.record_drift_baseline(baseline)
+    for field, invalid in (
+        ("baseline_start", "2026-02-30T14:30:45Z"),
+        ("baseline_end", "2026-09-07T12:00:00+00:00"),
+        ("created_at", "2026-09-07T12:00:00.000Z"),
+        ("reference_json", "{bad"),
+        ("baseline_id", "invalid"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            database.connection.execute(
+                f"UPDATE drift_baselines SET {field} = ? WHERE baseline_id = ?",
+                (invalid, baseline.baseline_id),
+            )
+        database.connection.rollback()
+    database.close()
+
+
 def test_open_read_only_requires_an_existing_database(tmp_path: Path) -> None:
     missing = tmp_path / "missing.sqlite3"
 

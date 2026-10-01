@@ -480,7 +480,12 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     judge_calibration_migration = (
         STORE_ROOT / "migrations" / "003_judge_calibration.sql"
     ).read_text(encoding="utf-8")
-    assert schema_sql == f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}"
+    drift_migration = (STORE_ROOT / "migrations" / "004_drift_monitoring.sql").read_text(
+        encoding="utf-8"
+    )
+    assert schema_sql == (
+        f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
+    )
 
 
 @pytest.mark.parametrize(
