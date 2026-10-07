@@ -218,6 +218,75 @@ def test_outcomes_import_reject_artifact_cannot_replace_database(tmp_path: Path,
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("existing_database", [False, True])
+def test_outcomes_import_temporary_reject_path_cannot_alias_database(
+    tmp_path: Path, policy, existing_database
+):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / ".rejects.jsonl.tmp"
+    if existing_database:
+        seed_outcomes_database(path)
+    before = path.read_bytes() if existing_database else None
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+    rejects.write_text("old complete artifact")
+
+    with pytest.raises(ReconciliationError, match="invalid_paths"):
+        import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF)
+
+    assert rejects.read_text() == "old complete artifact"
+    assert input_path.read_text() == json_row() + "\n"
+    if existing_database:
+        assert path.read_bytes() == before
+    else:
+        assert not path.exists()
+
+
+def test_outcomes_import_temporary_reject_path_detects_database_symlink(
+    tmp_path: Path, policy
+):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / "glassbox.sqlite3"
+    path.symlink_to(tmp_path / ".rejects.jsonl.tmp")
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+    rejects.write_text("old complete artifact")
+    with pytest.raises(ReconciliationError, match="invalid_paths"):
+        import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF)
+    assert rejects.read_text() == "old complete artifact"
+    assert path.is_symlink()
+    assert not path.exists()
+    assert not (tmp_path / ".rejects.jsonl.tmp").exists()
+
+
+@pytest.mark.parametrize("horizon", [2**63, 10**100])
+def test_outcomes_import_rejects_horizon_overflow_per_line(tmp_path: Path, policy, horizon):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text("\n".join([
+        json_row(),
+        json_row(source_id="overflow", horizon_days=horizon),
+        json_row(source_id="boundary", horizon_days=2**63 - 1),
+    ]) + "\n")
+
+    assert import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF) == (
+        ImportSummary(2, 0, 1)
+    )
+    assert json.loads(rejects.read_text()) == {
+        "line": 2, "source_id": "overflow", "reason": "invalid_shape",
+    }
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT horizon_days FROM outcomes WHERE source_id = 'boundary'"
+        ).fetchone()[0] == 2**63 - 1
+
+
 def test_outcomes_import_keeps_prior_rejects_until_atomic_replace(
     tmp_path: Path, policy, monkeypatch
 ):

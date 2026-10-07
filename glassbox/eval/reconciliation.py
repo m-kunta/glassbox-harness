@@ -374,7 +374,11 @@ def parse_jsonl(lines: Iterable[str]) -> tuple[OutcomeInput | RejectedOutcome, .
                 raise ReconciliationError("invalid_shape")
             outcome_type = _string(data["outcome_type"], "invalid_shape")
             horizon = data["horizon_days"]
-            if type(horizon) is not int or horizon < 0 or not _json_safe(data["value"]):
+            if (
+                type(horizon) is not int
+                or not 0 <= horizon <= 2**63 - 1
+                or not _json_safe(data["value"])
+            ):
                 raise ReconciliationError("invalid_shape")
             results.append(
                 OutcomeInput(
@@ -503,7 +507,12 @@ def import_outcomes(
 ) -> ImportSummary:
     """Commit acceptable lines independently and atomically replace safe rejects."""
     _validate_policy(policy)
-    if _same_path(input_path, reject_path) or _same_path(database_path, reject_path):
+    temporary = reject_path.with_name(f".{reject_path.name}.tmp")
+    if (
+        _same_path(input_path, reject_path)
+        or _same_path(database_path, reject_path)
+        or _same_path(database_path, temporary)
+    ):
         raise ReconciliationError("invalid_paths")
     as_of = clock()
     _require_utc(as_of)
@@ -511,7 +520,6 @@ def import_outcomes(
     _outcome_id(as_of)
     if reject_path.is_dir():
         raise IsADirectoryError("reject destination is a directory")
-    temporary = reject_path.with_name(f".{reject_path.name}.tmp")
     accepted = replayed = rejected = 0
     with input_path.open(encoding="utf-8") as source:
         # Exclusive creation also refuses existing files or symlinks at the
