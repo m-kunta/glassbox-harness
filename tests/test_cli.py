@@ -18,6 +18,122 @@ DECISION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 TIMESTAMP = datetime(2026, 8, 22, 14, 30, 45, tzinfo=UTC)
 
 
+def test_outcomes_import_returns_one_and_writes_rejects_for_partial_success(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n" + json_row(value={"occurred": False}) + "\n")
+    assert main([
+        "--database", str(path), "outcomes", "import",
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == '{"accepted":1,"rejected":1,"replayed":0}\n'
+    assert captured.err == ""
+    assert json.loads(rejects.read_text()) == {
+        "line": 2, "source_id": "stockout-1", "reason": "source_id_conflict",
+    }
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 1
+
+
+def test_outcomes_import_returns_zero_for_clean_idempotent_replay(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+    args = [
+        "--database", str(path), "outcomes", "import",
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]
+    assert main(args) == 0
+    capsys.readouterr()
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"accepted": 0, "replayed": 1, "rejected": 0}
+    assert rejects.read_bytes() == b""
+
+
+@pytest.mark.parametrize("failure", ["policy", "input", "rejects", "database"])
+def test_outcomes_commands_return_two_for_invalid_policy_or_io(
+    tmp_path: Path, capsys, failure: str
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+    args = ["--database", str(path), "outcomes", "import"]
+    if failure == "policy":
+        invalid = tmp_path / "invalid.toml"
+        invalid.write_text("private-invalid-policy")
+        args.extend(["--policy", str(invalid)])
+    elif failure == "input":
+        input_path = tmp_path / "absent.jsonl"
+    elif failure == "rejects":
+        rejects.mkdir()
+    else:
+        path.write_bytes(b"private-invalid-database")
+    args.extend(["--input", str(input_path), "--rejects", str(rejects)])
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to run outcomes command\n"
+    if failure != "database":
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
+
+
+def test_outcomes_report_prints_policy_provenance_and_null_metrics(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from glassbox.eval.reconciliation import default_policy_path, load_policy
+
+    path = tmp_path / "glassbox.sqlite3"
+    Database.open(path).close()
+    before = path.read_bytes()
+    policy = load_policy(default_policy_path())
+    assert main(["--database", str(path), "outcomes", "report"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["policy_version"] == policy.policy_version
+    assert payload["policy_hash"] == policy.policy_hash
+    assert payload["totals"]["mature"] == payload["totals"]["labelled"] == 0
+    for metric in ("coverage", "precision", "recall", "override_rate"):
+        assert payload["totals"][metric] is None
+    assert path.read_bytes() == before
+
+
+def test_outcomes_imports_stay_inside_outcomes_dispatch_branch() -> None:
+    import ast
+
+    import glassbox.cli
+
+    tree = ast.parse(Path(glassbox.cli.__file__).read_text())
+    imports = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "glassbox.eval.reconciliation"
+    ]
+    assert imports
+    dispatch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "arguments.command == 'outcomes'"
+    )
+    assert all(node in list(ast.walk(dispatch)) for node in imports)
+
+
 def test_drift_cli_detected_status_is_json_and_exit_zero(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     from glassbox.cli import main
     from glassbox.eval.drift import create_baseline, load_policy

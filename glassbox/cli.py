@@ -61,7 +61,55 @@ def main(argv: Sequence[str] | None = None) -> int:
     baseline_command.add_argument("--agent", required=True)
     baseline_command.add_argument("--policy", type=Path)
     baseline_command.add_argument("--supersede-baseline", action="store_true")
+    outcomes_command = commands.add_parser("outcomes", help="import or reconcile deferred outcomes")
+    outcomes_subcommands = outcomes_command.add_subparsers(dest="outcomes_command", required=True)
+    outcomes_import = outcomes_subcommands.add_parser(
+        "import", help="import observed JSONL outcomes"
+    )
+    outcomes_import.add_argument("--input", type=Path, required=True)
+    outcomes_import.add_argument("--rejects", type=Path, required=True)
+    outcomes_import.add_argument("--policy", type=Path)
+    outcomes_report = outcomes_subcommands.add_parser("report", help="print reconciliation metrics")
+    outcomes_report.add_argument("--policy", type=Path)
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "outcomes":
+        from glassbox.eval.reconciliation import (
+            ReconciliationError,
+            default_policy_path,
+            import_outcomes,
+            run_reconciliation_report,
+        )
+        from glassbox.eval.reconciliation import (
+            load_policy as load_reconciliation_policy,
+        )
+        from glassbox.store.database import TimestampMigrationError
+
+        try:
+            reconciliation_policy = load_reconciliation_policy(
+                arguments.policy or default_policy_path()
+            )
+            database_path = Path(arguments.database)
+            if arguments.outcomes_command == "import":
+                summary = import_outcomes(
+                    database_path, arguments.input, arguments.rejects, reconciliation_policy,
+                    clock=lambda: datetime.now(UTC),
+                )
+                outcomes_payload = summary.to_dict()
+                exit_code = 1 if summary.rejected else 0
+            else:
+                outcomes_payload = run_reconciliation_report(
+                    database_path, reconciliation_policy, clock=lambda: datetime.now(UTC),
+                ).to_dict()
+                exit_code = 0
+        except (
+            ReconciliationError, ReadOnlyDatabaseError, TimestampMigrationError,
+            OSError, sqlite3.Error, UnicodeError, ValueError,
+        ):
+            print("glassbox: unable to run outcomes command", file=sys.stderr)
+            return 2
+        print(json.dumps(outcomes_payload, sort_keys=True, separators=(",", ":")))
+        return exit_code
 
     if arguments.command == "drift":
         from glassbox.eval.drift import (

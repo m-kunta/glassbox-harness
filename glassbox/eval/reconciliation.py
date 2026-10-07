@@ -5,13 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import secrets
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias
+
+from glassbox.store import Database, Repository
+from glassbox.store.repository import OutcomeSubmission
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 _POLICY_KEYS = {"policy_version", "maturity_days", "rules"}
@@ -252,6 +257,10 @@ def load_policy(path: Path) -> ReconciliationPolicy:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ReconciliationError("invalid_policy") from exc
+    return _policy_from_data(data)
+
+
+def _policy_from_data(data: Mapping[str, object]) -> ReconciliationPolicy:
     if set(data) != _POLICY_KEYS:
         raise ReconciliationError("invalid_policy")
     version = _string(data["policy_version"], "invalid_policy")
@@ -299,6 +308,21 @@ def load_policy(path: Path) -> ReconciliationPolicy:
     return ReconciliationPolicy(
         version, maturity, tuple(rules), hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     )
+
+
+def _validate_policy(policy: ReconciliationPolicy) -> None:
+    data: dict[str, object] = {
+        "policy_version": policy.policy_version,
+        "maturity_days": policy.maturity_days,
+        "rules": [
+            {**asdict(rule), "positive_recommendation_values": list(
+                rule.positive_recommendation_values
+            )}
+            for rule in policy.rules
+        ],
+    }
+    if _policy_from_data(data) != policy:
+        raise ReconciliationError("invalid_policy")
 
 
 def _require_utc(value: datetime) -> None:
@@ -399,7 +423,7 @@ def _matching_rules(
 
 def derive_label(
     policy: ReconciliationPolicy, decision: DecisionInput, outcome: OutcomeValueInput
-) -> str:
+) -> Literal["tp", "fp", "tn", "fn"]:
     rules = tuple(
         rule
         for rule in _matching_rules(policy, decision)
@@ -415,9 +439,134 @@ def derive_label(
         _equal(recommendation, positive) for positive in rule.positive_recommendation_values
     )
     realized = _equal(_pointer(outcome.value, rule.outcome_pointer), rule.positive_outcome_value)
-    return {(True, True): "tp", (True, False): "fp", (False, True): "fn", (False, False): "tn"}[
-        predicted, realized
-    ]
+    if predicted:
+        return "tp" if realized else "fp"
+    return "fn" if realized else "tn"
+
+
+def _outcome_id(as_of: datetime) -> str:
+    value = (int(as_of.timestamp() * 1000) << 80) | secrets.randbits(80)
+    if value < 0 or value >= 1 << 128:
+        raise ReconciliationError("invalid_timestamp")
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    encoded = ""
+    for _ in range(26):
+        value, remainder = divmod(value, 32)
+        encoded = alphabet[remainder] + encoded
+    return encoded
+
+
+def _record_outcome(
+    repository: Repository, parsed: OutcomeInput, policy: ReconciliationPolicy, as_of: datetime
+) -> bool | RejectedOutcome:
+    detail = repository.decision_detail(parsed.decision_id)
+    if detail is None:
+        return RejectedOutcome(parsed.line_number, parsed.source_id, "unknown_decision")
+    try:
+        label = derive_label(policy, detail.stored_decision.event, parsed)
+    except ReconciliationError as exc:
+        return RejectedOutcome(parsed.line_number, parsed.source_id, exc.reason)
+    submission = OutcomeSubmission(
+        outcome_id=_outcome_id(as_of),
+        source_id=parsed.source_id,
+        decision_id=parsed.decision_id,
+        outcome_type=parsed.outcome_type,
+        observed_at=parsed.observed_at,
+        horizon_days=parsed.horizon_days,
+        value=parsed.value,
+        label=label,
+        reconciliation_policy_version=policy.policy_version,
+        reconciliation_policy_hash=policy.policy_hash,
+    )
+    try:
+        record = repository.record_outcome(submission)
+    except ValueError as exc:
+        if str(exc) != "outcome source_id was reused with a different payload":
+            raise
+        return RejectedOutcome(parsed.line_number, parsed.source_id, "source_id_conflict")
+    return record.outcome_id == submission.outcome_id
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return left.resolve() == right.resolve() or (
+        left.exists() and right.exists() and left.samefile(right)
+    )
+
+
+def import_outcomes(
+    database_path: Path,
+    input_path: Path,
+    reject_path: Path,
+    policy: ReconciliationPolicy,
+    *,
+    clock: Callable[[], datetime],
+) -> ImportSummary:
+    """Commit acceptable lines independently and atomically replace safe rejects."""
+    _validate_policy(policy)
+    if _same_path(input_path, reject_path) or _same_path(database_path, reject_path):
+        raise ReconciliationError("invalid_paths")
+    as_of = clock()
+    _require_utc(as_of)
+    # Validate the clock's ULID range before any database mutation.
+    _outcome_id(as_of)
+    if reject_path.is_dir():
+        raise IsADirectoryError("reject destination is a directory")
+    temporary = reject_path.with_name(f".{reject_path.name}.tmp")
+    accepted = replayed = rejected = 0
+    with input_path.open(encoding="utf-8") as source:
+        # Exclusive creation also refuses existing files or symlinks at the
+        # temporary name, protecting the input and other callers' artifacts.
+        with temporary.open("x", encoding="utf-8") as rejects:
+            try:
+                rejects.flush()
+                os.fsync(rejects.fileno())
+                database = Database.open(database_path)
+                try:
+                    repository = Repository(database)
+                    for number, line in enumerate(source, 1):
+                        if not line.strip():
+                            continue
+                        parsed = replace(parse_jsonl((line,))[0], line_number=number)
+                        result = parsed if isinstance(parsed, RejectedOutcome) else (
+                            _record_outcome(repository, parsed, policy, as_of)
+                        )
+                        if isinstance(result, RejectedOutcome):
+                            rejected += 1
+                            rejects.write(json.dumps({
+                                "line": result.line_number,
+                                "source_id": result.source_id,
+                                "reason": result.reason,
+                            }, sort_keys=True, separators=(",", ":")) + "\n")
+                        elif result:
+                            accepted += 1
+                        else:
+                            replayed += 1
+                finally:
+                    database.close()
+                rejects.flush()
+                os.fsync(rejects.fileno())
+                temporary.replace(reject_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    return ImportSummary(accepted, replayed, rejected)
+
+
+def run_reconciliation_report(
+    database_path: Path,
+    policy: ReconciliationPolicy,
+    *,
+    clock: Callable[[], datetime],
+) -> ReconciliationReport:
+    """Calculate one policy-scoped report without writing database rows."""
+    _validate_policy(policy)
+    as_of = clock()
+    _require_utc(as_of)
+    database = Database.open_read_only(database_path)
+    try:
+        source = Repository(database).reconciliation_source(policy.policy_hash)
+        return calculate_report(policy, source, as_of=as_of)
+    finally:
+        database.close()
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
