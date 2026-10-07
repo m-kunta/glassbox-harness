@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from glassbox.store.repository import (
     JudgeCohort,
     JudgeOutcome,
     JudgeRun,
+    OutcomeSubmission,
     OverrideSubmission,
     QueueCursor,
     QueueQuery,
@@ -562,6 +563,153 @@ def _events() -> tuple[TraceEvent, SpanEvent, DecisionEvent, EvidenceEvent]:
         retrieved_at=TIMESTAMP,
     )
     return trace, span, decision, evidence
+
+
+def _outcome_submission() -> OutcomeSubmission:
+    return OutcomeSubmission(
+        outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE0", source_id="source-1",
+        decision_id=DECISION_ID, outcome_type="stockout", observed_at=TIMESTAMP,
+        horizon_days=14, value={"occurred": True, "units": 3}, label="tp",
+        reconciliation_policy_version="v1", reconciliation_policy_hash="a" * 64,
+    )
+
+
+@pytest.fixture
+def outcome_repository(tmp_path: Path) -> Repository:
+    repository = Repository(Database.open(tmp_path / "outcomes.sqlite3"))
+    trace, _, decision, _ = _events()
+    repository.write_event(trace)
+    repository.write_event(decision)
+    return repository
+
+
+def test_record_outcome_is_append_only_and_idempotent_for_identical_source_id(
+    outcome_repository: Repository,
+) -> None:
+    submission = _outcome_submission()
+    first = outcome_repository.record_outcome(submission)
+    replay = outcome_repository.record_outcome(dataclasses.replace(
+        submission, outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
+        value={"units": 3, "occurred": True},
+    ))
+    assert replay == first
+    second = outcome_repository.record_outcome(dataclasses.replace(
+        submission, outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE2", source_id="source-2", label="fp",
+    ))
+    assert first.label == "tp" and second.label == "fp"
+    rows = outcome_repository._connection.execute("SELECT * FROM outcomes ORDER BY outcome_id")
+    assert len(rows.fetchall()) == 2
+    assert outcome_repository._connection.execute(
+        "SELECT value FROM outcomes WHERE source_id = 'source-1'"
+    ).fetchone()[0] == '{"occurred":true,"units":3}'
+
+
+@pytest.mark.parametrize("changes", [
+    {"decision_id": "01ARZ3NDEKTSV4RRFFQ69G5FE9"}, {"outcome_type": "sales"},
+    {"observed_at": TIMESTAMP + timedelta(microseconds=1)}, {"horizon_days": 15},
+    {"value": {"occurred": False}}, {"value": {"occurred": True, "units": 3.0}},
+    {"label": "fp"}, {"reconciliation_policy_version": "v2"},
+    {"reconciliation_policy_hash": "b" * 64},
+])
+def test_record_outcome_rejects_conflicting_source_id_without_writes(
+    outcome_repository: Repository, changes: dict[str, object],
+) -> None:
+    submission = _outcome_submission()
+    outcome_repository.record_outcome(submission)
+    before = outcome_repository._connection.execute("SELECT * FROM outcomes").fetchall()
+    total_changes = outcome_repository._connection.total_changes
+    with pytest.raises(ValueError, match="source_id"):
+        outcome_repository.record_outcome(dataclasses.replace(submission, **changes))
+    assert outcome_repository._connection.execute("SELECT * FROM outcomes").fetchall() == before
+    assert outcome_repository._connection.total_changes == total_changes
+
+
+@pytest.mark.parametrize("changes", [
+    {"source_id": ""}, {"source_id": 1}, {"outcome_id": ""}, {"decision_id": ""},
+    {"outcome_type": ""}, {"reconciliation_policy_version": ""},
+    {"reconciliation_policy_hash": "short"}, {"reconciliation_policy_hash": None},
+    {"observed_at": TIMESTAMP.replace(tzinfo=None)},
+    {"observed_at": TIMESTAMP.astimezone(timezone(timedelta(hours=1)))},
+    {"observed_at": "2026-08-22T14:30:45Z"},
+    {"horizon_days": -1}, {"horizon_days": True}, {"horizon_days": 1.5},
+    {"label": None}, {"label": "TP"}, {"value": object()}, {"value": float("nan")},
+])
+def test_record_outcome_validates_before_sql(
+    outcome_repository: Repository, changes: dict[str, object],
+) -> None:
+    queries: list[str] = []
+    outcome_repository._connection.set_trace_callback(queries.append)
+    with pytest.raises(ValueError):
+        outcome_repository.record_outcome(dataclasses.replace(_outcome_submission(), **changes))
+    outcome_repository._connection.set_trace_callback(None)
+    assert queries == []
+
+
+def test_record_outcome_sql_failure_rolls_back_the_append(outcome_repository: Repository) -> None:
+    repository = outcome_repository
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.record_outcome(dataclasses.replace(
+            _outcome_submission(), decision_id="01ARZ3NDEKTSV4RRFFQ69G5FZZ",
+        ))
+    assert not repository._connection.in_transaction
+    assert repository._connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
+    original = repository.record_outcome(_outcome_submission())
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.record_outcome(dataclasses.replace(_outcome_submission(), source_id="source-2"))
+    assert not repository._connection.in_transaction
+    assert repository._connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 1
+    assert repository.record_outcome(_outcome_submission()) == original
+
+
+def test_reconciliation_source_uses_latest_compatible_outcome_and_effective_override(
+    outcome_repository: Repository,
+) -> None:
+    repository = outcome_repository
+    second = _seed_queue_decision(repository, index=0, decided_at=TIMESTAMP, confidence=0.5)
+    third = _seed_queue_decision(repository, index=1, decided_at=TIMESTAMP, confidence=0.5)
+    stamps = (TIMESTAMP.replace(microsecond=0), TIMESTAMP, TIMESTAMP,
+              TIMESTAMP + timedelta(days=1), TIMESTAMP)
+    for index, stamp in enumerate(stamps):
+        submission = dataclasses.replace(
+            _outcome_submission(), outcome_id=f"01ARZ3NDEKTSV4RRFFQ69G5FE{index}",
+            source_id=f"source-{index}", observed_at=stamp,
+            outcome_type="sales" if index == 4 else "stockout",
+            reconciliation_policy_hash="b" * 64 if index == 3 else "a" * 64,
+        )
+        repository.record_outcome(submission)
+    repository._connection.execute(
+        "INSERT INTO outcomes (outcome_id, decision_id, outcome_type, observed_at, "
+        "horizon_days, value, label) VALUES (?, ?, 'stockout', '2027-01-01T00:00:00Z', "
+        "14, 'false', 'tn')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FE5", DECISION_ID),
+    )
+    repository._connection.commit()
+    database = Database(repository._connection)
+    _insert_override(database, override_id=OVERRIDE_IDS[0], decision_id=DECISION_ID,
+                     action="accepted")
+    _insert_override(database, override_id=OVERRIDE_IDS[1], decision_id=DECISION_ID,
+                     action="rejected", supersedes_override_id=OVERRIDE_IDS[0])
+    _insert_override(database, override_id=OVERRIDE_IDS[2], decision_id=third.decision_id,
+                     action="accepted")
+    _insert_override(database, override_id=OVERRIDE_IDS[3], decision_id=third.decision_id,
+                     action="rejected")
+    source = {row.decision_id: row for row in repository.reconciliation_source("a" * 64)}
+    assert len(source) == 3
+    row = source[DECISION_ID]
+    assert row.agent_name == "replenishment-triage-ai"
+    assert row.decision_type == "flag_exception"
+    assert row.recommendation == {"action": "review", "threshold": 0.25}
+    assert row.decided_at == TIMESTAMP
+    assert row.has_effective_override
+    assert {outcome.outcome_type: outcome.outcome_id for outcome in row.outcomes} == {
+        "stockout": "01ARZ3NDEKTSV4RRFFQ69G5FE2", "sales": "01ARZ3NDEKTSV4RRFFQ69G5FE4",
+    }
+    assert all(outcome.reconciliation_policy_hash == "a" * 64 for outcome in row.outcomes)
+    assert all(outcome.reconciliation_policy_version == "v1" for outcome in row.outcomes)
+    assert source[second.decision_id].outcomes == ()
+    assert not source[second.decision_id].has_effective_override
+    assert not source[third.decision_id].has_effective_override
+    assert all(row.outcomes == () for row in repository.reconciliation_source("' OR 1=1 --"))
 
 
 def _seed_queue_decision(

@@ -483,9 +483,53 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     drift_migration = (STORE_ROOT / "migrations" / "004_drift_monitoring.sql").read_text(
         encoding="utf-8"
     )
+    outcome_migration = (STORE_ROOT / "migrations" / "005_outcome_reconciliation.sql").read_text(
+        encoding="utf-8"
+    )
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
+        f"\n{outcome_migration}"
     )
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"source_id": "source"},
+        {"reconciliation_policy_version": "v1"},
+        {"reconciliation_policy_hash": "a" * 64},
+        {"source_id": "source", "reconciliation_policy_version": "v1"},
+        {"source_id": "source", "reconciliation_policy_hash": "a" * 64},
+        {"source_id": "source", "reconciliation_policy_version": "v1",
+         "reconciliation_policy_hash": "short"},
+    ],
+)
+def test_outcome_schema_requires_paired_provenance(
+    tmp_path: Path, provenance: dict[str, str]
+) -> None:
+    database = Database.open(tmp_path / "outcomes.sqlite3")
+    _insert_decision(database.connection)
+    values = _valid_row("outcomes") | provenance
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(database.connection, "outcomes", values)
+    database.close()
+
+
+def test_outcome_source_ids_are_unique_but_legacy_nulls_are_allowed(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "outcomes.sqlite3")
+    _insert_decision(database.connection)
+    values = _valid_row("outcomes")
+    _insert_row(database.connection, "outcomes", values)
+    values["outcome_id"] = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+    _insert_row(database.connection, "outcomes", values)
+    values.update(source_id="source", reconciliation_policy_version="v1",
+                  reconciliation_policy_hash="a" * 64)
+    values["outcome_id"] = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
+    _insert_row(database.connection, "outcomes", values)
+    values["outcome_id"] = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+    with pytest.raises(sqlite3.IntegrityError, match="source_id"):
+        _insert_row(database.connection, "outcomes", values)
+    database.close()
 
 
 @pytest.mark.parametrize(

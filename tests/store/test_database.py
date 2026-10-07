@@ -10,7 +10,12 @@ import pytest
 
 from glassbox.events import TraceEvent
 from glassbox.store import Database
-from glassbox.store.database import ReadOnlyDatabaseError
+from glassbox.store.database import (
+    ReadOnlyDatabaseError,
+    TimestampMigrationError,
+    _apply_judge_calibration_migration,
+    _apply_outcome_reconciliation_migration,
+)
 from glassbox.store.repository import Repository
 
 STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
@@ -156,20 +161,108 @@ def test_database_open_upgrades_released_p2_schema_to_p3(tmp_path: Path) -> None
     readonly.close()
 
 
+def _create_released_p3_database(path: Path, *, drift: bool) -> None:
+    _create_released_p2_database(path)
+    connection = sqlite3.connect(path)
+    _apply_judge_calibration_migration(connection)
+    if drift:
+        connection.executescript(
+            (STORE_ROOT / "migrations" / "004_drift_monitoring.sql").read_text()
+        )
+    connection.close()
+
+
+def test_outcome_migration_preserves_released_p3b_once_and_read_only_never_upgrades(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p3b.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO outcomes (outcome_id, decision_id, outcome_type, observed_at, "
+        "horizon_days, value, label) VALUES (?, ?, 'stockout', ?, 14, '{\"occurred\":true}', 'tp')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FBF", P2_DECISION_ID, P2_TIMESTAMP),
+    )
+    connection.commit()
+    before = connection.execute("SELECT * FROM outcomes").fetchone()
+    connection.close()
+    with pytest.raises(ReadOnlyDatabaseError):
+        Database.open_read_only(path)
+    untouched = sqlite3.connect(path)
+    assert untouched.execute("SELECT * FROM outcomes").fetchone() == before
+    assert "source_id" not in {row[1] for row in untouched.execute("PRAGMA table_info(outcomes)")}
+    untouched.close()
+    database = Database.open(path)
+    assert tuple(database.connection.execute("SELECT * FROM outcomes").fetchone()) == (
+        *before, None, None, None
+    )
+    assert database.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    version = database.connection.execute("PRAGMA schema_version").fetchone()[0]
+    database.close()
+    reopened = Database.open(path)
+    assert reopened.connection.execute("PRAGMA schema_version").fetchone()[0] == version
+    reopened.close()
+
+
+def test_outcome_current_read_only_preserves_schema_and_data(tmp_path: Path) -> None:
+    path = tmp_path / "current.sqlite3"
+    database = Database.open(path)
+    columns = {row[1] for row in database.connection.execute("PRAGMA table_info(outcomes)")}
+    assert {"source_id", "reconciliation_policy_version", "reconciliation_policy_hash"} <= columns
+    snapshot = database.connection.execute(
+        "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_master ORDER BY name"
+    ).fetchall()
+    version = database.connection.execute("PRAGMA schema_version").fetchone()[0]
+    database.close()
+    original_bytes = path.read_bytes()
+    readonly = Database.open_read_only(path)
+    assert readonly.connection.execute("PRAGMA schema_version").fetchone()[0] == version
+    assert readonly.connection.execute(
+        "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_master ORDER BY name"
+    ).fetchall() == snapshot
+    assert readonly.connection.total_changes == 0
+    readonly.close()
+    assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("defect", ["foreign_key", "constraint"])
+def test_outcome_migration_failure_rolls_back_every_schema_and_data_change(
+    tmp_path: Path, defect: str,
+) -> None:
+    path = tmp_path / "damaged-p3b.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA ignore_check_constraints = ON")
+    connection.execute(
+        "INSERT INTO outcomes (outcome_id, decision_id, outcome_type, observed_at, "
+        "horizon_days, value) VALUES (?, ?, 'stockout', ?, ?, 'true')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FBF",
+         "01ARZ3NDEKTSV4RRFFQ69G5FZZ" if defect == "foreign_key" else P2_DECISION_ID,
+         P2_TIMESTAMP, -1 if defect == "constraint" else 14),
+    )
+    connection.commit()
+    connection.execute("PRAGMA ignore_check_constraints = OFF")
+    connection.execute("PRAGMA foreign_keys = ON")
+    before = connection.execute("SELECT * FROM outcomes").fetchall()
+    schema = connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+    error_type = TimestampMigrationError if defect == "foreign_key" else sqlite3.IntegrityError
+    with pytest.raises(error_type):
+        _apply_outcome_reconciliation_migration(connection)
+    assert not connection.in_transaction
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert connection.execute("SELECT * FROM outcomes").fetchall() == before
+    assert connection.execute(
+        "SELECT name, sql FROM sqlite_master ORDER BY name"
+    ).fetchall() == schema
+    connection.close()
+
+
 def test_drift_migration_upgrades_exact_p3a_once_and_read_only_never_upgrades(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "p3a.sqlite3"
-    database = Database.open(path)
-    database.close()
-    connection = sqlite3.connect(path)
-    connection.execute("DROP INDEX idx_drift_runs_agent_created")
-    connection.execute("DROP INDEX idx_drift_baselines_agent_policy")
-    connection.execute("DROP TABLE drift_results")
-    connection.execute("DROP TABLE drift_runs")
-    connection.execute("DROP TABLE drift_baselines")
-    connection.commit()
-    connection.close()
+    _create_released_p3_database(path, drift=False)
     with pytest.raises(ReadOnlyDatabaseError):
         Database.open_read_only(path)
     untouched = sqlite3.connect(path)

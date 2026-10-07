@@ -25,8 +25,9 @@ _BASE_INDEXES = (
 )
 _DRIFT_TABLES = ("drift_baselines", "drift_runs", "drift_results")
 _DRIFT_INDEXES = ("idx_drift_baselines_agent_policy", "idx_drift_runs_agent_created")
+_OUTCOME_INDEXES = ("idx_outcomes_source_id",)
 _TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES
-_INDEXES = _BASE_INDEXES + _DRIFT_INDEXES
+_INDEXES = _BASE_INDEXES + _DRIFT_INDEXES + _OUTCOME_INDEXES
 _BASE_SCHEMA_OBJECTS = _BASE_TABLES + _BASE_INDEXES
 _SCHEMA_OBJECTS = _TABLES + _INDEXES
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
@@ -153,24 +154,32 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
         _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        _apply_outcome_reconciliation_migration(connection)
         return
     if _is_pre_strict_schema(schema_objects):
         _rebuild_pre_strict_schema(connection, schema_sql)
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
         _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        _apply_outcome_reconciliation_migration(connection)
         return
     if schema_objects == _strict_schema_objects():
         _execute_schema_statements(connection, _migration_sql("002_feedback.sql"))
         _apply_judge_calibration_migration(connection)
         _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        _apply_outcome_reconciliation_migration(connection)
         return
     if schema_objects == _released_p2_schema_objects():
         _apply_judge_calibration_migration(connection)
         _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        _apply_outcome_reconciliation_migration(connection)
         return
     if schema_objects == _released_p3a_schema_objects():
         _execute_schema_statements(connection, _migration_sql("004_drift_monitoring.sql"))
+        _apply_outcome_reconciliation_migration(connection)
+        return
+    if schema_objects == _released_p3b_schema_objects():
+        _apply_outcome_reconciliation_migration(connection)
         return
     if schema_objects == _current_schema_objects():
         return
@@ -233,7 +242,15 @@ def _released_p2_schema_objects() -> dict[str, str]:
 
 @lru_cache
 def _current_schema_objects() -> dict[str, str]:
-    """Return the current strict schema, including P3b drift tables."""
+    """Return the current P4 schema, including replay-safe outcome provenance."""
+    return _released_p3b_schema_objects() | _released_schema_objects(
+        "005_outcome_reconciliation.sql", ("outcomes",) + _OUTCOME_INDEXES
+    )
+
+
+@lru_cache
+def _released_p3b_schema_objects() -> dict[str, str]:
+    """Return the exact released P3b drift-monitoring schema."""
     return _released_p3a_schema_objects() | _released_schema_objects(
         "004_drift_monitoring.sql", _DRIFT_TABLES + _DRIFT_INDEXES
     )
@@ -273,6 +290,8 @@ def _normalize_schema_sql(schema_sql: str) -> str:
 
 
 def _schema_prefix(name: str) -> str:
+    if name in _OUTCOME_INDEXES:
+        return f"CREATE UNIQUE INDEX {name} "
     object_type = "TABLE" if name in _TABLES else "INDEX"
     return f"CREATE {object_type} {name} "
 
@@ -401,6 +420,40 @@ def _apply_judge_calibration_migration(connection: sqlite3.Connection) -> None:
 
 def _judge_calibration_legacy_table_name(table: str) -> str:
     return f"{_JUDGE_CALIBRATION_TABLE_PREFIX}{table}"
+
+
+def _apply_outcome_reconciliation_migration(connection: sqlite3.Connection) -> None:
+    """Atomically replace outcomes, preserving legacy rows without provenance."""
+    legacy_table = "__glassbox_pre_outcome_reconciliation_outcomes"
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(f"ALTER TABLE outcomes RENAME TO {legacy_table}")
+        _execute_schema_statements(connection, _migration_sql("005_outcome_reconciliation.sql"))
+        connection.execute(
+            f"""
+            INSERT INTO outcomes (
+                outcome_id, decision_id, outcome_type, observed_at, horizon_days, value, label,
+                source_id, reconciliation_policy_version, reconciliation_policy_hash
+            )
+            SELECT outcome_id, decision_id, outcome_type, observed_at, horizon_days, value, label,
+                   NULL, NULL, NULL
+            FROM {legacy_table}
+            """
+        )
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise TimestampMigrationError(
+                "Cannot migrate to the P4 outcome-reconciliation schema because the database "
+                "contains foreign-key violations. Repair the database before reopening it."
+            )
+        connection.execute(f"DROP TABLE {legacy_table}")
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _execute_schema_statements(connection: sqlite3.Connection, schema_sql: str) -> None:

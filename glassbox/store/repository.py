@@ -182,6 +182,61 @@ class FeedbackRecord:
     reasoning_quality_rubric_version: str | None = None
 
 
+@dataclass(frozen=True)
+class OutcomeSubmission:
+    """A caller-complete, already-labelled outcome import request."""
+
+    outcome_id: str
+    source_id: str
+    decision_id: str
+    outcome_type: str
+    observed_at: datetime
+    horizon_days: int
+    value: Any
+    label: Literal["tp", "fp", "tn", "fn"]
+    reconciliation_policy_version: str
+    reconciliation_policy_hash: str
+
+
+@dataclass(frozen=True)
+class OutcomeRecord:
+    """A stored observation; legacy rows have no reconciliation provenance."""
+
+    outcome_id: str
+    source_id: str | None
+    decision_id: str
+    outcome_type: str
+    observed_at: datetime
+    horizon_days: int
+    value: Any
+    label: Literal["tp", "fp", "tn", "fn"] | None
+    reconciliation_policy_version: str | None
+    reconciliation_policy_hash: str | None
+
+
+@dataclass(frozen=True)
+class ReconciliationOutcomeSource:
+    outcome_id: str
+    outcome_type: str
+    observed_at: datetime
+    label: str | None
+    reconciliation_policy_hash: str | None
+    reconciliation_policy_version: str | None = None
+
+
+@dataclass(frozen=True)
+class ReconciliationDecisionSource:
+    """Policy-neutral decision and latest exact-policy observation data."""
+
+    decision_id: str
+    agent_name: str
+    decision_type: str
+    recommendation: object
+    decided_at: datetime
+    outcomes: tuple[ReconciliationOutcomeSource, ...] = ()
+    has_effective_override: bool = False
+
+
 JudgeRunStatus: TypeAlias = Literal["passed", "failed", "uncalibrated"]
 
 
@@ -510,6 +565,115 @@ class Repository:
                 )
             )
             return DecisionDetail(stored_decision, overrides)
+
+    def record_outcome(self, submission: OutcomeSubmission) -> OutcomeRecord:
+        """Append one observation or return the original for an exact source replay.
+
+        The generated outcome_id is storage identity, so a replay may supply
+        another ID. Every input/provenance field, including observed_at, must
+        match; canonical JSON comparison preserves JSON scalar distinctions.
+        """
+        self._validate_outcome_submission(submission)
+        try:
+            value_json = json.dumps(
+                submission.value, ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True, allow_nan=False,
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("outcome value must be JSON-serializable") from error
+        payload = (
+            submission.source_id, submission.decision_id, submission.outcome_type,
+            self._timestamp_text(submission.observed_at), submission.horizon_days, value_json,
+            submission.label, submission.reconciliation_policy_version,
+            submission.reconciliation_policy_hash,
+        )
+        fields = (
+            "source_id", "decision_id", "outcome_type", "observed_at", "horizon_days", "value",
+            "label", "reconciliation_policy_version", "reconciliation_policy_hash",
+        )
+        with self._operation_lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing_row = self._connection.execute(
+                    "SELECT * FROM outcomes WHERE source_id = ?", (submission.source_id,)
+                ).fetchone()
+                if existing_row is not None:
+                    existing_payload = tuple(existing_row[field] for field in fields)
+                    if existing_payload != payload:
+                        raise ValueError("outcome source_id was reused with a different payload")
+                    record = self._outcome_from_row(existing_row)
+                else:
+                    self._connection.execute(
+                        """
+                        INSERT INTO outcomes (
+                            outcome_id, source_id, decision_id, outcome_type, observed_at,
+                            horizon_days, value, label, reconciliation_policy_version,
+                            reconciliation_policy_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (submission.outcome_id, *payload),
+                    )
+                    row = self._connection.execute(
+                        "SELECT * FROM outcomes WHERE outcome_id = ?", (submission.outcome_id,)
+                    ).fetchone()
+                    assert row is not None
+                    record = self._outcome_from_row(row)
+                self._connection.execute("COMMIT")
+                return record
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def reconciliation_source(self, policy_hash: str) -> tuple[ReconciliationDecisionSource, ...]:
+        """Read every decision with latest outcomes for each type and the exact hash."""
+        with self._operation_lock:
+            rows = self._connection.execute(
+                """
+                WITH ranked_outcomes AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY decision_id, outcome_type
+                        ORDER BY glassbox_timestamp_key(observed_at) DESC, outcome_id DESC
+                    ) AS rank
+                    FROM outcomes WHERE reconciliation_policy_hash = ?
+                )
+                SELECT d.decision_id, d.agent_name, d.decision_type, d.recommendation,
+                       d.decided_at, o.outcome_id, o.outcome_type, o.observed_at, o.label,
+                       o.reconciliation_policy_hash, o.reconciliation_policy_version,
+                       (SELECT count(*) FROM overrides head
+                        WHERE head.decision_id = d.decision_id AND NOT EXISTS (
+                            SELECT 1 FROM overrides successor
+                            WHERE successor.decision_id = d.decision_id
+                              AND successor.supersedes_override_id = head.override_id
+                        )) = 1 AS has_effective_override
+                FROM decisions d LEFT JOIN ranked_outcomes o
+                    ON o.decision_id = d.decision_id AND o.rank = 1
+                ORDER BY glassbox_timestamp_key(d.decided_at), d.decision_id, o.outcome_type
+                """,
+                (policy_hash,),
+            ).fetchall()
+            outcomes: dict[str, list[ReconciliationOutcomeSource]] = {}
+            decisions: dict[str, sqlite3.Row] = {}
+            for row in rows:
+                decision_id = row["decision_id"]
+                decisions[decision_id] = row
+                decision_outcomes = outcomes.setdefault(decision_id, [])
+                if row["outcome_id"] is not None:
+                    decision_outcomes.append(ReconciliationOutcomeSource(
+                        row["outcome_id"], row["outcome_type"],
+                        datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00")),
+                        row["label"], row["reconciliation_policy_hash"],
+                        row["reconciliation_policy_version"],
+                    ))
+            return tuple(
+                ReconciliationDecisionSource(
+                    row["decision_id"], row["agent_name"], row["decision_type"],
+                    json.loads(row["recommendation"]),
+                    datetime.fromisoformat(row["decided_at"].replace("Z", "+00:00")),
+                    tuple(outcomes[decision_id]), bool(row["has_effective_override"]),
+                )
+                for decision_id, row in decisions.items()
+            )
 
     def record_feedback(self, submission: FeedbackSubmission) -> FeedbackRecord:
         """Append feedback, or return the original row for an exact replay."""
@@ -1360,6 +1524,44 @@ class Repository:
                 )
             if not isinstance(outcome.rationale, str) or not outcome.rationale:
                 raise ValueError("a successful judge outcome must carry a non-empty rationale")
+
+    @staticmethod
+    def _outcome_from_row(row: sqlite3.Row) -> OutcomeRecord:
+        return OutcomeRecord(
+            outcome_id=row["outcome_id"], source_id=row["source_id"],
+            decision_id=row["decision_id"], outcome_type=row["outcome_type"],
+            observed_at=datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00")),
+            horizon_days=row["horizon_days"], value=json.loads(row["value"]), label=row["label"],
+            reconciliation_policy_version=row["reconciliation_policy_version"],
+            reconciliation_policy_hash=row["reconciliation_policy_hash"],
+        )
+
+    @staticmethod
+    def _validate_outcome_submission(submission: OutcomeSubmission) -> None:
+        for field in (
+            "outcome_id", "source_id", "decision_id", "outcome_type",
+            "reconciliation_policy_version", "reconciliation_policy_hash",
+        ):
+            value = getattr(submission, field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"outcome {field} must be a non-empty string")
+        if len(submission.reconciliation_policy_hash) != 64:
+            raise ValueError("outcome reconciliation_policy_hash must have 64 characters")
+        stamp = submission.observed_at
+        if (
+            not isinstance(stamp, datetime)
+            or stamp.tzinfo is None
+            or stamp.utcoffset() != _UTC_OFFSET
+        ):
+            raise ValueError("outcome timestamp must be timezone-aware UTC")
+        horizon = submission.horizon_days
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 0:
+            raise ValueError("outcome horizon_days must be a non-negative integer")
+        if (
+            not isinstance(submission.label, str)
+            or submission.label not in ("tp", "fp", "tn", "fn")
+        ):
+            raise ValueError("outcome label must be tp, fp, tn, or fn")
 
     @staticmethod
     def _validate_override_submission(submission: OverrideSubmission) -> None:
