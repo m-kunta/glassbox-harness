@@ -120,6 +120,35 @@ def test_outcomes_commands_return_two_for_invalid_policy_or_io(
             assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
 
 
+def test_outcomes_import_looped_temporary_symlink_returns_safe_operational_exit(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    before = path.read_bytes()
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+    rejects.write_text("old complete artifact")
+    temporary = tmp_path / ".rejects.jsonl.tmp"
+    temporary.symlink_to(temporary.name)
+
+    assert main([
+        "--database", str(path), "outcomes", "import",
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to run outcomes command\n"
+    assert path.read_bytes() == before
+    assert rejects.read_text() == "old complete artifact"
+    assert temporary.is_symlink()
+    assert temporary.readlink() == Path(temporary.name)
+
+
 def test_outcomes_report_prints_policy_provenance_and_null_metrics(
     tmp_path: Path, capsys
 ) -> None:  # type: ignore[no-untyped-def]

@@ -492,7 +492,13 @@ def _record_outcome(
 
 
 def _same_path(left: Path, right: Path) -> bool:
-    return left.resolve() == right.resolve() or (
+    try:
+        same_resolved_path = left.resolve() == right.resolve()
+    except RuntimeError as exc:
+        # pathlib exposes symlink loops as RuntimeError on supported Python
+        # versions; normalize them to the importer's safe path reason.
+        raise ReconciliationError("invalid_paths") from exc
+    return same_resolved_path or (
         left.exists() and right.exists() and left.samefile(right)
     )
 
