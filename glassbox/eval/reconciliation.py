@@ -37,7 +37,9 @@ _OUTCOME_KEYS = {
     "horizon_days",
     "value",
 }
-_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)")
+_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(?P<fraction>\d+))?(?:Z|\+00:00)"
+)
 _ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 
 
@@ -275,14 +277,14 @@ def _policy_from_data(data: Mapping[str, object]) -> ReconciliationPolicy:
     if not isinstance(raw_rules, list) or not raw_rules:
         raise ReconciliationError("invalid_policy")
     rules: list[ReconciliationRule] = []
-    matches: set[tuple[str, str, str]] = set()
+    matches: set[tuple[str, str]] = set()
     for raw in raw_rules:
         if not isinstance(raw, dict) or set(raw) != _RULE_KEYS:
             raise ReconciliationError("invalid_policy")
         agent = _string(raw["agent_name"], "invalid_policy")
         decision_type = _string(raw["decision_type"], "invalid_policy")
         outcome_type = _string(raw["outcome_type"], "invalid_policy")
-        key = (agent, decision_type, outcome_type)
+        key = (agent, decision_type)
         if key in matches:
             raise ReconciliationError("invalid_policy")
         matches.add(key)
@@ -331,8 +333,15 @@ def _require_utc(value: datetime) -> None:
 
 
 def _timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
+    match = _TIMESTAMP.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
         raise ReconciliationError("invalid_timestamp")
+    # datetime stores microseconds; discarding any nonzero trailing digit
+    # would merge distinct observations and change replay identity/order.
+    fraction = match.group("fraction") or ""
+    if any(digit != "0" for digit in fraction[6:]):
+        raise ReconciliationError("invalid_timestamp")
+    assert isinstance(value, str)
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     except ValueError as exc:
@@ -340,10 +349,19 @@ def _timestamp(value: object) -> datetime:
 
 
 def _json_safe(value: object) -> bool:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
     if isinstance(value, list):
         return all(_json_safe(item) for item in value)
     if isinstance(value, dict):
-        return all(isinstance(key, str) and _json_safe(item) for key, item in value.items())
+        return all(
+            isinstance(key, str) and _json_safe(key) and _json_safe(item)
+            for key, item in value.items()
+        )
     try:
         _scalar(value, "invalid_shape")
     except ReconciliationError:
@@ -363,10 +381,10 @@ def parse_jsonl(lines: Iterable[str]) -> tuple[OutcomeInput | RejectedOutcome, .
             results.append(RejectedOutcome(line_number, None, "malformed_json"))
             continue
         source_id = data.get("source_id") if isinstance(data, dict) else None
-        if not isinstance(source_id, str) or not source_id.strip():
+        if not isinstance(source_id, str) or not source_id.strip() or not _json_safe(source_id):
             source_id = None
         try:
-            if not isinstance(data, dict) or set(data) != _OUTCOME_KEYS:
+            if not isinstance(data, dict) or set(data) != _OUTCOME_KEYS or not _json_safe(data):
                 raise ReconciliationError("invalid_shape")
             source = _string(data["source_id"], "invalid_shape")
             decision_id = _string(data["decision_id"], "invalid_shape")
@@ -377,7 +395,6 @@ def parse_jsonl(lines: Iterable[str]) -> tuple[OutcomeInput | RejectedOutcome, .
             if (
                 type(horizon) is not int
                 or not 0 <= horizon <= 2**63 - 1
-                or not _json_safe(data["value"])
             ):
                 raise ReconciliationError("invalid_shape")
             results.append(
@@ -514,10 +531,24 @@ def import_outcomes(
     """Commit acceptable lines independently and atomically replace safe rejects."""
     _validate_policy(policy)
     temporary = reject_path.with_name(f".{reject_path.name}.tmp")
+    try:
+        database_paths = (database_path, database_path.resolve())
+    except RuntimeError as exc:
+        raise ReconciliationError("invalid_paths") from exc
+    # SQLite sidecars are part of the live database. Check both the supplied
+    # name and symlink target, including sidecars that SQLite may create later.
+    protected = tuple(
+        Path(f"{path}{suffix}")
+        for path in database_paths
+        for suffix in ("", "-wal", "-shm")
+    )
     if (
         _same_path(input_path, reject_path)
-        or _same_path(database_path, reject_path)
-        or _same_path(database_path, temporary)
+        or any(
+            _same_path(path, artifact)
+            for path in protected
+            for artifact in (input_path, reject_path, temporary)
+        )
     ):
         raise ReconciliationError("invalid_paths")
     as_of = clock()

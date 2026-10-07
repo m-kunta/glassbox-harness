@@ -88,6 +88,106 @@ def test_outcomes_import_horizon_overflow_has_defined_exit_and_safe_json(
         assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
 
 
+def test_outcomes_import_rejects_submicrosecond_lines_and_keeps_later_valid_line(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text("\n".join([
+        json_row(observed_at="2026-10-05T00:00:00.1234561Z"),
+        json_row(observed_at="2026-10-05T00:00:00.1234562Z"),
+        json_row(observed_at="2026-10-05T00:00:00.123456Z"),
+    ]) + "\n")
+
+    assert main([
+        "--database", str(path), "outcomes", "import",
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"accepted":1,"rejected":2,"replayed":0}\n'
+    assert captured.err == ""
+    assert [json.loads(line) for line in rejects.read_text().splitlines()] == [
+        {"line": number, "source_id": "stockout-1", "reason": "invalid_timestamp"}
+        for number in (1, 2)
+    ]
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT observed_at FROM outcomes").fetchall() == [
+            ("2026-10-05T00:00:00.123456Z",)
+        ]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source_id": "\ud800"},
+        {"outcome_type": "stockout_\udfff"},
+        {"value": {"occurred": True, "notes": "\ud800"}},
+        {"value": {"occurred": True, "\udfff": "private"}},
+        {"value": {"occurred": True, "nested": ["\ud800"]}},
+    ],
+)
+def test_outcomes_import_rejects_lone_surrogates_and_keeps_later_valid_line(
+    tmp_path: Path, capsys, changes
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import json_row, seed_outcomes_database
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    valid_value = {"occurred": True, "notes": "\U0001f600"}
+    input_path.write_text(json_row(**changes) + "\n" + json_row(value=valid_value) + "\n")
+
+    assert main([
+        "--database", str(path), "outcomes", "import",
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"accepted":1,"rejected":1,"replayed":0}\n'
+    assert captured.err == ""
+    assert json.loads(rejects.read_text()) == {
+        "line": 1, "source_id": None if "source_id" in changes else "stockout-1",
+        "reason": "invalid_shape",
+    }
+    with sqlite3.connect(path) as connection:
+        assert [json.loads(row[0]) for row in connection.execute("SELECT value FROM outcomes")] == (
+            [valid_value]
+        )
+
+
+def test_outcomes_import_rejects_duplicate_decision_policy_before_creating_database(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_reconciliation import POLICY, json_row
+
+    policy_path = tmp_path / "ambiguous.toml"
+    policy_path.write_text(POLICY + POLICY[POLICY.index("[[rules]]"):].replace(
+        'outcome_type = "stockout_occurred"', 'outcome_type = "delivery_occurred"'
+    ))
+    path = tmp_path / "missing.sqlite3"
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row() + "\n")
+
+    assert main([
+        "--database", str(path), "outcomes", "import", "--policy", str(policy_path),
+        "--input", str(input_path), "--rejects", str(rejects),
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to run outcomes command\n"
+    assert not path.exists()
+    assert not rejects.exists()
+    assert not rejects.with_name(".rejects.jsonl.tmp").exists()
+
+
 @pytest.mark.parametrize("failure", ["policy", "input", "rejects", "database"])
 def test_outcomes_commands_return_two_for_invalid_policy_or_io(
     tmp_path: Path, capsys, failure: str

@@ -218,6 +218,86 @@ def test_outcomes_import_reject_artifact_cannot_replace_database(tmp_path: Path,
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("database_alias", [False, True])
+@pytest.mark.parametrize(
+    ("artifact", "alias"),
+    [
+        ("rejects", "same"), ("rejects", "symlink"), ("rejects", "hardlink"),
+        ("input", "same"), ("input", "symlink"), ("input", "hardlink"),
+        ("temporary", "symlink"), ("temporary", "hardlink"),
+    ],
+)
+def test_outcomes_import_protects_live_sqlite_sidecars(
+    tmp_path: Path, policy, suffix, database_alias, artifact, alias
+):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    live = Database.open(path)
+    try:
+        live.connection.execute("PRAGMA wal_autocheckpoint = 0")
+        live.connection.execute("UPDATE decisions SET entity_id = 'live-wal-marker'")
+        live.connection.commit()
+        protected = [path, Path(f"{path}-wal"), Path(f"{path}-shm")]
+        before = {item: item.read_bytes() for item in protected}
+        assert before[Path(f"{path}-wal")]
+        database_path = path
+        if database_alias:
+            database_path = tmp_path / "database-alias.sqlite3"
+            database_path.symlink_to(path)
+        input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+        input_path.write_text("invalid JSON\n")
+        rejects.write_text("old complete artifact")
+        target = Path(f"{path}{suffix}")
+        candidate = (
+            rejects.with_name(".rejects.jsonl.tmp") if artifact == "temporary"
+            else tmp_path / "artifact-alias"
+        )
+        if alias == "same":
+            candidate = target
+        elif alias == "symlink":
+            candidate.symlink_to(target)
+        else:
+            candidate.hardlink_to(target)
+        if artifact == "input":
+            input_path = candidate
+        elif artifact == "rejects":
+            rejects = candidate
+
+        with pytest.raises(ReconciliationError, match="invalid_paths"):
+            import_outcomes(database_path, input_path, rejects, policy, clock=lambda: AS_OF)
+
+        assert {item: item.read_bytes() for item in protected} == before
+        assert live.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert live.connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
+        assert live.connection.execute("SELECT entity_id FROM decisions").fetchone()[0] == (
+            "live-wal-marker"
+        )
+    finally:
+        live.close()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_outcomes_import_protects_sidecar_paths_before_database_creation(
+    tmp_path: Path, policy, suffix
+):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    database_path = tmp_path / "missing.sqlite3"
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("invalid JSON\n")
+    rejects = Path(f"{database_path}{suffix}")
+
+    with pytest.raises(ReconciliationError, match="invalid_paths"):
+        import_outcomes(database_path, input_path, rejects, policy, clock=lambda: AS_OF)
+
+    assert not database_path.exists()
+    assert not rejects.exists()
+    assert not rejects.with_name(f".{rejects.name}.tmp").exists()
+
+
 @pytest.mark.parametrize("existing_database", [False, True])
 def test_outcomes_import_temporary_reject_path_cannot_alias_database(
     tmp_path: Path, policy, existing_database
@@ -413,6 +493,17 @@ def test_policy_rejects_zero_and_ambiguous_rules(tmp_path: Path, policy):
         derive_label(replace(policy, rules=policy.rules * 2), decision(), outcome())
 
 
+def test_policy_rejects_duplicate_decision_pair_with_different_outcome_types(tmp_path: Path):
+    path = tmp_path / "ambiguous.toml"
+    second_rule = POLICY[POLICY.index("[[rules]]"):].replace(
+        'outcome_type = "stockout_occurred"', 'outcome_type = "delivery_occurred"'
+    )
+    path.write_text(POLICY + second_rule)
+
+    with pytest.raises(ReconciliationError, match="invalid_policy"):
+        load_policy(path)
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -571,6 +662,44 @@ def test_jsonl_rejects_invalid_shapes(changes):
 )
 def test_jsonl_rejects_invalid_utc_timestamps(timestamp):
     assert parse_jsonl([json_row(observed_at=timestamp)])[0].reason == "invalid_timestamp"
+
+
+@pytest.mark.parametrize("offset", ["Z", "+00:00"])
+def test_jsonl_rejects_distinct_submicrosecond_timestamps(offset):
+    rows = [
+        json_row(observed_at=f"2026-10-05T00:00:00.{fraction}{offset}")
+        for fraction in ("1234561", "1234562", "123456000001")
+    ]
+
+    assert parse_jsonl(rows) == tuple(
+        RejectedOutcome(number, "stockout-1", "invalid_timestamp")
+        for number in range(1, 4)
+    )
+
+
+@pytest.mark.parametrize("fraction", ["1", "12", "123", "1234", "12345", "123456", "123456000"])
+def test_jsonl_preserves_exact_microsecond_timestamp_precision(fraction):
+    parsed = parse_jsonl([json_row(observed_at=f"2026-10-05T00:00:00.{fraction}Z")])[0]
+
+    assert isinstance(parsed, OutcomeInput)
+    assert parsed.observed_at == AS_OF.replace(microsecond=int(fraction[:6].ljust(6, "0")))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source_id": "\ud800"},
+        {"outcome_type": "stockout_\udfff"},
+        {"value": {"occurred": True, "notes": "\ud800"}},
+        {"value": {"occurred": True, "\udfff": "private"}},
+        {"value": {"occurred": True, "nested": ["\ud800"]}},
+        {"\ud800": "private"},
+    ],
+)
+def test_jsonl_rejects_lone_surrogates_in_all_strings(changes):
+    assert parse_jsonl([json_row(**changes)]) == (
+        RejectedOutcome(1, None if "source_id" in changes else "stockout-1", "invalid_shape"),
+    )
 
 
 def test_jsonl_accepts_utc_offsets_fractional_seconds_and_json_values():
