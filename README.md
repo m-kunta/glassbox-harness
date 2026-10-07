@@ -206,6 +206,76 @@ Both views keep confidence and decision type at decision level, while latency
 and cost remain trace-level so batch size is visible rather than silently
 treated as per-decision cost.
 
+## Import and reconcile deferred outcomes
+
+Import observed outcomes from JSONL, then print a read-only reconciliation
+report for the same database:
+
+```shell
+glassbox outcomes import \
+  --input outcomes.jsonl \
+  --rejects outcomes.rejects.jsonl
+glassbox outcomes report
+```
+
+Both commands use `GLASSBOX_DATABASE` or `glassbox.sqlite3` by default. Select
+another database with `glassbox --database PATH outcomes ...`. The checked-in
+policy is
+[`glassbox/eval/policies/reconciliation_v1.toml`](glassbox/eval/policies/reconciliation_v1.toml);
+both subcommands accept `--policy PATH` for a different versioned policy.
+
+Each nonblank input line must explicitly identify a persisted decision by its
+`decision_id`; Glassbox does not infer a match from a SKU or another business
+key. For the checked-in replenishment policy, a row looks like:
+
+```json
+{"source_id":"warehouse-stockout-001","decision_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","outcome_type":"stockout_occurred","observed_at":"2026-10-05T12:00:00Z","horizon_days":30,"value":{"occurred":true}}
+```
+
+Use the actual decision ULID and a UTC observation timestamp. The default
+policy matches agent `replenishment-triage`, decision type `triage`, and outcome
+type `stockout_occurred`: recommendation actions `expedite` and `order` predict
+a positive outcome, and `value.occurred=true` is a realized positive. Glassbox
+derives `tp`, `fp`, `tn`, or `fn` from the recorded recommendation and observed
+value; callers do not supply labels.
+
+`source_id` identifies the external observation within the database. Repeating
+the same source ID and payload under the same policy is an idempotent replay
+with no new outcome row; reusing it with a different payload or policy
+provenance is rejected as `source_id_conflict`. Each
+accepted row retains its policy version and hash. Reports select the latest
+compatible outcome per decision from the exact policy-hash cohort, so labels
+from changed policies or legacy unlabelled outcomes do not mix into metrics.
+
+`--rejects` is required, including for imports with no rejected rows. The
+importer commits accepted rows independently and atomically replaces this
+artifact with JSONL records containing the input line number, source ID when
+available, and reason code. A successful all-accepted import produces an empty
+reject file. Keep the input, database, and reject paths distinct; consult the
+reject artifact after a partially successful import before correcting and
+replaying rejected observations.
+
+The default maturity window is 30 days from the decision timestamp, measured
+at report time. Younger decisions are excluded. Mature decisions without a
+compatible label remain in the coverage denominator. Reports include policy
+version/hash, maturity and labelled counts, coverage, confusion counts,
+precision, recall, and override rate, with breakdowns by decision type and
+agent. Metrics with zero denominators are JSON `null`.
+
+Outcomes commands return these exact process exit codes:
+
+- `0` — import completed with zero rejected rows (including replay-only imports),
+  or report completed successfully. The command prints its JSON result.
+- `1` — import completed with at least one rejected row. Accepted rows are
+  retained, and the command prints accepted, replayed, and rejected counts.
+- `2` — invalid command arguments or a command-level failure, such as an invalid
+  policy, unreadable input/database, or inability to write the reject artifact.
+  Check stderr; no successful result JSON is printed. A failure after processing
+  begins may leave already accepted rows committed.
+
+P4 ships this local CLI import/report workflow. Dashboard generation, alerts,
+scheduling, and CI automation remain deferred.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:

@@ -102,9 +102,9 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [ ] Add Discord notification delivery for operational alerts.
 - [ ] Add scheduling and CI gating once monitoring has an approved operational policy.
 
-## P4 — Outcome reconciliation (deferred)
+## P4 — Outcome reconciliation
 
-- [ ] Implement outcome ingestion and deferred-truth reconciliation.
+- [x] Implement outcome ingestion and deferred-truth reconciliation.
 
 ## P5 — Dashboard and operations (deferred)
 

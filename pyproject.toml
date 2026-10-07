@@ -131,7 +131,7 @@ name = "web-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.web"]
 # glassbox.web may import the single public drift module, glassbox.eval.drift,
-# but no drift siblings. Only the judge stack itself is forbidden here --
+# but no drift siblings. The judge stack and reconciliation are forbidden here --
 # not all of glassbox.eval, unlike the broader sdk-dependencies and
 # collector-dependencies contracts above. The judge stack is four sibling
 # modules, not just glassbox.eval.judge itself: judge_config (loads dotenv),
@@ -145,5 +145,6 @@ forbidden_modules = [
   "glassbox.eval.judge_config",
   "glassbox.eval.judge_provider",
   "glassbox.eval.judge_models",
+  "glassbox.eval.reconciliation",
   "glassbox.sdk",
 ]

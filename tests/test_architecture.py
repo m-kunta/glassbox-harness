@@ -102,6 +102,7 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.judge_config",
                 "glassbox.eval.judge_provider",
                 "glassbox.eval.judge_models",
+                "glassbox.eval.reconciliation",
                 "glassbox.sdk",
             ],
         },
@@ -243,6 +244,50 @@ def test_cli_keeps_drift_imports_inside_the_drift_dispatch_branch() -> None:
     imports = _module_level_import_names(PROJECT_ROOT / "glassbox" / "cli.py")
 
     assert "glassbox.eval.drift" not in imports
+
+
+def _assert_reconciliation_imports_are_lazy(source_path: Path) -> None:
+    imports = _module_level_import_names(source_path)
+    assert not any(
+        name == "glassbox.eval.reconciliation" or name.startswith("glassbox.eval.reconciliation.")
+        for name in imports
+    ), "reconciliation must be imported inside the outcomes dispatch branch"
+
+
+def test_cli_keeps_reconciliation_imports_inside_the_outcomes_dispatch_branch() -> None:
+    _assert_reconciliation_imports_are_lazy(PROJECT_ROOT / "glassbox" / "cli.py")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import glassbox.eval.reconciliation\n",
+        "from glassbox.eval.reconciliation import import_outcomes\n",
+    ],
+)
+def test_lazy_reconciliation_check_rejects_module_level_imports(
+    tmp_path: Path, source: str
+) -> None:
+    source_path = tmp_path / "cli.py"
+    source_path.write_text(source)
+
+    with pytest.raises(AssertionError, match="reconciliation must be imported"):
+        _assert_reconciliation_imports_are_lazy(source_path)
+
+
+def test_import_linter_forbids_sdk_collector_and_web_from_reconciliation() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    contracts = {
+        contract["name"]: contract for contract in config["tool"]["importlinter"]["contracts"]
+    }
+
+    for name in ("sdk-dependencies", "collector-dependencies", "web-dependencies"):
+        forbidden = contracts[name]["forbidden_modules"]
+        assert any(
+            module == "glassbox.eval.reconciliation"
+            or "glassbox.eval.reconciliation".startswith(module + ".")
+            for module in forbidden
+        ), f"{name} must forbid glassbox.eval.reconciliation or a parent package"
 
 
 def test_import_linter_forbids_sdk_collector_and_web_from_the_judge_module() -> None:
