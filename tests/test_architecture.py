@@ -200,14 +200,20 @@ def test_gitignore_excludes_the_judge_env_secrets_file() -> None:
 
 
 def _module_level_import_names(source_path: Path) -> set[str]:
-    """Return only top-level (not function/method-body) imported module names."""
+    """Inspect module blocks, excluding function and class bodies."""
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     names: set[str] = set()
-    for node in tree.body:
+    pending: list[ast.AST] = list(tree.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+        pending.extend(ast.iter_child_nodes(node))
     return names
 
 
@@ -263,6 +269,11 @@ def test_cli_keeps_reconciliation_imports_inside_the_outcomes_dispatch_branch() 
     [
         "import glassbox.eval.reconciliation\n",
         "from glassbox.eval.reconciliation import import_outcomes\n",
+        "from glassbox.eval import reconciliation\n",
+        "from glassbox.eval import reconciliation as outcomes\n",
+        "try:\n    import glassbox.eval.reconciliation\nexcept ImportError:\n    pass\n",
+        "if True:\n    from glassbox.eval.reconciliation import import_outcomes\n",
+        "if True:\n    from glassbox.eval import reconciliation as outcomes\n",
     ],
 )
 def test_lazy_reconciliation_check_rejects_module_level_imports(
@@ -273,6 +284,22 @@ def test_lazy_reconciliation_check_rejects_module_level_imports(
 
     with pytest.raises(AssertionError, match="reconciliation must be imported"):
         _assert_reconciliation_imports_are_lazy(source_path)
+
+
+@pytest.mark.parametrize("scope", ["def main(command)", "async def main(command)", "class CLI"])
+def test_lazy_reconciliation_check_excludes_function_and_class_bodies(
+    tmp_path: Path, scope: str
+) -> None:
+    source_path = tmp_path / "cli.py"
+    source_path.write_text(
+        f"{scope}:\n"
+        "    if command == 'outcomes':\n"
+        "        from glassbox.eval import reconciliation as outcomes\n"
+        "        from glassbox.eval.reconciliation import import_outcomes\n"
+        "        result = outcomes, import_outcomes\n"
+    )
+
+    _assert_reconciliation_imports_are_lazy(source_path)
 
 
 def test_import_linter_forbids_sdk_collector_and_web_from_reconciliation() -> None:
