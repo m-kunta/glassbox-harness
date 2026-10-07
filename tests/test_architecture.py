@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import tomllib
 from pathlib import Path
 
@@ -199,20 +200,26 @@ def test_gitignore_excludes_the_judge_env_secrets_file() -> None:
     assert ".env" in entries
 
 
-def _module_level_import_names(source_path: Path) -> set[str]:
-    """Inspect module blocks, excluding function and class bodies."""
+def _module_level_import_names(source_path: Path, *, package: str | None = None) -> set[str]:
+    """Inspect eager module/class blocks; resolve relative imports when scoped."""
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     names: set[str] = set()
     pending: list[ast.AST] = list(tree.body)
     while pending:
         node = pending.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module)
-            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module
+            if node.level:
+                if package is None:
+                    continue
+                module = importlib.util.resolve_name("." * node.level + (module or ""), package)
+            if module:
+                names.add(module)
+                names.update(f"{module}.{alias.name}" for alias in node.names)
         pending.extend(ast.iter_child_nodes(node))
     return names
 
@@ -253,7 +260,7 @@ def test_cli_keeps_drift_imports_inside_the_drift_dispatch_branch() -> None:
 
 
 def _assert_reconciliation_imports_are_lazy(source_path: Path) -> None:
-    imports = _module_level_import_names(source_path)
+    imports = _module_level_import_names(source_path, package="glassbox")
     assert not any(
         name == "glassbox.eval.reconciliation" or name.startswith("glassbox.eval.reconciliation.")
         for name in imports
@@ -274,6 +281,13 @@ def test_cli_keeps_reconciliation_imports_inside_the_outcomes_dispatch_branch() 
         "try:\n    import glassbox.eval.reconciliation\nexcept ImportError:\n    pass\n",
         "if True:\n    from glassbox.eval.reconciliation import import_outcomes\n",
         "if True:\n    from glassbox.eval import reconciliation as outcomes\n",
+        "class CLI:\n    from glassbox.eval.reconciliation import import_outcomes\n",
+        "class CLI:\n    class Outcomes:\n        from glassbox.eval import reconciliation\n",
+        "from .eval.reconciliation import import_outcomes\n",
+        "from .eval import reconciliation\n",
+        "try:\n    from .eval.reconciliation import import_outcomes\nexcept ImportError:\n"
+        "    pass\n",
+        "if True:\n    from .eval import reconciliation as outcomes\n",
     ],
 )
 def test_lazy_reconciliation_check_rejects_module_level_imports(
@@ -286,8 +300,8 @@ def test_lazy_reconciliation_check_rejects_module_level_imports(
         _assert_reconciliation_imports_are_lazy(source_path)
 
 
-@pytest.mark.parametrize("scope", ["def main(command)", "async def main(command)", "class CLI"])
-def test_lazy_reconciliation_check_excludes_function_and_class_bodies(
+@pytest.mark.parametrize("scope", ["def main(command)", "async def main(command)"])
+def test_lazy_reconciliation_check_excludes_function_bodies(
     tmp_path: Path, scope: str
 ) -> None:
     source_path = tmp_path / "cli.py"
@@ -296,7 +310,24 @@ def test_lazy_reconciliation_check_excludes_function_and_class_bodies(
         "    if command == 'outcomes':\n"
         "        from glassbox.eval import reconciliation as outcomes\n"
         "        from glassbox.eval.reconciliation import import_outcomes\n"
+        "        from .eval import reconciliation\n"
+        "        from .eval.reconciliation import run_reconciliation_report\n"
         "        result = outcomes, import_outcomes\n"
+    )
+
+    _assert_reconciliation_imports_are_lazy(source_path)
+
+
+@pytest.mark.parametrize("scope", ["def run(self)", "async def run(self)"])
+def test_lazy_reconciliation_check_allows_class_method_imports(
+    tmp_path: Path, scope: str
+) -> None:
+    source_path = tmp_path / "cli.py"
+    source_path.write_text(
+        "class CLI:\n"
+        f"    {scope}:\n"
+        "        from glassbox.eval import reconciliation\n"
+        "        from .eval.reconciliation import import_outcomes\n"
     )
 
     _assert_reconciliation_imports_are_lazy(source_path)
