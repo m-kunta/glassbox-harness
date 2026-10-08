@@ -99,6 +99,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Calibrate the LLM judge against human labels and enforce agreement thresholds.
 - [x] Add policy-governed drift monitoring with immutable baselines, CLI audit snapshots, and a read-only local report.
 - [ ] Add counterfactual providers.
+- [ ] Add opt-in live decision-time shadow execution for approved counterfactual prompts, preserving fail-open production behaviour and bounded cost/latency.
 - [ ] Add Discord notification delivery for operational alerts.
 - [ ] Add scheduling and CI gating once monitoring has an approved operational policy.
 
