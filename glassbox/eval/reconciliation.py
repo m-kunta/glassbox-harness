@@ -484,7 +484,15 @@ def _record_outcome(
     if detail is None:
         return RejectedOutcome(parsed.line_number, parsed.source_id, "unknown_decision")
     try:
-        label = derive_label(policy, detail.stored_decision.event, parsed)
+        decision = detail.stored_decision.event
+        if parsed.horizon_days != policy.maturity_days:
+            raise ReconciliationError("horizon_mismatch")
+        elapsed = parsed.observed_at - decision.decided_at
+        if elapsed < timedelta(0):
+            raise ReconciliationError("observed_before_decision")
+        if elapsed > timedelta(days=policy.maturity_days):
+            raise ReconciliationError("observed_after_horizon")
+        label = derive_label(policy, decision, parsed)
     except ReconciliationError as exc:
         return RejectedOutcome(parsed.line_number, parsed.source_id, exc.reason)
     submission = OutcomeSubmission(
@@ -528,7 +536,11 @@ def import_outcomes(
     *,
     clock: Callable[[], datetime],
 ) -> ImportSummary:
-    """Commit acceptable lines independently and atomically replace safe rejects."""
+    """Commit valid decision-relative outcomes and atomically replace safe rejects.
+
+    Negative outcomes must be exported explicitly; omitted records do not imply
+    that the predicted event did not occur.
+    """
     _validate_policy(policy)
     temporary = reject_path.with_name(f".{reject_path.name}.tmp")
     try:

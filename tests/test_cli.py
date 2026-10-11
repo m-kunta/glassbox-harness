@@ -98,9 +98,9 @@ def test_outcomes_import_rejects_submicrosecond_lines_and_keeps_later_valid_line
     seed_outcomes_database(path)
     input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
     input_path.write_text("\n".join([
-        json_row(observed_at="2026-10-05T00:00:00.1234561Z"),
-        json_row(observed_at="2026-10-05T00:00:00.1234562Z"),
-        json_row(observed_at="2026-10-05T00:00:00.123456Z"),
+        json_row(observed_at="2026-10-04T00:00:00.1234561Z"),
+        json_row(observed_at="2026-10-04T00:00:00.1234562Z"),
+        json_row(observed_at="2026-10-04T00:00:00.123456Z"),
     ]) + "\n")
 
     assert main([
@@ -117,7 +117,7 @@ def test_outcomes_import_rejects_submicrosecond_lines_and_keeps_later_valid_line
     ]
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT observed_at FROM outcomes").fetchall() == [
-            ("2026-10-05T00:00:00.123456Z",)
+            ("2026-10-04T00:00:00.123456Z",)
         ]
 
 

@@ -72,7 +72,7 @@ def seed_outcomes_database(path: Path) -> None:
                     rationale_citations=(),
                     confidence=0.8,
                     alternatives_considered=(),
-                    decided_at=AS_OF - timedelta(days=31),
+                    decided_at=AS_OF - timedelta(days=30),
                 )
             )
     finally:
@@ -122,6 +122,65 @@ def test_outcomes_import_replay_replaces_rejects_with_empty_file(tmp_path: Path,
     rejects.write_text("old rejects")
     assert import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF) == (
         ImportSummary(0, 1, 0)
+    )
+    assert rejects.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    ("urgency", "occurred", "label"),
+    [("CRITICAL", True, "tp"), ("HIGH", True, "tp"), ("HIGH", False, "fp"),
+     ("MEDIUM", True, "fn"), ("LOW", False, "tn")],
+)
+def test_reconciliation_v2_classifies_urgency(urgency, occurred, label):
+    path = default_policy_path().with_name("reconciliation_v2.toml")
+    assert path.is_file(), "the v2 urgency policy must be packaged"
+    policy = load_policy(path)
+    assert policy.policy_version == "reconciliation_v2"
+    assert policy.maturity_days == 30
+    assert policy.policy_hash != load_policy(default_policy_path()).policy_hash
+    assert derive_label(
+        policy, decision(recommendation={"urgency": urgency, "action": "arbitrary prose"}),
+        outcome(value={"occurred": occurred}),
+    ) == label
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"observed_at": "2026-09-04T23:59:59.999999Z"}, "observed_before_decision"),
+        ({"observed_at": "2026-10-05T00:00:00.000001Z"}, "observed_after_horizon"),
+        ({"horizon_days": 29}, "horizon_mismatch"),
+    ],
+)
+def test_outcomes_import_rejects_decision_relative_time(
+    tmp_path: Path, policy, changes, reason
+):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row(**changes) + "\n")
+    assert import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF) == (
+        ImportSummary(0, 0, 1)
+    )
+    assert json.loads(rejects.read_text()) == {
+        "line": 1, "source_id": "stockout-1", "reason": reason,
+    }
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("observed_at", ["2026-09-05T00:00:00Z", "2026-10-05T00:00:00Z"])
+def test_outcomes_import_accepts_inclusive_horizon_boundaries(tmp_path: Path, policy, observed_at):
+    from glassbox.eval.reconciliation import import_outcomes
+
+    path = tmp_path / "glassbox.sqlite3"
+    seed_outcomes_database(path)
+    input_path, rejects = tmp_path / "input.jsonl", tmp_path / "rejects.jsonl"
+    input_path.write_text(json_row(observed_at=observed_at) + "\n")
+    assert import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF) == (
+        ImportSummary(1, 0, 0)
     )
     assert rejects.read_bytes() == b""
 
@@ -355,16 +414,17 @@ def test_outcomes_import_rejects_horizon_overflow_per_line(tmp_path: Path, polic
     ]) + "\n")
 
     assert import_outcomes(path, input_path, rejects, policy, clock=lambda: AS_OF) == (
-        ImportSummary(2, 0, 1)
+        ImportSummary(1, 0, 2)
     )
-    assert json.loads(rejects.read_text()) == {
-        "line": 2, "source_id": "overflow", "reason": "invalid_shape",
-    }
+    assert [json.loads(line) for line in rejects.read_text().splitlines()] == [
+        {"line": 2, "source_id": "overflow", "reason": "invalid_shape"},
+        {"line": 3, "source_id": "boundary", "reason": "horizon_mismatch"},
+    ]
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM outcomes").fetchone()[0] == 1
         assert connection.execute(
             "SELECT horizon_days FROM outcomes WHERE source_id = 'boundary'"
-        ).fetchone()[0] == 2**63 - 1
+        ).fetchone() is None
 
 
 def test_outcomes_import_keeps_prior_rejects_until_atomic_replace(

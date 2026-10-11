@@ -298,6 +298,7 @@ def _emit_trace(
         }
         if ended_at is not None:
             values["ended_at"] = ended_at
+            values["latency_ms"] = (ended_at - state.started_at).total_seconds() * 1_000
             if state.input_capture is None:
                 emit(TraceEvent(**values))
             else:

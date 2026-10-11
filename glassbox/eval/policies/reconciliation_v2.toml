@@ -1,0 +1,11 @@
+policy_version = "reconciliation_v2"
+maturity_days = 30
+
+[[rules]]
+agent_name = "replenishment-triage"
+decision_type = "triage"
+outcome_type = "stockout_occurred"
+recommendation_pointer = "/urgency"
+positive_recommendation_values = ["CRITICAL", "HIGH"]
+outcome_pointer = "/occurred"
+positive_outcome_value = true
