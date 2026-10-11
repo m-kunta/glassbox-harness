@@ -80,16 +80,24 @@ subset of the four named signal tables. Omitting a table disables that signal; i
 causes the engine to infer that missing source values are healthy. The policy hash
 covers precisely that enabled set and every threshold.
 
-The shipped policy enables:
+The shipped policy enables only:
 
 - `confidence` (decision PSI);
-- `decision_type` (decision PSI); and
-- `trace_latency_ms` (trace CUSUM).
+- `decision_type` (decision PSI).
 
-It omits `trace_cost_usd`. Reports emit `monitored_signals` and expose omitted known
-signals as `disabled`, rendered as **Not monitored (disabled by policy)**. Persisted
-baseline/run/result rows contain only enabled signals. An enabled signal with inadequate
-data remains `insufficient_data` and can make the aggregate report insufficient.
+It omits `trace_latency_ms` until the operator has sufficient trace cadence and omits
+`trace_cost_usd` until an explicit cost-ingestion API exists. Reports emit
+`monitored_signals` and expose omitted known signals as `disabled`, rendered as **Not
+monitored (disabled by policy)**. Persisted baseline/run/result rows contain only enabled
+signals. An enabled signal with inadequate data remains `insufficient_data` and can make
+the aggregate report insufficient.
+
+Both shipped PSI tables use a baseline minimum of 500, a recent minimum of 200, additive
+smoothing `0.5`, warning threshold `0.10`, and alert threshold `0.16`. Confidence uses
+five fixed `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]` bins. Decision type retains at most the nine
+most frequent baseline values plus `other`; ties break by literal decision-type text.
+This fixed ten-category maximum makes a single set of thresholds statistically meaningful
+across agents.
 
 Baseline dates leave the policy. The command is:
 
@@ -114,7 +122,8 @@ whose CUSUM variance is zero reports `baseline_has_no_variance`, never the misle
 Repository reads derive trace latency for `status = 'ok'` rows with both timestamps as
 integer microseconds using Python's timezone-aware datetime subtraction. This supplies
 historical samples even when `traces.latency_ms` is null. `status = 'error'` traces and
-rows lacking `ended_at` are excluded from latency samples.
+rows lacking `ended_at` are excluded from latency samples. The shipped policy leaves this
+signal disabled until an operator elects to monitor a cohort with adequate trace cadence.
 
 SDK completion events additionally populate `TraceEvent.latency_ms` from the captured
 start/end timestamps. Cost remains null unless a future, explicit SDK cost-ingestion API
@@ -128,6 +137,15 @@ at the policy's minimum and representative larger sample sizes. The selected v2
 thresholds must keep alert false positives at or below 5% for every tested stationary
 population while retaining existing seeded-shift detection tests. This is a release gate,
 not a runtime simulation.
+
+An enabled trace CUSUM table must declare `transform = "none"` or `transform = "log1p"`
+and `evaluation_samples`. The v2 latency example uses `log1p`, a baseline minimum of 200,
+and exactly the 100 most-recent valid traces from the requested recent window. It uses
+warning threshold `5.2`, alert threshold `7.0`, and the existing reference value `0.5` in
+transformed standard-deviation units. Baseline mean/deviation and CUSUM samples use the
+declared transform; diagnostics retain raw latency count, mean, and median alongside the
+transformed calculation summary. This bounds a report's false-alarm behavior independently
+of agent throughput.
 
 CUSUM details retain only a bounded diagnostic summary: final positive/negative values,
 peak magnitude, and peak sample index. They no longer persist or render an unbounded
