@@ -15,10 +15,13 @@
 - Provider/model configuration is mandatory and uses only `GLASSBOX_COUNTERFACTUAL_PROVIDER`, `GLASSBOX_COUNTERFACTUAL_MODEL`, provider credential, and optional `GLASSBOX_COUNTERFACTUAL_OLLAMA_URL` from the project-root `.env` plus process environment; process values win and dotenv parsing must not mutate `os.environ`.
 - Reuse existing optional provider SDK transports lazily. Every adapter receives explicit credential/base URL and uses temperature `0`; no provider SDK is a base dependency.
 - Every remote destination requires `--confirm-egress` after a disclosure of provider, model, destination, prompt version/hash, selected count, and capture-content count. Literal loopback Ollama does not; non-loopback Ollama does.
-- The prompt receives a structured redacted snapshot plus optional blob content only when `--blob-dir PATH` is supplied. Never infer a blob directory. Provider input excludes confidence, feedback, and outcomes.
+- The prompt receives a structured redacted snapshot plus optional blob content only when `--blob-dir PATH` is supplied. Never infer a blob directory. Provider input excludes the original recommendation and rationale, confidence, feedback, and outcomes. Apply that exclusion to the entire rendered input, including optional captures; withhold answer-bearing captures rather than exposing the original answer to the variant.
 - Snapshot JSON is untrusted data inside explicit delimiters. Provider output must be exactly an object with JSON `recommendation` and non-empty string `rationale`.
 - One run captures `as_of` once; selects `decisions.decided_at >= as_of - --since` ordered by parsed UTC instant descending then `decision_id` descending; and applies `--max-cases` only after that fixed order.
 - Runs/results are append-only audit records. One completed command atomically persists one run and every successful/failed case result; per-case provider/parse/blob failures become result rows and never stop later cases.
+- Persist capture references plus a rendered-input hash; never persist capture content inline in SQLite. Persist structured snapshot facts separately from the transient provider input enriched with capture content.
+- Reports describe a **prompt-and-model counterfactual** unless recorded source-model provenance proves parity with the configured variant provider/model. Record that provenance and parity assessment; absent or ambiguous source metadata cannot establish a prompt-only effect.
+- A run with zero successful cases exits `2` after persisting its failed results; a run with at least one successful case exits `0`, including partial case failures. This also applies to an empty selected set.
 - Outcome enrichment uses only the selected reconciliation-policy hash, the newest compatible outcome of its required type, and decisions mature at `as_of - maturity_days`. It derives the label from the hypothetical recommendation and raw observed outcome; it never copies the original decision label.
 - No web UI, scheduling, alerts, automatic rollout, spend policy, aggregate winner claim, or live decision-time shadow execution is in scope.
 - `sdk`, `collector`, and `web` cannot import counterfactual eval modules. `cli.py` imports them only in the counterfactual command branch.
@@ -146,7 +149,7 @@
 
   ```
 
-  Add `test_counterfactual_run_and_results_are_append_only_and_restrict_deletion`: persist a run and result, then prove updates and deletion of its referenced decision/run are rejected. Add `test_counterfactual_result_disallows_duplicate_decision_within_run`: attempt two rows for one `(run_id, decision_id)` and assert the transaction rolls back.
+  Add `test_counterfactual_run_and_results_are_append_only_and_restrict_deletion`: persist a run and result, then prove updates and deletion of its referenced decision/run are rejected. Add `test_counterfactual_result_disallows_duplicate_decision_within_run`: attempt two rows for one `(run_id, decision_id)` and assert the transaction rolls back. Add a regression that persists capture references and the rendered-input SHA-256 while asserting recognizable capture text is absent from every SQLite result field.
 
   Test the selected outcome ordering by `glassbox_timestamp_key(observed_at) DESC, outcome_id DESC`; preserve raw `value`, `horizon_days`, and policy provenance so eval can derive a variant-specific label. Verify `prompt_ref`, `completion_ref`, and trace `input_ref` are returned as references, never read by SQLite.
 
@@ -162,7 +165,7 @@
 
 - [ ] **Step 3: Implement migration 006 and strict schema evolution.**
 
-  Add `counterfactual_runs` with ULID primary key; non-empty provider/model/base URL/prompt version/prompt hash/outcome policy version/outcome policy hash; UTC `created_at`/`as_of`; non-negative selected/succeeded/failed counts; and `remote_egress_confirmed` constrained to `0`/`1`. Add `counterfactual_results` with ULID primary key, `run_id` and `decision_id` `ON DELETE RESTRICT` FKs, canonical JSON checks for snapshot/original/hypothetical recommendation, nullable paired hypothetical recommendation/rationale, nullable paired failure code, nullable paired outcome ID/derived label, and `UNIQUE(run_id, decision_id)`. Enforce one of the success/failure result shapes, label membership `tp|fp|tn|fn`, and strict UTC timestamps.
+  Add `counterfactual_runs` with ULID primary key; non-empty provider/model/base URL/prompt version/prompt hash/outcome policy version/outcome policy hash; UTC `created_at`/`as_of`; non-negative selected/succeeded/failed counts; and `remote_egress_confirmed` constrained to `0`/`1`. Add `counterfactual_results` with ULID primary key, `run_id` and `decision_id` `ON DELETE RESTRICT` FKs, canonical JSON checks for structured snapshot facts/capture references/source-model provenance/original/hypothetical recommendation, a rendered-input SHA-256 hash when rendering succeeds, a recorded model-parity assessment, nullable paired hypothetical recommendation/rationale, nullable paired failure code, nullable paired outcome ID/derived label, and `UNIQUE(run_id, decision_id)`. Capture references contain reference IDs only, never resolved text or bytes. Original recommendation is audit/comparison data only and is excluded from provider input. A failure before rendering stores a null input hash with its diagnostic. Enforce one of the success/failure result shapes, label membership `tp|fp|tn|fn`, and strict UTC timestamps.
 
   Extend `_TABLES`, `_INDEXES`, `_initialize_schema()`, released-P4 fingerprint, current fingerprint, and `open_read_only()` validation exactly as migrations 003–005 do. Update `schema.sql` and the byte-for-byte migration mirror test to include 006.
 
@@ -204,7 +207,9 @@
 
 - [ ] **Step 1: Write failing orchestration tests.**
 
-  Use a fake provider returning ordered raw JSON responses and a fixed UTC clock. Assert one selected decision always renders a snapshot without blobs, and supplying a blob directory adds only resolvable `input_ref`/`prompt_ref`/`completion_ref` content. Assert the prompt does not contain confidence, feedback, outcome value, or any free-text feedback.
+  Use a fake provider returning ordered raw JSON responses and a fixed UTC clock. Assert one selected decision always renders a snapshot without blobs, and supplying a blob directory adds only resolvable capture content that does not expose the original answer. Assert the rendered prompt does not contain the original recommendation or rationale, confidence, feedback, outcome value, or any free-text feedback. Seed distinctive original-answer text both in structured fields and an answer-bearing capture to prove both exclusions.
+
+  Add a capture-enrichment test with distinctive safe input text: the fake provider sees it, persisted result fields never contain it, capture reference IDs remain queryable, and the stored rendered-input hash equals SHA-256 of the exact UTF-8 system/user input envelope. Test report descriptions for verified provider/model parity and for absent, mismatched, or ambiguous source provenance.
 
   Add exact behavioral tests:
 
@@ -224,9 +229,9 @@
 
 - [ ] **Step 3: Implement snapshot and run orchestration.**
 
-  Capture `as_of = clock()` exactly once and reject non-UTC clock values. Open one writer-capable `Database`, retrieve candidates, truncate after fixed ordering, and build a canonical snapshot for each candidate. Resolve blob references only when `blob_dir` is not `None`; decode UTF-8 bytes strictly; represent missing, invalid, unreadable, or non-UTF-8 content as `null` plus a concise per-case capture diagnostic. Do not expose filesystem paths in result/error data.
+  Capture `as_of = clock()` exactly once and reject non-UTC clock values. Open one writer-capable `Database`, retrieve candidates, truncate after fixed ordering, and build a canonical fact-only snapshot for each candidate. Store capture references and source-model provenance with those facts. Construct a separate transient provider projection that excludes the original recommendation/rationale and the other withheld fields. Resolve blob references only when `blob_dir` is not `None`; decode UTF-8 bytes strictly; withhold captures containing the original answer and record a concise diagnostic. Represent missing, invalid, unreadable, or non-UTF-8 content as `null` plus a concise per-case capture diagnostic. Do not expose filesystem paths in result/error data.
 
-  Render a system prompt that states the response envelope and a user prompt whose snapshot is delimited by `BEGIN UNTRUSTED DECISION DATA`/`END UNTRUSTED DECISION DATA`. Build the provider only after all local candidate/snapshot preconditions are satisfied. Convert provider exceptions and response parse failures into failed result objects, continue the loop, then atomically record the completed run and all results through the repository.
+  Render a system prompt that states the response envelope and a user prompt whose snapshot is delimited by `BEGIN UNTRUSTED DECISION DATA`/`END UNTRUSTED DECISION DATA`. Hash `canonical_dumps({"system_prompt": system_prompt, "user_prompt": user_prompt}).encode("utf-8")` with SHA-256 to identify the exact input envelope. Build the provider only after all local candidate/snapshot preconditions are satisfied. Convert provider exceptions and response parse failures into failed result objects, continue the loop, then atomically record the completed run and all results through the repository. Persist the fact-only snapshot, references, and input hash; discard transient capture text before creating persisted result records. Reports use the prompt-and-model description unless source and variant provider/model parity is proved from recorded provenance.
 
   For each successful result, use the selected `ReconciliationPolicy` rule and the newest exact-hash outcome from its source candidate. Require maturity relative to the captured `as_of`; call the same policy pointer/label functions used by P4 against the hypothetical recommendation and raw outcome value. Store no label when maturity/rule/outcome applicability fails.
 
@@ -265,7 +270,7 @@
 
   Add tests using a monkeypatched fake provider/config for:
 
-  Add `test_counterfactual_remote_preflight_requires_confirmation_before_provider_factory`, `test_counterfactual_loopback_ollama_discloses_without_confirmation`, `test_counterfactual_run_prints_compact_json_and_zero_for_partial_case_failures`, and `test_counterfactual_report_returns_two_for_unknown_run_and_never_writes`. Use a fresh temporary database per test and invoke the parser entry point rather than command internals.
+  Add `test_counterfactual_remote_preflight_requires_confirmation_before_provider_factory`, `test_counterfactual_loopback_ollama_discloses_without_confirmation`, `test_counterfactual_run_prints_compact_json_and_zero_for_partial_case_failures`, `test_counterfactual_run_returns_two_for_zero_successes_after_persisting_failures`, `test_counterfactual_run_returns_two_for_empty_selection`, and `test_counterfactual_report_returns_two_for_unknown_run_and_never_writes`. Use a fresh temporary database per test and invoke the parser entry point rather than command internals. Verify zero-success runs still emit their auditable report and can be retrieved by run ID.
 
   Assert remote disclosure contains provider/model/base URL/prompt version/hash/selected count/capture count but never credentials or snapshot content. Assert malformed prompt/configuration/missing database/missing consent return `2` with one generic safe stderr line and no provider construction. Extend the AST helper fixtures to reject direct, parent-package, relative, module-control-block, and class-body imports of all counterfactual modules, while permitting imports inside the command-handler function branch. Extend `web-dependencies` to forbid `counterfactual`, `counterfactual_config`, and `counterfactual_provider` specifically while preserving the established `web -> eval.drift` allowance.
 
@@ -283,7 +288,7 @@
 
   Add nested `counterfactual run`/`report` argparse commands. Import counterfactual configuration, orchestration, and optional transport only inside `if arguments.command == "counterfactual"`. For `run`, load prompt/policy/config, parse one duration cutoff from a single captured `datetime.now(UTC)`, open/read candidates for disclosure, print it to stderr, and require `--confirm-egress` only when `config.is_remote`. Then call `run_counterfactual()` with the same cutoff and output compact sorted report JSON.
 
-  For `report`, use a read-only database and print compact sorted JSON from `counterfactual_run_detail`; an unknown run and every operational failure emits exactly `glassbox: unable to run counterfactual command` to stderr and exits `2`. A completed `run`, including failed individual cases, exits `0`. Do not catch provider failure broadly in a way that hides failures before a run can be persisted; those are handled inside `run_counterfactual()`.
+  For `report`, use a read-only database and print compact sorted JSON from `counterfactual_run_detail`; an unknown run and every operational failure emits exactly `glassbox: unable to run counterfactual command` to stderr and exits `2`. A completed `run` with at least one successful case exits `0`, including partial case failures. A run with zero successes exits `2` after recording the run/results and printing its structured report; an empty selection follows the same rule. Retrieving an existing failed run with `report` exits `0` because retrieval succeeded. Do not catch provider failure broadly in a way that hides failures before a run can be persisted; those are handled inside `run_counterfactual()`.
 
 - [ ] **Step 4: Verify green.**
 
@@ -323,7 +328,7 @@
   glassbox counterfactual report --run RUN_ID
   ```
 
-  Explain dedicated credentials/configuration, egress disclosure, why blob location is explicit and optional, immutable run history, P4 enrichment limits, and that a result is not an aggregate winner claim. Mark only the offline counterfactual-provider item complete in `TODO.md`; leave live shadow execution, alerts, scheduling/CI, and dashboard work open.
+  Explain dedicated credentials/configuration, egress disclosure, why blob location is explicit and optional, immutable run history, capture-reference/input-hash storage, P4 enrichment limits, zero-success exit `2`, and that a result is not an aggregate winner claim. Describe it as a prompt-and-model counterfactual unless recorded source/variant parity is proved. Mark only the offline counterfactual-provider item complete in `TODO.md`; leave live shadow execution, alerts, scheduling/CI, and dashboard work open.
 
 - [ ] **Step 2: Run the complete release gate.**
 

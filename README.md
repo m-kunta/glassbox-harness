@@ -186,25 +186,60 @@ historical telemetry exists, then create an audit snapshot or inspect the
 live read-only report:
 
 ```shell
-glassbox drift baseline --agent replenishment-triage-ai
+glassbox drift baseline --agent replenishment-triage-ai \
+  --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z
 glassbox drift --agent replenishment-triage-ai
 glassbox serve
 # visit http://127.0.0.1:8787/drift after local login
 ```
 
 The checked-in policy is
-[`glassbox/eval/policies/drift_v1.toml`](glassbox/eval/policies/drift_v1.toml).
+[`glassbox/eval/policies/drift_v2.toml`](glassbox/eval/policies/drift_v2.toml).
 Use `--policy PATH` only with the CLI when testing or adopting a different
 versioned policy; the local web app always uses the checked-in default.
+Choose historical UTC timestamps ending in `Z` for the half-open
+`[start, end)` baseline window, with `start < end` and `end` no later than
+creation time. The example dates are illustrative: use your own telemetry's
+window, with at least 500 decisions for each default signal. A window that
+overlaps the recent seven days is allowed with a warning, since shared samples
+reduce sensitivity.
 Baselines are immutable. Re-run baseline creation with `--supersede-baseline`
-only when deliberately replacing an existing policy cohort with a new,
-linked baseline.
+when deliberately changing the window for an existing agent/policy cohort;
+this appends a linked baseline and preserves its predecessor.
+
+The default monitors confidence and decision type. Latency and cost display
+“Not monitored (disabled by policy).” Omitting a signal's table disables it;
+an enabled signal with too few usable samples reports insufficient data.
+Cost ingestion is deferred, so missing costs are never treated as zeros.
+
+To opt into latency, copy the default policy to a versioned file and append:
+
+```toml
+[trace_latency_ms]
+population = "trace"
+algorithm = "cusum"
+minimum_baseline_samples = 200
+minimum_recent_samples = 100
+transform = "log1p"
+evaluation_samples = 100
+reference_value = 0.5
+warning_threshold = 5.2
+alert_threshold = 7.0
+```
+
+Select that file with `--policy PATH` for both baseline and report commands.
+The changed policy hash requires its own baseline. Enable latency only when
+trace cadence supports 200 baseline and 100 recent completed, successful
+traces. Historical latency is derived from start/end timestamps; new SDK
+completion events also populate `latency_ms`. Incomplete and error traces
+are excluded. CUSUM evaluates the most recent 100 samples in log space;
+displayed latency summaries remain in raw milliseconds.
 
 CLI reports are persisted audit snapshots. The `/drift` view is calculated
 now, uses a read-only database connection, and never records a drift run.
-Both views keep confidence and decision type at decision level, while latency
-and cost remain trace-level so batch size is visible rather than silently
-treated as per-decision cost.
+Both views keep confidence and decision type at decision level. Optional latency
+and cost use traces as their sample unit, with decisions-per-trace shown as
+context for batch-size changes.
 
 ## Import and reconcile deferred outcomes
 
@@ -214,14 +249,15 @@ report for the same database:
 ```shell
 glassbox outcomes import \
   --input outcomes.jsonl \
-  --rejects outcomes.rejects.jsonl
-glassbox outcomes report
+  --rejects outcomes.rejects.jsonl \
+  --policy glassbox/eval/policies/reconciliation_v2.toml
+glassbox outcomes report --policy glassbox/eval/policies/reconciliation_v2.toml
 ```
 
 Both commands use `GLASSBOX_DATABASE` or `glassbox.sqlite3` by default. Select
 another database with `glassbox --database PATH outcomes ...`. The checked-in
 policy is
-[`glassbox/eval/policies/reconciliation_v1.toml`](glassbox/eval/policies/reconciliation_v1.toml);
+[`glassbox/eval/policies/reconciliation_v2.toml`](glassbox/eval/policies/reconciliation_v2.toml);
 both subcommands accept `--policy PATH` for a different versioned policy.
 
 Each nonblank input line must explicitly identify a persisted decision by its
@@ -234,15 +270,26 @@ key. For the checked-in replenishment policy, a row looks like:
 
 Use the actual decision ULID and a UTC observation timestamp. The default
 policy matches agent `replenishment-triage`, decision type `triage`, and outcome
-type `stockout_occurred`: recommendation actions `expedite` and `order` predict
-a positive outcome, and `value.occurred=true` is a realized positive. Glassbox
+type `stockout_occurred`: recommendation `/urgency` values `CRITICAL` and
+`HIGH` predict a positive outcome, and `value.occurred=true` is a realized positive. Glassbox
 derives `tp`, `fp`, `tn`, or `fn` from the recorded recommendation and observed
 value; callers do not supply labels.
 
-`source_id` identifies the external observation within the database. Repeating
+Export negative observations explicitly too, for example:
+
+```json
+{"source_id":"warehouse-stockout-002","decision_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","outcome_type":"stockout_occurred","observed_at":"2026-10-05T12:00:00Z","horizon_days":30,"value":{"occurred":false}}
+```
+
+An absent record means unknown outcome, not “no stockout.” For this policy,
+`horizon_days` must be exactly 30 and `observed_at` must fall between the
+decision timestamp and that timestamp plus 30 days, inclusive.
+
+`source_id` identifies the external observation within a policy-hash cohort. Repeating
 the same source ID and payload under the same policy is an idempotent replay
-with no new outcome row; reusing it with a different payload or policy
-provenance is rejected as `source_id_conflict`. Each
+with no new outcome row; reusing it with a different payload in that cohort
+is rejected as `source_id_conflict`. Re-importing under a different policy
+hash appends a new row, preserving the prior policy's result. Each
 accepted row retains its policy version and hash. Reports select the latest
 compatible outcome per decision from the exact policy-hash cohort, so labels
 from changed policies or legacy unlabelled outcomes do not mix into metrics.

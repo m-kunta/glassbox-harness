@@ -98,6 +98,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 - [x] Calibrate the LLM judge against human labels and enforce agreement thresholds.
 - [x] Add policy-governed drift monitoring with immutable baselines, CLI audit snapshots, and a read-only local report.
+- [ ] Add explicit cost ingestion before enabling the optional `trace_cost_usd` drift signal; preserve null costs as missing observations.
+- [ ] Enable optional `trace_latency_ms` monitoring for an agent only after verifying trace cadence supports the 200-trace baseline and 100-trace recent sample floors; create a new policy-hash baseline.
 - [ ] Add counterfactual providers.
 - [ ] Add opt-in live decision-time shadow execution for approved counterfactual prompts, preserving fail-open production behaviour and bounded cost/latency.
 - [ ] Add Discord notification delivery for operational alerts.

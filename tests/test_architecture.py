@@ -8,6 +8,26 @@ import pytest
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+@pytest.mark.parametrize(
+    "contract",
+    [
+        "Provider input excludes the original recommendation and rationale",
+        "Persist capture references plus a rendered-input hash; "
+        "never persist capture content inline",
+        "A run with zero successful cases exits `2`",
+    ],
+)
+def test_counterfactual_plan_preserves_independent_input_and_audit_contracts(
+    contract: str,
+) -> None:
+    plan = (
+        PROJECT_ROOT
+        / "docs/superpowers/plans/2026-10-09-glassbox-p3-counterfactual-prompts.md"
+    ).read_text()
+
+    assert contract in plan
+
+
 def _events_import_violations(events_root: Path) -> list[str]:
     violations: list[str] = []
 
