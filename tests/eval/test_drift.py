@@ -381,13 +381,14 @@ def _seed_drift(
             trace_id = f"{index + 1:026X}"
             connection.execute(
                 "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
-                "status, environment, latency_ms, total_cost_usd) "
-                "VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev', ?, ?)",
+                "status, environment, latency_ms, total_cost_usd, ended_at) "
+                "VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev', ?, ?, ?)",
                 (
                     trace_id,
                     BASELINE_AT.isoformat().replace("+00:00", "Z"),
                     9.0 if index % 2 else 11.0,
                     0.9 if index % 2 else 1.1,
+                    BASELINE_AT.isoformat().replace("+00:00", "Z"),
                 ),
             )
         for index in range(baseline_decisions):
@@ -407,9 +408,10 @@ def _seed_drift(
             trace_id = f"{index + 2000:026X}"
             connection.execute(
                 "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
-                "status, environment, latency_ms, total_cost_usd) "
-                "VALUES (?, 'agent-a', 'v2', ?, 'ok', 'dev', 30.0, 4.0)",
-                (trace_id, recent_at.isoformat().replace("+00:00", "Z")),
+                "status, environment, latency_ms, total_cost_usd, ended_at) "
+                "VALUES (?, 'agent-a', 'v2', ?, 'ok', 'dev', 30.0, 4.0, ?)",
+                (trace_id, recent_at.isoformat().replace("+00:00", "Z"),
+                 recent_at.isoformat().replace("+00:00", "Z")),
             )
         for index in range(30):
             connection.execute(

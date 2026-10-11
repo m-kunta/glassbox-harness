@@ -10,6 +10,7 @@ import pytest
 
 from glassbox.events import TraceEvent
 from glassbox.store import Database
+from glassbox.store import database as database_module
 from glassbox.store.database import (
     ReadOnlyDatabaseError,
     TimestampMigrationError,
@@ -169,6 +170,151 @@ def _create_released_p3_database(path: Path, *, drift: bool) -> None:
         connection.executescript(
             (STORE_ROOT / "migrations" / "004_drift_monitoring.sql").read_text()
         )
+    connection.close()
+
+
+def test_schema_migration_failure_rolls_back_all_004_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "p3a-failure.sqlite3"
+    _create_released_p3_database(path, drift=False)
+    connection = sqlite3.connect(path)
+    before = database_module._glassbox_schema_sql(connection)
+    connection.close()
+    execute = database_module._execute_schema_statements
+
+    def fail_during_004(connection: sqlite3.Connection, schema_sql: str) -> None:
+        if "CREATE TABLE IF NOT EXISTS drift_baselines" in schema_sql:
+            execute(connection, schema_sql.split(";")[0])
+            raise RuntimeError("injected 004 failure")
+        execute(connection, schema_sql)
+
+    monkeypatch.setattr(database_module, "_execute_schema_statements", fail_during_004)
+    with pytest.raises(RuntimeError, match="injected 004 failure"):
+        Database.open(path)
+    connection = sqlite3.connect(path)
+    assert database_module._glassbox_schema_sql(connection) == before
+    connection.close()
+    monkeypatch.setattr(database_module, "_execute_schema_statements", execute)
+    Database.open(path).close()
+
+
+def test_concurrent_or_reentrant_005_upgrade_rechecks_fingerprint_after_lock(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p3b-reentrant.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    first = sqlite3.connect(path)
+    second = sqlite3.connect(path)
+    # Both dispatchers can observe the same old fingerprint before either acquires the lock.
+    assert database_module._glassbox_schema_sql(first) == database_module._glassbox_schema_sql(
+        second
+    )
+    _apply_outcome_reconciliation_migration(first)
+    upgraded = database_module._glassbox_schema_sql(first)
+    _apply_outcome_reconciliation_migration(second)
+    assert database_module._glassbox_schema_sql(second) == upgraded
+    first.close()
+    second.close()
+
+
+def test_outcome_v2_migration_rebuilds_source_identity_without_losing_v1_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p4.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    connection = sqlite3.connect(path)
+    _apply_outcome_reconciliation_migration(connection)
+    connection.execute(
+        "INSERT INTO outcomes (outcome_id, decision_id, outcome_type, observed_at, horizon_days, "
+        "value, label, source_id, reconciliation_policy_version, reconciliation_policy_hash) "
+        "VALUES (?, ?, 'stockout', ?, 30, 'true', 'fn', 'external-1', 'v1', ?)",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FBF", P2_DECISION_ID, P2_TIMESTAMP, "a" * 64),
+    )
+    connection.commit()
+    before = connection.execute("SELECT * FROM outcomes").fetchone()
+    connection.close()
+    with pytest.raises(ReadOnlyDatabaseError):
+        Database.open_read_only(path)
+    upgraded = Database.open(path)
+    assert tuple(upgraded.connection.execute("SELECT * FROM outcomes").fetchone()) == before
+    assert (
+        upgraded.connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='idx_outcomes_source_policy'"
+        ).fetchone()
+        is not None
+    )
+    assert upgraded.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    upgraded.close()
+    Database.open_read_only(path).close()
+
+
+def test_remediation_migration_preserves_drift_history_and_backfills_legacy_reason(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p4-drift-history.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    connection = sqlite3.connect(path)
+    _apply_outcome_reconciliation_migration(connection)
+    connection.execute(
+        "INSERT INTO drift_baselines (baseline_id, agent_name, policy_version, policy_hash, "
+        "baseline_start, baseline_end, created_at, version_counts_json, reference_json) "
+        "VALUES (?, 'agent', 'v1', ?, ?, ?, ?, '{}', '{}')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FE0", "a" * 64,
+         "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", P2_TIMESTAMP),
+    )
+    connection.execute(
+        "INSERT INTO drift_runs (drift_run_id, baseline_id, agent_name, policy_version, "
+        "policy_hash, as_of, recent_start, recent_end, status, status_reason, "
+        "version_counts_json, context_json) VALUES (?, ?, 'agent', 'v1', ?, ?, ?, ?, "
+        "'insufficient_data', 'recent_window_too_small', '{}', '{}')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FE1", "01ARZ3NDEKTSV4RRFFQ69G5FE0", "a" * 64,
+         P2_TIMESTAMP, "2026-09-02T00:00:00Z", P2_TIMESTAMP),
+    )
+    connection.execute(
+        "INSERT INTO drift_results (drift_result_id, drift_run_id, signal_name, population, "
+        "algorithm, status, baseline_count, recent_count, warning_threshold, alert_threshold, "
+        "details_json) VALUES (?, ?, 'confidence', 'decision', 'psi', "
+        "'insufficient_data', 100, 0, 0.1, 0.2, '{}')",
+        ("01ARZ3NDEKTSV4RRFFQ69G5FE2", "01ARZ3NDEKTSV4RRFFQ69G5FE1"),
+    )
+    connection.commit()
+    original_run = connection.execute("SELECT * FROM drift_runs").fetchone()
+    original_result = connection.execute("SELECT * FROM drift_results").fetchone()
+    connection.close()
+    upgraded = Database.open(path)
+    assert tuple(upgraded.connection.execute("SELECT * FROM drift_runs").fetchone()) == original_run
+    assert tuple(upgraded.connection.execute("SELECT * FROM drift_results").fetchone()) == (
+        *original_result, "legacy_reason_unavailable",
+    )
+    upgraded.close()
+
+
+def test_remediation_migration_failure_rolls_back_original_p4_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "p4-failure.sqlite3"
+    _create_released_p3_database(path, drift=True)
+    connection = sqlite3.connect(path)
+    _apply_outcome_reconciliation_migration(connection)
+    before = connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+    connection.close()
+    execute = database_module._execute_schema_statements
+
+    def fail_during_006(connection: sqlite3.Connection, schema_sql: str) -> None:
+        if "idx_outcomes_source_policy" in schema_sql:
+            execute(connection, schema_sql.split(";")[0])
+            raise RuntimeError("injected 006 failure")
+        execute(connection, schema_sql)
+
+    monkeypatch.setattr(database_module, "_execute_schema_statements", fail_during_006)
+    with pytest.raises(RuntimeError, match="injected 006 failure"):
+        Database.open(path)
+    connection = sqlite3.connect(path)
+    assert (
+        connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == before
+    )
     connection.close()
 
 

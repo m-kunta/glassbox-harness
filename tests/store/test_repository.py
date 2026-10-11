@@ -98,8 +98,8 @@ def test_drift_source_populations_and_agent_selection(drift_repository: Reposito
         trace_id = f"01ARZ3NDEKTSV4RRFFQ69G5FF{index}"
         connection.execute(
             "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
-            "status, environment, latency_ms) VALUES (?, ?, ?, ?, 'ok', 'dev', NULL)",
-            (trace_id, name, version, start),
+            "status, environment, latency_ms, ended_at) VALUES (?, ?, ?, ?, 'ok', 'dev', NULL, ?)",
+            (trace_id, name, version, start, start),
         )
         for number in range(3 if index == 0 else 1):
             connection.execute(
@@ -117,7 +117,7 @@ def test_drift_source_populations_and_agent_selection(drift_repository: Reposito
     assert len(source.baseline_decisions) == 3
     assert len(source.baseline_traces) == 1
     assert source.baseline_traces[0].decision_count == 3
-    assert source.baseline_traces[0].latency_ms is None
+    assert source.baseline_traces[0].latency_ms == 0.0
     assert source.baseline_traces[0].total_cost_usd is None
     assert len(source.recent_decisions) == len(source.recent_traces) == 1
     assert source.recent_traces[0].agent_version == "v2"
@@ -128,8 +128,8 @@ def test_drift_recent_source_uses_only_recent_bounds(drift_repository: Repositor
     for index, stamp in enumerate(("2026-09-01T00:00:00Z", "2026-09-08T00:00:00Z")):
         connection.execute(
             "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
-            "status, environment) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev')",
-            (f"01ARZ3NDEKTSV4RRFFQ69G5FJ{index}", stamp),
+            "status, environment, ended_at) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev', ?)",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FJ{index}", stamp, stamp),
         )
         connection.execute(
             "INSERT INTO decisions (decision_id, trace_id, agent_name, agent_version, "
@@ -271,8 +271,8 @@ def test_drift_source_bounds_use_timestamp_keys(drift_repository: Repository) ->
     ):
         connection.execute(
             "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, "
-            "status, environment) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev')",
-            (f"01ARZ3NDEKTSV4RRFFQ69G5FH{index}", stamp),
+            "status, environment, ended_at) VALUES (?, 'agent-a', 'v1', ?, 'ok', 'dev', ?)",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FH{index}", stamp, stamp),
         )
     connection.commit()
     lower = datetime(2026, 9, 1, 0, 0, 45, 100_000, tzinfo=UTC)
@@ -282,6 +282,61 @@ def test_drift_source_bounds_use_timestamp_keys(drift_repository: Repository) ->
     assert source.baseline_traces[0].started_at.microsecond == 123_000
     assert len(source.recent_traces) == 1
     assert source.recent_traces[0].started_at.microsecond == 123_456
+
+
+def test_drift_source_derives_completed_ok_trace_latency_with_microsecond_precision(
+    drift_repository: Repository,
+) -> None:
+    connection = drift_repository._connection
+    for index, (status, ended_at) in enumerate(
+        (
+            ("ok", "2026-10-10T00:00:00.123457Z"),
+            ("error", "2026-10-10T00:00:00.123457Z"),
+            ("ok", None),
+        )
+    ):
+        connection.execute(
+            "INSERT INTO traces (trace_id, agent_name, agent_version, started_at, ended_at, "
+            "status, environment) VALUES (?, 'agent-a', 'v1', ?, ?, ?, 'dev')",
+            (f"01ARZ3NDEKTSV4RRFFQ69G5FM{index}", "2026-10-10T00:00:00.000001Z", ended_at, status),
+        )
+    connection.commit()
+    start = datetime(2026, 10, 10, tzinfo=UTC)
+    source = drift_repository.drift_recent_source_data("agent-a", start, start + timedelta(days=1))
+    assert len(source.recent_traces) == 1
+    assert source.recent_traces[0].latency_ms == 123.456
+
+
+def test_drift_persistence_requires_exact_enabled_signal_set(drift_repository: Repository) -> None:
+    enabled = frozenset({"confidence", "decision_type"})
+    request = dataclasses.replace(
+        _drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"),
+        reference={name: {"count": 1} for name in enabled},
+    )
+    baseline = drift_repository.record_drift_baseline(request, enabled_signal_names=enabled)
+    run = drift_repository.record_drift_run(
+        _drift_run(baseline.baseline_id),
+        _drift_results()[:2],
+        enabled_signal_names=enabled,
+    )
+    assert run.baseline_id == baseline.baseline_id
+    assert (
+        drift_repository._connection.execute("SELECT count(*) FROM drift_results").fetchone()[0]
+        == 2
+    )
+    with pytest.raises(ValueError, match="signals"):
+        drift_repository.record_drift_baseline(
+            dataclasses.replace(request, baseline_id="01ARZ3NDEKTSV4RRFFQ69G5FE1"),
+            enabled_signal_names=frozenset({"confidence"}),
+        )
+    with pytest.raises(ValueError, match="signals"):
+        drift_repository.record_drift_run(
+            dataclasses.replace(
+                _drift_run(baseline.baseline_id), drift_run_id="01ARZ3NDEKTSV4RRFFQ69G5FE9"
+            ),
+            _drift_results()[:1],
+            enabled_signal_names=enabled,
+        )
 
 
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -588,31 +643,49 @@ def test_record_outcome_is_append_only_and_idempotent_for_identical_source_id(
 ) -> None:
     submission = _outcome_submission()
     first = outcome_repository.record_outcome(submission)
-    replay = outcome_repository.record_outcome(dataclasses.replace(
-        submission, outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
-        value={"units": 3, "occurred": True},
-    ))
+    replay = outcome_repository.record_outcome(
+        dataclasses.replace(
+            submission,
+            outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
+            value={"units": 3, "occurred": True},
+        )
+    )
     assert replay == first
-    second = outcome_repository.record_outcome(dataclasses.replace(
-        submission, outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE2", source_id="source-2", label="fp",
-    ))
+    second = outcome_repository.record_outcome(
+        dataclasses.replace(
+            submission,
+            outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE2",
+            source_id="source-2",
+            label="fp",
+        )
+    )
     assert first.label == "tp" and second.label == "fp"
     rows = outcome_repository._connection.execute("SELECT * FROM outcomes ORDER BY outcome_id")
     assert len(rows.fetchall()) == 2
-    assert outcome_repository._connection.execute(
-        "SELECT value FROM outcomes WHERE source_id = 'source-1'"
-    ).fetchone()[0] == '{"occurred":true,"units":3}'
+    assert (
+        outcome_repository._connection.execute(
+            "SELECT value FROM outcomes WHERE source_id = 'source-1'"
+        ).fetchone()[0]
+        == '{"occurred":true,"units":3}'
+    )
 
 
-@pytest.mark.parametrize("changes", [
-    {"decision_id": "01ARZ3NDEKTSV4RRFFQ69G5FE9"}, {"outcome_type": "sales"},
-    {"observed_at": TIMESTAMP + timedelta(microseconds=1)}, {"horizon_days": 15},
-    {"value": {"occurred": False}}, {"value": {"occurred": True, "units": 3.0}},
-    {"label": "fp"}, {"reconciliation_policy_version": "v2"},
-    {"reconciliation_policy_hash": "b" * 64},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"decision_id": "01ARZ3NDEKTSV4RRFFQ69G5FE9"},
+        {"outcome_type": "sales"},
+        {"observed_at": TIMESTAMP + timedelta(microseconds=1)},
+        {"horizon_days": 15},
+        {"value": {"occurred": False}},
+        {"value": {"occurred": True, "units": 3.0}},
+        {"label": "fp"},
+        {"reconciliation_policy_version": "v2"},
+    ],
+)
 def test_record_outcome_rejects_conflicting_source_id_without_writes(
-    outcome_repository: Repository, changes: dict[str, object],
+    outcome_repository: Repository,
+    changes: dict[str, object],
 ) -> None:
     submission = _outcome_submission()
     outcome_repository.record_outcome(submission)
@@ -624,18 +697,60 @@ def test_record_outcome_rejects_conflicting_source_id_without_writes(
     assert outcome_repository._connection.total_changes == total_changes
 
 
-@pytest.mark.parametrize("changes", [
-    {"source_id": ""}, {"source_id": 1}, {"outcome_id": ""}, {"decision_id": ""},
-    {"outcome_type": ""}, {"reconciliation_policy_version": ""},
-    {"reconciliation_policy_hash": "short"}, {"reconciliation_policy_hash": None},
-    {"observed_at": TIMESTAMP.replace(tzinfo=None)},
-    {"observed_at": TIMESTAMP.astimezone(timezone(timedelta(hours=1)))},
-    {"observed_at": "2026-08-22T14:30:45Z"},
-    {"horizon_days": -1}, {"horizon_days": True}, {"horizon_days": 1.5},
-    {"label": None}, {"label": "TP"}, {"value": object()}, {"value": float("nan")},
-])
+def test_outcome_source_id_can_be_reused_under_a_new_policy_hash(
+    outcome_repository: Repository,
+) -> None:
+    first = outcome_repository.record_outcome(_outcome_submission())
+    v2 = dataclasses.replace(
+        _outcome_submission(),
+        outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
+        reconciliation_policy_hash="b" * 64,
+        reconciliation_policy_version="v2",
+        label="tp",
+    )
+    second = outcome_repository.record_outcome(v2)
+    assert first.reconciliation_policy_hash != second.reconciliation_policy_hash
+    replay = outcome_repository.record_outcome(
+        dataclasses.replace(
+            v2,
+            outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE2",
+        )
+    )
+    assert replay == second
+    before = outcome_repository._connection.execute("SELECT * FROM outcomes").fetchall()
+    with pytest.raises(ValueError, match="source_id"):
+        outcome_repository.record_outcome(dataclasses.replace(v2, value={"occurred": False}))
+    assert outcome_repository._connection.execute("SELECT * FROM outcomes").fetchall() == before
+    assert len(before) == 2
+    assert not outcome_repository._connection.in_transaction
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source_id": ""},
+        {"source_id": 1},
+        {"outcome_id": ""},
+        {"decision_id": ""},
+        {"outcome_type": ""},
+        {"reconciliation_policy_version": ""},
+        {"reconciliation_policy_hash": "short"},
+        {"reconciliation_policy_hash": None},
+        {"observed_at": TIMESTAMP.replace(tzinfo=None)},
+        {"observed_at": TIMESTAMP.astimezone(timezone(timedelta(hours=1)))},
+        {"observed_at": "2026-08-22T14:30:45Z"},
+        {"horizon_days": -1},
+        {"horizon_days": True},
+        {"horizon_days": 1.5},
+        {"label": None},
+        {"label": "TP"},
+        {"value": object()},
+        {"value": float("nan")},
+    ],
+)
 def test_record_outcome_validates_before_sql(
-    outcome_repository: Repository, changes: dict[str, object],
+    outcome_repository: Repository,
+    changes: dict[str, object],
 ) -> None:
     queries: list[str] = []
     outcome_repository._connection.set_trace_callback(queries.append)

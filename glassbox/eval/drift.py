@@ -997,7 +997,11 @@ def create_baseline(
             },
             reference={signal.name: asdict(signal) for signal in material.signals},
         )
-        return repository.record_drift_baseline(request, supersede=supersede)
+        return repository.record_drift_baseline(
+            request,
+            supersede=supersede,
+            enabled_signal_names=frozenset(signal.name for signal in material.signals),
+        )
     finally:
         database.close()
 
@@ -1163,10 +1167,15 @@ def run_drift_report(
                     warning_threshold=signal.warning_threshold,
                     alert_threshold=signal.alert_threshold,
                     details=signal.details,
+                    status_reason=signal.reason,
                 )
                 for signal in report.signals
             )
-            repository.record_drift_run(run, results)
+            repository.record_drift_run(
+                run,
+                results,
+                enabled_signal_names=frozenset(signal.name for signal in report.signals),
+            )
         return report
     finally:
         database.close()

@@ -7,6 +7,7 @@ import math
 import secrets
 import sqlite3
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from threading import RLock
 from typing import Any, Literal, Mapping, TypeAlias, cast
@@ -402,6 +403,7 @@ class DriftResultInsert:
     warning_threshold: float
     alert_threshold: float
     details: Mapping[str, object]
+    status_reason: str | None = dataclass_field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -567,7 +569,7 @@ class Repository:
             return DecisionDetail(stored_decision, overrides)
 
     def record_outcome(self, submission: OutcomeSubmission) -> OutcomeRecord:
-        """Append one observation or return the original for an exact source replay.
+        """Append one observation or return its exact source-and-policy replay.
 
         The generated outcome_id is storage identity, so a replay may supply
         another ID. Every input/provenance field, including observed_at, must
@@ -595,7 +597,8 @@ class Repository:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 existing_row = self._connection.execute(
-                    "SELECT * FROM outcomes WHERE source_id = ?", (submission.source_id,)
+                    "SELECT * FROM outcomes WHERE source_id = ? AND reconciliation_policy_hash = ?",
+                    (submission.source_id, submission.reconciliation_policy_hash),
                 ).fetchone()
                 if existing_row is not None:
                     existing_payload = tuple(existing_row[field] for field in fields)
@@ -863,10 +866,11 @@ class Repository:
         def traces(start: str, end: str) -> tuple[DriftTraceSample, ...]:
             rows = self._connection.execute(
                 """SELECT t.agent_name, t.agent_version, t.latency_ms, t.total_cost_usd,
-                          t.started_at,
+                          t.started_at, t.ended_at,
                           (SELECT count(*) FROM decisions d WHERE d.trace_id = t.trace_id)
                           AS decision_count
                    FROM traces t WHERE t.agent_name = ?
+                   AND t.status = 'ok' AND t.ended_at IS NOT NULL
                    AND glassbox_timestamp_key(t.started_at) >= glassbox_timestamp_key(?)
                    AND glassbox_timestamp_key(t.started_at) < glassbox_timestamp_key(?)
                    ORDER BY glassbox_timestamp_key(t.started_at), t.trace_id""",
@@ -876,7 +880,13 @@ class Repository:
                 DriftTraceSample(
                     row["agent_name"],
                     row["agent_version"],
-                    row["latency_ms"],
+                    row["latency_ms"]
+                    if row["latency_ms"] is not None
+                    else (
+                        self._drift_datetime(row["ended_at"])
+                        - self._drift_datetime(row["started_at"])
+                    ).total_seconds()
+                    * 1_000,
                     row["total_cost_usd"],
                     self._drift_datetime(row["started_at"]),
                     row["decision_count"],
@@ -946,9 +956,10 @@ class Repository:
         request: DriftBaselineInsert,
         *,
         supersede: bool = False,
+        enabled_signal_names: frozenset[str] = _DRIFT_SIGNALS,
     ) -> DriftBaselineRecord:
         """Append an immutable baseline to an exact-policy linear history."""
-        self._validate_drift_baseline(request)
+        self._validate_drift_baseline(request, enabled_signal_names)
         counts_json = self._drift_json(request.version_counts)
         reference_json = self._drift_json(request.reference)
         with self._operation_lock:
@@ -990,9 +1001,11 @@ class Repository:
         self,
         run: DriftRunInsert,
         results: tuple[DriftResultInsert, ...],
+        *,
+        enabled_signal_names: frozenset[str] = _DRIFT_SIGNALS,
     ) -> DriftRunRecord:
-        """Append one run and exactly four signal results in one transaction."""
-        self._validate_drift_run(run, results)
+        """Append one run and its enabled signal results in one transaction."""
+        self._validate_drift_run(run, results, enabled_signal_names)
         counts_json = self._drift_json(run.version_counts)
         context_json = self._drift_json(run.context)
         details_json = tuple(self._drift_json(result.details) for result in results)
@@ -1036,8 +1049,9 @@ class Repository:
                         """INSERT INTO drift_results (
                             drift_result_id, drift_run_id, signal_name, population,
                             algorithm, status, baseline_count, recent_count,
-                            metric_value, warning_threshold, alert_threshold, details_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            metric_value, warning_threshold, alert_threshold, details_json,
+                            status_reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             result.drift_result_id,
                             run.drift_run_id,
@@ -1051,6 +1065,7 @@ class Repository:
                             result.warning_threshold,
                             result.alert_threshold,
                             details,
+                            result.status_reason,
                         ),
                     )
                 self._connection.execute("COMMIT")
@@ -1673,7 +1688,10 @@ class Repository:
         )
 
     @staticmethod
-    def _validate_drift_baseline(request: DriftBaselineInsert) -> None:
+    def _validate_drift_baseline(
+        request: DriftBaselineInsert,
+        enabled_signal_names: frozenset[str],
+    ) -> None:
         if not request.agent_name.strip() or not request.policy_version.strip():
             raise ValueError("drift baseline agent and policy version must be non-empty")
         if len(request.policy_hash) != 64:
@@ -1682,8 +1700,9 @@ class Repository:
             raise ValueError("drift baseline end must follow start")
         for value in (request.baseline_start, request.baseline_end, request.created_at):
             Repository._timestamp_text(value)
-        if set(request.reference) != _DRIFT_SIGNALS:
-            raise ValueError("drift baseline reference must include four signals")
+        Repository._validate_enabled_drift_signals(enabled_signal_names)
+        if set(request.reference) != enabled_signal_names:
+            raise ValueError("drift baseline reference must include the exact enabled signals")
         if not isinstance(request.version_counts, Mapping):
             raise ValueError("drift baseline version counts must be a mapping")
         for reference_value in request.reference.values():
@@ -1691,7 +1710,11 @@ class Repository:
                 raise ValueError("drift baseline signals must be mappings")
 
     @staticmethod
-    def _validate_drift_run(run: DriftRunInsert, results: tuple[DriftResultInsert, ...]) -> None:
+    def _validate_drift_run(
+        run: DriftRunInsert,
+        results: tuple[DriftResultInsert, ...],
+        enabled_signal_names: frozenset[str],
+    ) -> None:
         if (
             not run.agent_name.strip()
             or not run.policy_version.strip()
@@ -1704,11 +1727,17 @@ class Repository:
             Repository._timestamp_text(value)
         if run.status not in _DRIFT_STATUSES:
             raise ValueError("drift run status is invalid")
-        if len(results) != 4 or {result.signal_name for result in results} != _DRIFT_SIGNALS:
-            raise ValueError("drift run requires exactly four distinct signals")
+        Repository._validate_drift_status_reason(run.status, run.status_reason)
+        Repository._validate_enabled_drift_signals(enabled_signal_names)
+        if (
+            len(results) != len(enabled_signal_names)
+            or {result.signal_name for result in results} != enabled_signal_names
+        ):
+            raise ValueError("drift run requires exactly the enabled distinct signals")
         for result in results:
             if result.status not in _DRIFT_STATUSES:
                 raise ValueError("drift result status is invalid")
+            Repository._validate_drift_status_reason(result.status, result.status_reason)
             expected_population = (
                 "decision" if result.signal_name in {"confidence", "decision_type"} else "trace"
             )
@@ -1726,6 +1755,19 @@ class Repository:
                     raise ValueError("drift result metric and thresholds must be finite")
             if result.warning_threshold <= 0 or result.alert_threshold <= result.warning_threshold:
                 raise ValueError("drift result thresholds are invalid")
+
+    @staticmethod
+    def _validate_enabled_drift_signals(names: frozenset[str]) -> None:
+        if not names or not names <= _DRIFT_SIGNALS:
+            raise ValueError("enabled drift signals must be a non-empty supported set")
+
+    @staticmethod
+    def _validate_drift_status_reason(status: str, reason: str | None) -> None:
+        if status == "insufficient_data":
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("insufficient drift status requires a non-empty reason")
+        elif reason is not None:
+            raise ValueError("sufficient drift status must not carry a reason")
 
     @staticmethod
     def _timestamp_text(value: datetime) -> str:

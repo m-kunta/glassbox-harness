@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from glassbox.store import Database
 from glassbox.store.database import TimestampMigrationError
+from glassbox.store.repository import (
+    DriftBaselineInsert,
+    DriftResultInsert,
+    DriftRunInsert,
+    Repository,
+)
 
 STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
 
@@ -486,9 +493,12 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     outcome_migration = (STORE_ROOT / "migrations" / "005_outcome_reconciliation.sql").read_text(
         encoding="utf-8"
     )
+    remediation_migration = (STORE_ROOT / "migrations" / "006_p3_p4_remediation.sql").read_text(
+        encoding="utf-8"
+    )
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
-        f"\n{outcome_migration}"
+        f"\n{outcome_migration}\n{remediation_migration}"
     )
 
 
@@ -529,6 +539,102 @@ def test_outcome_source_ids_are_unique_but_legacy_nulls_are_allowed(tmp_path: Pa
     values["outcome_id"] = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
     with pytest.raises(sqlite3.IntegrityError, match="source_id"):
         _insert_row(database.connection, "outcomes", values)
+    database.close()
+
+
+def _seed_drift(database: Database) -> tuple[str, str]:
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    baseline_id = "01ARZ3NDEKTSV4RRFFQ69G5FD0"
+    run_id = "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+    names = ("confidence", "decision_type", "trace_latency_ms", "trace_cost_usd")
+    repository = Repository(database)
+    repository.record_drift_baseline(
+        DriftBaselineInsert(
+            baseline_id,
+            "agent",
+            "v1",
+            "a" * 64,
+            start,
+            start + timedelta(days=1),
+            start + timedelta(days=2),
+            {},
+            {name: {} for name in names},
+        )
+    )
+    repository.record_drift_run(
+        DriftRunInsert(
+            run_id,
+            baseline_id,
+            "agent",
+            "v1",
+            "a" * 64,
+            start + timedelta(days=2),
+            start + timedelta(days=1),
+            start + timedelta(days=2),
+            "healthy",
+            None,
+            {},
+            {},
+        ),
+        tuple(
+            DriftResultInsert(
+                f"01ARZ3NDEKTSV4RRFFQ69G5FD{index + 2}",
+                name,
+                "decision" if index < 2 else "trace",
+                "psi" if index < 2 else "cusum",
+                "healthy",
+                1,
+                1,
+                0.0,
+                0.1,
+                0.2,
+                {},
+            )
+            for index, name in enumerate(names)
+        ),
+    )
+    return baseline_id, run_id
+
+
+@pytest.mark.parametrize("table", ["drift_runs", "drift_results"])
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("insufficient_data", None),
+        ("insufficient_data", ""),
+        ("insufficient_data", "   "),
+        ("healthy", "unexpected"),
+        ("watch", "unexpected"),
+        ("drift_detected", "unexpected"),
+    ],
+)
+def test_drift_schema_rejects_incoherent_status_reason(
+    tmp_path: Path,
+    table: str,
+    status: str,
+    reason: str | None,
+) -> None:
+    database = Database.open(tmp_path / "drift-reason.sqlite3")
+    _seed_drift(database)
+    with pytest.raises(sqlite3.IntegrityError):
+        database.connection.execute(
+            f"UPDATE {table} SET status = ?, status_reason = ?",
+            (status, reason),
+        )
+    database.close()
+
+
+def test_drift_schema_rejects_branching_baseline_supersession(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "drift-branch.sqlite3")
+    baseline_id, _ = _seed_drift(database)
+    query = (
+        "INSERT INTO drift_baselines SELECT ?, agent_name, policy_version, policy_hash, "
+        "baseline_start, baseline_end, created_at, version_counts_json, reference_json, ? "
+        "FROM drift_baselines WHERE baseline_id = ?"
+    )
+    database.connection.execute(query, ("01ARZ3NDEKTSV4RRFFQ69G5FDA", baseline_id, baseline_id))
+    with pytest.raises(sqlite3.IntegrityError):
+        database.connection.execute(query, ("01ARZ3NDEKTSV4RRFFQ69G5FDB", baseline_id, baseline_id))
     database.close()
 
 
