@@ -33,6 +33,17 @@ def test_counterfactual_plan_preserves_independent_input_and_audit_contracts(
     assert contract in plan
 
 
+def test_readme_distinguishes_explicit_reconciliation_v2_from_the_legacy_default() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+    outcomes_section = readme.split("## Import and reconcile deferred outcomes", 1)[1].split(
+        "\n## ", 1
+    )[0]
+
+    assert "reconciliation_v1 remains the default for legacy compatibility" in outcomes_section
+    assert "--policy glassbox/eval/policies/reconciliation_v2.toml" in outcomes_section
+    assert "The explicitly selected v2" in outcomes_section
+
+
 def _events_import_violations(events_root: Path) -> list[str]:
     violations: list[str] = []
 

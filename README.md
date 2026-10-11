@@ -244,7 +244,7 @@ context for batch-size changes.
 ## Import and reconcile deferred outcomes
 
 Import observed outcomes from JSONL, then print a read-only reconciliation
-report for the same database:
+report for the same database. Select reconciliation v2 explicitly for both commands:
 
 ```shell
 glassbox outcomes import \
@@ -255,20 +255,23 @@ glassbox outcomes report --policy glassbox/eval/policies/reconciliation_v2.toml
 ```
 
 Both commands use `GLASSBOX_DATABASE` or `glassbox.sqlite3` by default. Select
-another database with `glassbox --database PATH outcomes ...`. The checked-in
-policy is
-[`glassbox/eval/policies/reconciliation_v2.toml`](glassbox/eval/policies/reconciliation_v2.toml);
-both subcommands accept `--policy PATH` for a different versioned policy.
+another database with `glassbox --database PATH outcomes ...`.
+reconciliation_v1 remains the default for legacy compatibility:
+[`glassbox/eval/policies/reconciliation_v1.toml`](glassbox/eval/policies/reconciliation_v1.toml).
+The urgency rule described below requires explicit
+`--policy glassbox/eval/policies/reconciliation_v2.toml` on both subcommands;
+omitting it selects the legacy v1 action-matching rule. Both checked-in policies
+remain available as versioned artifacts.
 
 Each nonblank input line must explicitly identify a persisted decision by its
 `decision_id`; Glassbox does not infer a match from a SKU or another business
-key. For the checked-in replenishment policy, a row looks like:
+key. For the explicitly selected v2 replenishment policy, a row looks like:
 
 ```json
 {"source_id":"warehouse-stockout-001","decision_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","outcome_type":"stockout_occurred","observed_at":"2026-10-05T12:00:00Z","horizon_days":30,"value":{"occurred":true}}
 ```
 
-Use the actual decision ULID and a UTC observation timestamp. The default
+Use the actual decision ULID and a UTC observation timestamp. The explicitly selected v2
 policy matches agent `replenishment-triage`, decision type `triage`, and outcome
 type `stockout_occurred`: recommendation `/urgency` values `CRITICAL` and
 `HIGH` predict a positive outcome, and `value.occurred=true` is a realized positive. Glassbox
