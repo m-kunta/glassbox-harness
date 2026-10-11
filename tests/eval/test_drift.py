@@ -2,17 +2,21 @@
 
 import json
 import math
+import random
 from collections.abc import Iterator, Sequence
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from statistics import mean, stdev
 
 import pytest
 
 from glassbox.eval.drift import (
     DecisionSample,
+    DriftPolicy,
     DriftPolicyError,
     TraceSample,
+    _material_from_record,
     _status,
     calculate_baseline,
     calculate_report,
@@ -22,11 +26,285 @@ from glassbox.eval.drift import (
     run_drift_report,
 )
 from glassbox.store import Database, Repository
+from glassbox.store.repository import DriftBaselineRecord
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "glassbox/eval/policies/drift_v1.toml"
 BASELINE_AT = datetime(2026, 2, 1, tzinfo=UTC)
 RECENT_AT = datetime(2026, 7, 30, tzinfo=UTC)
 AS_OF = datetime(2026, 8, 1, tzinfo=UTC)
+BASELINE_START = datetime(2026, 1, 1, tzinfo=UTC)
+BASELINE_END = datetime(2026, 6, 1, tzinfo=UTC)
+V2_POLICY_TEXT = """policy_version = "drift_v2"
+recent_duration = "7d"
+
+[confidence]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 500
+minimum_recent_samples = 200
+bin_boundaries = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+smoothing = 0.5
+warning_threshold = 0.10
+alert_threshold = 0.16
+
+[decision_type]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 500
+minimum_recent_samples = 200
+smoothing = 0.5
+warning_threshold = 0.10
+alert_threshold = 0.16
+"""
+LATENCY_POLICY_TEXT = """policy_version = "drift_v2"
+recent_duration = "7d"
+
+[trace_latency_ms]
+population = "trace"
+algorithm = "cusum"
+minimum_baseline_samples = 200
+minimum_recent_samples = 100
+transform = "log1p"
+evaluation_samples = 100
+reference_value = 0.5
+warning_threshold = 5.2
+alert_threshold = 7.0
+"""
+
+
+def _policy_text(tmp_path: Path, text: str) -> DriftPolicy:
+    path = tmp_path / "policy.toml"
+    path.write_text(text, encoding="utf-8")
+    return load_policy(path)
+
+
+@pytest.fixture
+def v2_policy(tmp_path: Path) -> DriftPolicy:
+    return _policy_text(tmp_path, V2_POLICY_TEXT)
+
+
+@pytest.fixture
+def latency_policy(tmp_path: Path) -> DriftPolicy:
+    return _policy_text(tmp_path, LATENCY_POLICY_TEXT)
+
+
+def test_two_signal_policy_allows_missing_known_signals(v2_policy: DriftPolicy) -> None:
+    assert tuple(signal.name for signal in v2_policy.signals) == ("confidence", "decision_type")
+    assert v2_policy.signal("confidence").smoothing == 0.5
+    assert v2_policy.signal("confidence").transform == "none"
+    assert v2_policy.signal("confidence").evaluation_samples is None
+    assert not hasattr(v2_policy, "baseline_start")
+    with pytest.raises(KeyError):
+        v2_policy.signal("trace_latency_ms")
+
+
+@pytest.mark.parametrize("names", [(), ("confidence", "confidence")])
+def test_policy_constructor_rejects_empty_or_duplicate_signals(
+    v2_policy: DriftPolicy, names: tuple[str, ...]
+) -> None:
+    with pytest.raises(DriftPolicyError):
+        replace(v2_policy, signals=tuple(v2_policy.signal(name) for name in names))
+
+
+def test_checked_in_v2_policy_matches_calibrated_fixture(v2_policy: DriftPolicy) -> None:
+    assert load_policy(POLICY_PATH.with_name("drift_v2.toml")) == v2_policy
+
+
+def test_v2_baseline_creation_requires_explicit_windows(
+    tmp_path: Path, v2_policy: DriftPolicy
+) -> None:
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    with pytest.raises(DriftPolicyError, match="baseline_start and baseline_end are required"):
+        create_baseline(path, "agent-a", v2_policy, supersede=False, clock=lambda: AS_OF)
+
+
+@pytest.mark.parametrize("trace_only", [False, True])
+def test_stored_optional_signal_material_reconstructs_only_enabled_signals(
+    v2_policy: DriftPolicy, latency_policy: DriftPolicy, trace_only: bool
+) -> None:
+    policy = latency_policy if trace_only else v2_policy
+    decision_samples = () if trace_only else decisions(0.5, "review", 500)
+    trace_samples = traces(10.0, 1.0, 200) if trace_only else ()
+    baseline = _baseline_v2(policy, decision_samples, trace_samples)
+    record = DriftBaselineRecord(
+        baseline_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        agent_name="a",
+        policy_version=policy.policy_version,
+        policy_hash=policy.policy_hash,
+        baseline_start=BASELINE_START,
+        baseline_end=BASELINE_END,
+        created_at=AS_OF,
+        version_counts={
+            "versions": {"v1": {"decisions": len(decision_samples), "traces": len(trace_samples)}},
+            "decisions_per_trace": baseline.decisions_per_trace,
+        },
+        reference=json.loads(
+            json.dumps({signal.name: asdict(signal) for signal in baseline.signals})
+        ),
+        supersedes_baseline_id=None,
+    )
+    restored = _material_from_record(record, policy)
+    assert restored.signals == baseline.signals
+    assert restored.decisions_per_trace == baseline.decisions_per_trace
+    extra = dict(record.reference)
+    extra["trace_cost_usd"] = {}
+    with pytest.raises(DriftPolicyError, match="invalid reference"):
+        _material_from_record(replace(record, reference=extra), policy)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'policy_version = "drift_v2"\nrecent_duration = "7d"\n',
+        V2_POLICY_TEXT.replace("[decision_type]", "[unknown_signal]"),
+        V2_POLICY_TEXT.replace('recent_duration = "7d"', 'baseline_start = "2026-01-01"'),
+        V2_POLICY_TEXT.replace("smoothing = 0.5", 'transform = "log1p"\nsmoothing = 0.5'),
+        V2_POLICY_TEXT.replace("smoothing = 0.5", "evaluation_samples = 100\nsmoothing = 0.5"),
+        LATENCY_POLICY_TEXT.replace('transform = "log1p"\n', ""),
+        LATENCY_POLICY_TEXT.replace("evaluation_samples = 100\n", ""),
+        LATENCY_POLICY_TEXT.replace("evaluation_samples = 100", "evaluation_samples = 0"),
+        LATENCY_POLICY_TEXT.replace('transform = "log1p"', 'transform = "sqrt"'),
+    ],
+)
+def test_v2_policy_rejects_empty_unknown_or_invalid_signal_fields(
+    tmp_path: Path, text: str
+) -> None:
+    with pytest.raises(DriftPolicyError):
+        _policy_text(tmp_path, text)
+
+
+def _baseline_v2(policy: DriftPolicy, samples=(), trace_samples=()):  # type: ignore[no-untyped-def]
+    return calculate_baseline(
+        policy, samples, trace_samples, baseline_start=BASELINE_START, baseline_end=BASELINE_END
+    )
+
+
+def test_latency_uses_the_100_most_recent_valid_samples_after_log_transform(
+    latency_policy: DriftPolicy,
+) -> None:
+    raw_baseline = [math.expm1(2.0 + i % 2) for i in range(200)]
+    baseline_traces = tuple(
+        TraceSample("a", "v1", value, None, BASELINE_AT, 1) for value in raw_baseline
+    )
+    baseline = _baseline_v2(latency_policy, trace_samples=baseline_traces)
+    old = baseline.signal("trace_latency_ms")
+    assert old.mean == pytest.approx(mean(math.log1p(value) for value in raw_baseline))
+    assert old.standard_deviation == pytest.approx(
+        stdev(math.log1p(value) for value in raw_baseline)
+    )
+    ordered = tuple(
+        TraceSample(
+            "a", "v2", 1_000_000.0 if i == 0 else 10.0, None, RECENT_AT + timedelta(seconds=i), 1
+        )
+        for i in range(101)
+    )
+    missing = TraceSample("a", "v2", None, None, RECENT_AT + timedelta(seconds=200), 1)
+    report = calculate_report(latency_policy, baseline, (), (missing, *reversed(ordered)), AS_OF)
+    signal = report.signal("trace_latency_ms")
+    assert signal.recent_count == 101
+    assert signal.details["evaluation_count"] == 100
+    assert signal.details["recent_values"] == pytest.approx([math.log1p(10.0)] * 100)
+    assert len(signal.details["cusum_path"]) == 100
+    assert signal.details["recent_mean"] == pytest.approx(mean([1_000_000.0] + [10.0] * 100))
+    assert signal.details["recent_median"] == 10.0
+    assert signal.details["cusum_peak"] == signal.value
+    assert "cusum_final_positive" in signal.details
+    assert "cusum_final_negative" in signal.details
+
+
+def test_zero_variance_baseline_has_no_variance_reason(latency_policy: DriftPolicy) -> None:
+    baseline = _baseline_v2(latency_policy, trace_samples=traces(10.0, 1.0, 200))
+    report = calculate_report(
+        latency_policy, baseline, (), traces(30.0, 4.0, 100, recent=True), AS_OF
+    )
+    assert report.signal("trace_latency_ms").reason == "baseline_has_no_variance"
+    assert (report.status, report.reason) == ("insufficient_data", "baseline_has_no_variance")
+
+
+def test_disabled_known_signals_are_absent_from_persistable_report_rows(
+    v2_policy: DriftPolicy,
+) -> None:
+    baseline = _baseline_v2(v2_policy, decisions(0.5, "review", 500))
+    report = calculate_report(v2_policy, baseline, decisions(0.5, "review", 200), (), AS_OF)
+    assert [signal.name for signal in baseline.signals] == ["confidence", "decision_type"]
+    assert [signal.to_dict()["name"] for signal in report.signals] == [
+        "confidence",
+        "decision_type",
+    ]
+    assert set(report.to_dict()["signals"]) == {"confidence", "decision_type"}
+    assert report.status == "healthy"
+
+
+def test_decision_type_keeps_top_nine_categories_with_stable_ties(v2_policy: DriftPolicy) -> None:
+    samples = tuple(
+        DecisionSample("a", "v1", 0.5, name, BASELINE_AT)
+        for name, count in [("large", 100), ("other", 80)]
+        + [(f"kind-{i:02d}", 40) for i in range(10)]
+        for _ in range(count)
+    )
+    baseline = _baseline_v2(v2_policy, samples)
+    signal = baseline.signal("decision_type")
+    assert signal.labels == ("large", *(f"kind-{i:02d}" for i in range(8)), "other")
+    assert signal.counts == (100, *([40] * 8), 160)
+    report = calculate_report(
+        v2_policy, baseline, decisions(0.5, "kind-09", 200, recent=True), (), AS_OF
+    )
+    assert report.signal("decision_type").details["recent_counts"] == [0] * 9 + [200]
+
+
+def test_v2_stationary_alert_rates_are_at_most_five_percent(
+    v2_policy: DriftPolicy,
+    latency_policy: DriftPolicy,
+) -> None:
+    rng = random.Random(20261010)
+    alerts = {"confidence": 0, "decision_type": 0, "trace_latency_ms": 0}
+    for _ in range(1_000):
+        baseline_decisions = tuple(
+            DecisionSample("a", "v1", rng.random(), f"kind-{rng.randrange(10)}", BASELINE_AT)
+            for _ in range(500)
+        )
+        recent_decisions = tuple(
+            DecisionSample("a", "v2", rng.random(), f"kind-{rng.randrange(10)}", RECENT_AT)
+            for _ in range(200)
+        )
+        baseline = _baseline_v2(v2_policy, baseline_decisions)
+        report = calculate_report(v2_policy, baseline, recent_decisions, (), AS_OF)
+        for signal in report.signals:
+            alerts[signal.name] += signal.status == "drift_detected"
+        baseline_traces = tuple(
+            TraceSample("a", "v1", rng.lognormvariate(4.0, 0.5), None, BASELINE_AT, 1)
+            for _ in range(200)
+        )
+        recent_traces = tuple(
+            TraceSample(
+                "a", "v2", rng.lognormvariate(4.0, 0.5), None, RECENT_AT + timedelta(seconds=i), 1
+            )
+            for i in range(100)
+        )
+        baseline = _baseline_v2(latency_policy, trace_samples=baseline_traces)
+        report = calculate_report(latency_policy, baseline, (), recent_traces, AS_OF)
+        alerts["trace_latency_ms"] += report.status == "drift_detected"
+    assert all(count / 1_000 <= 0.05 for count in alerts.values()), alerts
+
+
+def test_v2_shifted_distributions_still_detect_drift(
+    v2_policy: DriftPolicy,
+    latency_policy: DriftPolicy,
+) -> None:
+    baseline = _baseline_v2(v2_policy, decisions(0.1, "review", 500))
+    report = calculate_report(
+        v2_policy, baseline, decisions(0.9, "order", 200, recent=True), (), AS_OF
+    )
+    assert all(signal.status == "drift_detected" for signal in report.signals)
+    varied = tuple(
+        TraceSample("a", "v1", 40.0 if i % 2 else 60.0, None, BASELINE_AT, 1) for i in range(200)
+    )
+    baseline = _baseline_v2(latency_policy, trace_samples=varied)
+    report = calculate_report(
+        latency_policy, baseline, (), traces(300.0, 1.0, 100, recent=True), AS_OF
+    )
+    assert report.status == "drift_detected"
 
 
 def _seed_drift(
@@ -264,7 +542,7 @@ def test_policy_rejects_invalid_input(tmp_path: Path, old: str, new: str) -> Non
 
 
 def test_confidence_and_decision_type_psi_detect_shift_without_mutating_baseline(policy) -> None:  # type: ignore[no-untyped-def]
-    baseline = calculate_baseline(policy, decisions(0.05, "review", 100), ())
+    baseline = _baseline_v2(policy, decisions(0.05, "review", 100), ())
     before = repr(baseline)
     recent = decisions(0.95, "order", 30, recent=True)
     report = calculate_report(policy, baseline, recent, (), AS_OF)
@@ -279,14 +557,14 @@ def test_confidence_bins_include_lower_edges_and_one(policy) -> None:  # type: i
         DecisionSample("a", "v1", 0.1, "review", BASELINE_AT),
         DecisionSample("a", "v1", 1.0, "review", BASELINE_AT),
     )
-    baseline = calculate_baseline(policy, samples, ())
+    baseline = _baseline_v2(policy, samples, ())
     assert baseline.signal("confidence").counts == (1, 1, 0, 0, 0, 0, 0, 0, 0, 1)
     assert baseline.signal("confidence").labels[0] == "[0.0, 0.1)"
     assert baseline.signal("confidence").labels[-1] == "[0.9, 1.0]"
 
 
 def test_decision_type_uses_other_with_smoothing_for_absent_categories(policy) -> None:  # type: ignore[no-untyped-def]
-    baseline = calculate_baseline(policy, decisions(0.5, "review", 100), ())
+    baseline = _baseline_v2(policy, decisions(0.5, "review", 100), ())
     report = calculate_report(
         policy, baseline, decisions(0.5, "new_kind", 30, recent=True), (), AS_OF
     )
@@ -301,7 +579,7 @@ def test_cusum_detects_positive_and_negative_trace_shifts(policy) -> None:  # ty
         TraceSample("a", "v1", 9.0 if i % 2 else 11.0, 0.9 if i % 2 else 1.1, BASELINE_AT, 1)
         for i in range(50)
     )
-    baseline = calculate_baseline(policy, (), baseline_samples)
+    baseline = _baseline_v2(policy, (), baseline_samples)
     high = traces(30.0, 4.0, 20, recent=True)
     low = traces(1.0, 0.1, 20, recent=True)
     assert (
@@ -315,12 +593,12 @@ def test_cusum_detects_positive_and_negative_trace_shifts(policy) -> None:  # ty
 
 
 def test_zero_cusum_variance_is_insufficient_baseline(policy) -> None:  # type: ignore[no-untyped-def]
-    baseline = calculate_baseline(policy, (), traces(10.0, 1.0, 50))
+    baseline = _baseline_v2(policy, (), traces(10.0, 1.0, 50))
     report = calculate_report(policy, baseline, (), traces(30.0, 4.0, 20, recent=True), AS_OF)
     assert report.signal("trace_latency_ms").status == "insufficient_data"
-    assert report.signal("trace_latency_ms").reason == "baseline_window_too_small"
+    assert report.signal("trace_latency_ms").reason == "baseline_has_no_variance"
     assert report.status == "insufficient_data"
-    assert report.reason == "baseline_window_too_small"
+    assert report.reason == "baseline_window_too_small"  # enabled v1 decision samples are absent
 
 
 @pytest.mark.parametrize(
@@ -340,7 +618,7 @@ def test_insufficient_data_aggregation_precedence(
         TraceSample("a", "v1", 9.0 if i % 2 else 11.0, 0.9 if i % 2 else 1.1, BASELINE_AT, 1)
         for i in range(baseline_traces)
     )
-    baseline = calculate_baseline(
+    baseline = _baseline_v2(
         policy, decisions(0.5, "review", baseline_decisions), varied_baseline_traces
     )
     report = calculate_report(
@@ -365,7 +643,7 @@ def test_threshold_boundaries_and_watch(tmp_path: Path) -> None:
         TraceSample("a", "v1", 9.0 if i % 2 else 11.0, 0.9 if i % 2 else 1.1, BASELINE_AT, 1)
         for i in range(50)
     )
-    baseline = calculate_baseline(policy, decisions(0.5, "review", 100), varied)
+    baseline = _baseline_v2(policy, decisions(0.5, "review", 100), varied)
     same = calculate_report(
         policy,
         baseline,
@@ -388,7 +666,7 @@ def test_exact_warning_and_alert_boundaries(policy) -> None:  # type: ignore[no-
 
 
 def test_diagnostics_are_immutable_and_json_safe(policy) -> None:  # type: ignore[no-untyped-def]
-    baseline = calculate_baseline(policy, decisions(0.5, "review", 100), traces(10.0, 1.0, 50))
+    baseline = _baseline_v2(policy, decisions(0.5, "review", 100), traces(10.0, 1.0, 50))
     report = calculate_report(
         policy,
         baseline,
@@ -416,7 +694,7 @@ def test_large_finite_smoothing_keeps_psi_and_json_finite(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     policy = load_policy(path)
-    baseline = calculate_baseline(policy, decisions(0.5, "known", 100), ())
+    baseline = _baseline_v2(policy, decisions(0.5, "known", 100), ())
     report = calculate_report(
         policy, baseline, decisions(0.5, "unknown", 30, recent=True), (), AS_OF
     )
@@ -430,7 +708,7 @@ def test_nonfinite_cusum_metric_is_rejected_before_serialization(policy) -> None
         TraceSample("a", "v1", 0.0 if i % 2 else 2e-100, 0.9 if i % 2 else 1.1, BASELINE_AT, 1)
         for i in range(50)
     )
-    baseline = calculate_baseline(policy, (), baseline_traces)
+    baseline = _baseline_v2(policy, (), baseline_traces)
     with pytest.raises(ValueError, match="non-finite"):
         calculate_report(policy, baseline, (), traces(1e308, 1.0, 20, recent=True), AS_OF)
 
@@ -467,7 +745,7 @@ def test_decision_categories_count_recent_samples_once(policy) -> None:  # type:
         DecisionSample("a", "v1", 0.5, f"kind-{i % 8}", BASELINE_AT) for i in range(100)
     )
     recent = CountedSequence(decisions(0.5, "unseen", 30, recent=True))
-    baseline = calculate_baseline(policy, baseline_decisions, ())
+    baseline = _baseline_v2(policy, baseline_decisions, ())
     report = calculate_report(policy, baseline, recent, (), AS_OF)
     assert report.signal("decision_type").details["recent_counts"] == [0] * 8 + [30]
     assert recent.iterations <= 3  # confidence, decision type, and version diagnostics

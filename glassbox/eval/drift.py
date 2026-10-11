@@ -12,7 +12,7 @@ from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean, median, stdev
 from typing import Callable, Literal, Mapping, Sequence, TypeAlias, cast
 
 from glassbox.store import Database, Repository
@@ -32,6 +32,7 @@ InsufficientReason: TypeAlias = Literal[
     "policy_changed_requires_rebaseline",
     "baseline_window_too_small",
     "recent_window_too_small",
+    "baseline_has_no_variance",
 ]
 SIGNAL_NAMES: tuple[SignalName, ...] = (
     "confidence",
@@ -68,22 +69,35 @@ class SignalPolicy:
     bin_boundaries: tuple[float, ...] = ()
     smoothing: float | None = None
     reference_value: float | None = None
+    transform: Literal["none", "log1p"] = "none"
+    evaluation_samples: int | None = None
 
 
 @dataclass(frozen=True)
 class DriftPolicy:
     policy_version: str
-    baseline_start: datetime
-    baseline_end: datetime
     recent_duration: timedelta
     signals: tuple[SignalPolicy, ...]
     policy_hash: str
+
+    def __post_init__(self) -> None:
+        names = tuple(signal.name for signal in self.signals)
+        if not names or len(set(names)) != len(names) or not set(names) <= set(SIGNAL_NAMES):
+            raise DriftPolicyError("policy signals must be a nonempty distinct known subset")
 
     def signal(self, name: SignalName) -> SignalPolicy:
         for signal in self.signals:
             if signal.name == name:
                 return signal
         raise KeyError(name)
+
+
+@dataclass(frozen=True)
+class _LegacyDriftPolicy(DriftPolicy):
+    """Retain the historical v1 window solely for existing orchestration callers."""
+
+    baseline_start: datetime
+    baseline_end: datetime
 
 
 @dataclass(frozen=True)
@@ -170,8 +184,8 @@ class DriftReport:
     status: DriftStatus
     reason: InsufficientReason | None
     as_of: datetime
-    baseline_start: datetime
-    baseline_end: datetime
+    baseline_start: datetime | None
+    baseline_end: datetime | None
     recent_start: datetime
     recent_end: datetime
     policy_version: str
@@ -196,8 +210,8 @@ class DriftReport:
             "reason": self.reason,
             "as_of": self.as_of.isoformat(),
             "baseline_window": {
-                "start": self.baseline_start.isoformat(),
-                "end": self.baseline_end.isoformat(),
+                "start": self.baseline_start.isoformat() if self.baseline_start else None,
+                "end": self.baseline_end.isoformat() if self.baseline_end else None,
             },
             "recent_window": {
                 "start": self.recent_start.isoformat(),
@@ -258,18 +272,26 @@ def load_policy(path: Path) -> DriftPolicy:
         mapping = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise DriftPolicyError(f"cannot read drift policy: {exc}") from exc
-    _keys(
-        mapping,
-        {"policy_version", "baseline_start", "baseline_end", "recent_duration", *SIGNAL_NAMES},
-        "policy",
-    )
+    legacy = mapping.get("policy_version") == "drift_v1"
+    if legacy:
+        _keys(
+            mapping,
+            {"policy_version", "baseline_start", "baseline_end", "recent_duration", *SIGNAL_NAMES},
+            "policy",
+        )
+    else:
+        required = {"policy_version", "recent_duration"}
+        enabled = set(mapping) - required
+        if not required <= set(mapping) or not enabled or not enabled <= set(SIGNAL_NAMES):
+            raise DriftPolicyError("policy requires metadata and at least one known signal table")
     version = mapping["policy_version"]
     if not isinstance(version, str) or not version.strip():
         raise DriftPolicyError("policy_version must be nonempty")
-    start = _timestamp(mapping["baseline_start"], "baseline_start")
-    end = _timestamp(mapping["baseline_end"], "baseline_end")
-    if end <= start:
-        raise DriftPolicyError("baseline_end must be after baseline_start")
+    if legacy:
+        start = _timestamp(mapping["baseline_start"], "baseline_start")
+        end = _timestamp(mapping["baseline_end"], "baseline_end")
+        if end <= start:
+            raise DriftPolicyError("baseline_end must be after baseline_start")
     duration_text = mapping["recent_duration"]
     if not isinstance(duration_text, str) or not re.fullmatch(r"[1-9]\d*d", duration_text):
         raise DriftPolicyError("recent_duration must be positive whole days, e.g. 7d")
@@ -279,16 +301,20 @@ def load_policy(path: Path) -> DriftPolicy:
         raise DriftPolicyError("recent_duration is too large") from exc
     signals: list[SignalPolicy] = []
     for name in SIGNAL_NAMES:
+        if name not in mapping:
+            continue
         raw = mapping[name]
         if not isinstance(raw, dict):
             raise DriftPolicyError(f"{name} must be a table")
         extras = (
-            {"bin_boundaries"}
+            {"bin_boundaries"} | (set() if legacy else {"smoothing"})
             if name == "confidence"
             else {"smoothing"}
             if name == "decision_type"
-            else {"reference_value"}
+            else {"reference_value"} | (set() if legacy else {"transform", "evaluation_samples"})
         )
+        if not legacy and name in ("confidence", "decision_type") and "transform" in raw:
+            extras.add("transform")
         _keys(
             raw,
             {
@@ -315,6 +341,17 @@ def load_policy(path: Path) -> DriftPolicy:
         bounds: tuple[float, ...] = ()
         smoothing: float | None = None
         reference: float | None = None
+        transform: Literal["none", "log1p"] = "none"
+        evaluation_samples: int | None = None
+        if not legacy:
+            raw_transform = raw.get("transform", "none")
+            if raw_transform not in ("none", "log1p") or (
+                name in ("confidence", "decision_type") and raw_transform != "none"
+            ):
+                raise DriftPolicyError(f"{name}.transform is invalid")
+            transform = cast(Literal["none", "log1p"], raw_transform)
+            if name not in ("confidence", "decision_type"):
+                evaluation_samples = _count(raw["evaluation_samples"], f"{name}.evaluation_samples")
         if name == "confidence":
             raw_bounds = raw["bin_boundaries"]
             if not isinstance(raw_bounds, list) or len(raw_bounds) < 2:
@@ -330,6 +367,8 @@ def load_policy(path: Path) -> DriftPolicy:
             smoothing = _number(raw["smoothing"], "decision_type.smoothing", positive=True)
         else:
             reference = _number(raw["reference_value"], f"{name}.reference_value")
+        if name == "confidence" and not legacy:
+            smoothing = _number(raw["smoothing"], "confidence.smoothing", positive=True)
         signals.append(
             SignalPolicy(
                 name,
@@ -342,11 +381,15 @@ def load_policy(path: Path) -> DriftPolicy:
                 bounds,
                 smoothing,
                 reference,
+                transform,
+                evaluation_samples,
             )
         )
     canonical = json.dumps(mapping, sort_keys=True, separators=(",", ":"), allow_nan=False)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return DriftPolicy(version, start, end, duration, tuple(signals), digest)
+    if legacy:
+        return _LegacyDriftPolicy(version, duration, tuple(signals), digest, start, end)
+    return DriftPolicy(version, duration, tuple(signals), digest)
 
 
 def policy_hash(policy: DriftPolicy) -> str:
@@ -380,24 +423,39 @@ def _decisions_per_trace(traces: Sequence[TraceSample]) -> float | None:
     return sum(trace.decision_count for trace in traces) / len(traces) if traces else None
 
 
+def _trace_values(rule: SignalPolicy, traces: Sequence[TraceSample]) -> list[float]:
+    values = [
+        value
+        for trace in sorted(traces, key=lambda sample: sample.started_at)
+        if (value := trace.latency_ms if rule.name == "trace_latency_ms" else trace.total_cost_usd)
+        is not None
+    ]
+    if any(not math.isfinite(value) or value < 0 for value in values):
+        raise ValueError(f"{rule.name} samples must be finite and non-negative")
+    return values
+
+
+def _transform_values(rule: SignalPolicy, values: Sequence[float]) -> list[float]:
+    return [math.log1p(value) for value in values] if rule.transform == "log1p" else list(values)
+
+
 def calculate_baseline(
-    policy: DriftPolicy, decisions: Sequence[DecisionSample], traces: Sequence[TraceSample]
+    policy: DriftPolicy,
+    decisions: Sequence[DecisionSample],
+    traces: Sequence[TraceSample],
+    *,
+    baseline_start: datetime,
+    baseline_end: datetime,
 ) -> BaselineMaterial:
     """Materialize distributions and statistics without retaining source events."""
-    bounds = policy.signal("confidence").bin_boundaries
-    confidence_counts = [0] * (len(bounds) - 1)
-    kind_counts: dict[str, int] = {}
-    for decision in decisions:
-        confidence_counts[_confidence_bin(decision.confidence, bounds)] += 1
-        kind_counts[decision.decision_type] = kind_counts.get(decision.decision_type, 0) + 1
-    confidence_labels = tuple(
-        f"[{a}, {b}{']' if i == len(bounds) - 2 else ')'}"
-        for i, (a, b) in enumerate(zip(bounds, bounds[1:]))
-    )
-    kind_labels = tuple(sorted(kind for kind in kind_counts if kind != "other")) + ("other",)
-    kind_values = tuple(kind_counts.get(kind, 0) for kind in kind_labels)
-    latency = [trace.latency_ms for trace in traces if trace.latency_ms is not None]
-    cost = [trace.total_cost_usd for trace in traces if trace.total_cost_usd is not None]
+    if (
+        any(
+            instant.tzinfo is None or instant.utcoffset() != timedelta(0)
+            for instant in (baseline_start, baseline_end)
+        )
+        or baseline_end <= baseline_start
+    ):
+        raise ValueError("baseline window must be ordered UTC timestamps")
 
     def distribution(
         name: SignalName, labels: tuple[str, ...], counts: tuple[int, ...]
@@ -427,12 +485,35 @@ def calculate_baseline(
             standard_deviation=deviation,
         )
 
-    signals = (
-        distribution("confidence", confidence_labels, tuple(confidence_counts)),
-        distribution("decision_type", kind_labels, kind_values),
-        trace_stat("trace_latency_ms", latency),
-        trace_stat("trace_cost_usd", cost),
-    )
+    signals: list[BaselineSignal] = []
+    for rule in policy.signals:
+        if rule.name == "confidence":
+            bounds = rule.bin_boundaries
+            counts = [0] * (len(bounds) - 1)
+            for decision in decisions:
+                counts[_confidence_bin(decision.confidence, bounds)] += 1
+            labels = tuple(
+                f"[{a}, {b}{']' if i == len(bounds) - 2 else ')'}"
+                for i, (a, b) in enumerate(zip(bounds, bounds[1:]))
+            )
+            signals.append(distribution(rule.name, labels, tuple(counts)))
+        elif rule.name == "decision_type":
+            kind_counts: dict[str, int] = {}
+            for decision in decisions:
+                kind_counts[decision.decision_type] = kind_counts.get(decision.decision_type, 0) + 1
+            candidates = {name: count for name, count in kind_counts.items() if name != "other"}
+            labels = (
+                tuple(sorted(candidates))
+                if isinstance(policy, _LegacyDriftPolicy)
+                else tuple(sorted(candidates, key=lambda name: (-candidates[name], name))[:9])
+            )
+            values = tuple(kind_counts[name] for name in labels)
+            labels += ("other",)
+            values += (len(decisions) - sum(values),)
+            signals.append(distribution(rule.name, labels, values))
+        else:
+            values_raw = _trace_values(rule, traces)
+            signals.append(trace_stat(rule.name, _transform_values(rule, values_raw)))
     agent_name = next(
         (sample.agent_name for sample in decisions),
         next((sample.agent_name for sample in traces), None),
@@ -440,11 +521,11 @@ def calculate_baseline(
     return BaselineMaterial(
         policy.policy_version,
         policy.policy_hash,
-        policy.baseline_start,
-        policy.baseline_end,
+        baseline_start,
+        baseline_end,
         agent_name,
         None,
-        signals,
+        tuple(signals),
         _versions(decisions, traces),
         _decisions_per_trace(traces),
     )
@@ -504,14 +585,14 @@ def calculate_report(
     recent_traces: Sequence[TraceSample],
     as_of: datetime,
 ) -> DriftReport:
-    """Calculate the four signals against immutable materialized baseline values."""
+    """Calculate enabled signals against immutable materialized baseline values."""
     if as_of.tzinfo is None or as_of.utcoffset() != timedelta(0):
         raise ValueError("as_of must be UTC")
     if baseline.policy_hash != policy.policy_hash:
         raise ValueError("baseline policy hash differs from policy")
     reports: list[DriftSignalReport] = []
-    for name in SIGNAL_NAMES:
-        rule = policy.signal(name)
+    for rule in policy.signals:
+        name = rule.name
         old = baseline.signal(name)
         if name == "confidence":
             counts = [0] * len(old.counts)
@@ -538,34 +619,33 @@ def calculate_report(
                 "recent_counts": list(current_counts),
             }
         else:
-            values = [
-                value
-                for trace in recent_traces
-                if (
-                    value := trace.latency_ms
-                    if name == "trace_latency_ms"
-                    else trace.total_cost_usd
-                )
-                is not None
-            ]
-            if any(not math.isfinite(value) for value in values):
-                raise ValueError(f"{name} samples must be finite")
+            raw_values = _trace_values(rule, recent_traces)
+            values = _transform_values(rule, raw_values)
+            if rule.evaluation_samples is not None:
+                values = values[-rule.evaluation_samples :]
             current_counts = ()
             details = {
                 "baseline_mean": old.mean,
                 "baseline_standard_deviation": old.standard_deviation,
                 "reference_value": rule.reference_value,
+                "transform": rule.transform,
+                "recent_count": len(raw_values),
+                "recent_mean": mean(raw_values) if raw_values else None,
+                "recent_median": median(raw_values) if raw_values else None,
+                "evaluation_count": len(values),
+                "recent_values": values,
             }
         recent_count = (
-            len(recent_decisions) if name in ("confidence", "decision_type") else len(values)
+            len(recent_decisions) if name in ("confidence", "decision_type") else len(raw_values)
         )
         reason: InsufficientReason | None = None
         metric: float | None = None
         if old.count < rule.minimum_baseline_samples or (
-            rule.algorithm == "cusum"
-            and (old.standard_deviation is None or old.standard_deviation == 0)
+            rule.algorithm == "cusum" and old.standard_deviation is None
         ):
             reason = "baseline_window_too_small"
+        elif rule.algorithm == "cusum" and old.standard_deviation == 0:
+            reason = "baseline_has_no_variance"
         elif recent_count < rule.minimum_recent_samples:
             reason = "recent_window_too_small"
         elif rule.algorithm == "psi":
@@ -584,6 +664,9 @@ def calculate_report(
                 {"sample": index + 1, "positive": positive, "negative": negative}
                 for index, (positive, negative) in enumerate(path)
             ]
+            details["cusum_peak"] = metric
+            details["cusum_final_positive"] = path[-1][0] if path else 0.0
+            details["cusum_final_negative"] = path[-1][1] if path else 0.0
         if metric is not None and not math.isfinite(metric):
             raise ValueError(f"{name} produced a non-finite drift metric")
         status: DriftStatus = (
@@ -612,6 +695,8 @@ def calculate_report(
     aggregate_reason: InsufficientReason | None = None
     if "baseline_window_too_small" in reasons:
         aggregate_reason = "baseline_window_too_small"
+    elif "baseline_has_no_variance" in reasons:
+        aggregate_reason = "baseline_has_no_variance"
     elif "recent_window_too_small" in reasons:
         aggregate_reason = "recent_window_too_small"
     if aggregate_reason:
@@ -698,7 +783,9 @@ def _stored_number(value: object, name: str) -> float:
 
 
 def _material_from_record(record: DriftBaselineRecord, policy: DriftPolicy) -> BaselineMaterial:
-    reference = _stored_mapping(record.reference, set(SIGNAL_NAMES), "reference")
+    reference = _stored_mapping(
+        record.reference, {rule.name for rule in policy.signals}, "reference"
+    )
     signal_fields = {
         "name",
         "count",
@@ -744,9 +831,22 @@ def _material_from_record(record: DriftBaselineRecord, policy: DriftPolicy) -> B
                 )
                 if labels != expected:
                     raise DriftPolicyError("stored drift baseline has invalid confidence bins")
-            elif labels != tuple(sorted(labels[:-1])) + ("other",):
+            elif (
+                labels[-1] != "other"
+                or (
+                    isinstance(policy, _LegacyDriftPolicy)
+                    and labels != tuple(sorted(labels[:-1])) + ("other",)
+                )
+                or (not isinstance(policy, _LegacyDriftPolicy) and len(labels) > 10)
+            ):
                 raise DriftPolicyError("stored drift baseline has invalid decision_type labels")
             counts = tuple(_stored_count(item, f"{name} histogram count") for item in counts_list)
+            if name == "decision_type" and not isinstance(policy, _LegacyDriftPolicy):
+                ordered = tuple(
+                    sorted(labels[:-1], key=lambda label: (-counts[labels.index(label)], label))
+                )
+                if labels[:-1] != ordered:
+                    raise DriftPolicyError("stored drift baseline has invalid decision_type order")
             proportions = tuple(
                 _stored_number(item, f"{name} proportion") for item in proportions_list
             )
@@ -768,7 +868,7 @@ def _material_from_record(record: DriftBaselineRecord, policy: DriftPolicy) -> B
         deviation = _stored_number(value["standard_deviation"], f"{name} deviation")
         return BaselineSignal(name, count, mean=average, standard_deviation=deviation)
 
-    signals = tuple(signal_from_reference(name) for name in SIGNAL_NAMES)
+    signals = tuple(signal_from_reference(rule.name) for rule in policy.signals)
     counts_material = _stored_mapping(
         record.version_counts, {"versions", "decisions_per_trace"}, "version counts"
     )
@@ -788,14 +888,17 @@ def _material_from_record(record: DriftBaselineRecord, policy: DriftPolicy) -> B
             )
         )
     versions = tuple(sorted(versions_list))
-    if (
-        sum(decisions for _, decisions, _ in versions) != signals[0].count
-        or signals[0].count != signals[1].count
-        or any(signal.count > sum(traces for _, _, traces in versions) for signal in signals[2:])
+    if any(
+        signal.count != sum(decisions for _, decisions, _ in versions)
+        if policy.signal(signal.name).population == "decision"
+        else signal.count > sum(traces for _, _, traces in versions)
+        for signal in signals
     ):
         raise DriftPolicyError("stored drift baseline has inconsistent version counts")
-    decisions_per_trace = _stored_number(
-        counts_material["decisions_per_trace"], "decisions per trace"
+    decisions_per_trace = (
+        None
+        if counts_material["decisions_per_trace"] is None
+        else _stored_number(counts_material["decisions_per_trace"], "decisions per trace")
     )
     return BaselineMaterial(
         record.policy_version,
@@ -817,25 +920,33 @@ def create_baseline(
     *,
     supersede: bool,
     clock: Callable[[], datetime],
+    baseline_start: datetime | None = None,
+    baseline_end: datetime | None = None,
 ) -> DriftBaselineRecord:
     """Calculate one historical baseline and append its immutable snapshot."""
     if not database_path.is_file():
         raise FileNotFoundError(database_path)
+    if baseline_start is None and baseline_end is None and isinstance(policy, _LegacyDriftPolicy):
+        baseline_start, baseline_end = policy.baseline_start, policy.baseline_end
+    if baseline_start is None or baseline_end is None:
+        raise DriftPolicyError("baseline_start and baseline_end are required for baseline creation")
     created_at = clock()
     database = Database.open(database_path)
     try:
         repository = Repository(database)
         source = repository.drift_source_data(
             agent_name,
-            policy.baseline_start,
-            policy.baseline_end,
-            policy.baseline_start,
-            policy.baseline_end,
+            baseline_start,
+            baseline_end,
+            baseline_start,
+            baseline_end,
         )
         material = calculate_baseline(
             policy,
             _source_decisions(source.baseline_decisions),
             _source_traces(source.baseline_traces),
+            baseline_start=baseline_start,
+            baseline_end=baseline_end,
         )
         for signal in material.signals:
             floor = policy.signal(signal.name).minimum_baseline_samples
@@ -848,8 +959,8 @@ def create_baseline(
             agent_name=agent_name,
             policy_version=policy.policy_version,
             policy_hash=policy.policy_hash,
-            baseline_start=policy.baseline_start,
-            baseline_end=policy.baseline_end,
+            baseline_start=baseline_start,
+            baseline_end=baseline_end,
             created_at=created_at,
             version_counts={
                 "versions": _version_map(material.version_counts),
@@ -888,8 +999,8 @@ def _missing_baseline_report(
         "insufficient_data",
         reason,
         as_of,
-        policy.baseline_start,
-        policy.baseline_end,
+        policy.baseline_start if isinstance(policy, _LegacyDriftPolicy) else None,
+        policy.baseline_end if isinstance(policy, _LegacyDriftPolicy) else None,
         as_of - policy.recent_duration,
         as_of,
         policy.policy_version,
@@ -937,6 +1048,8 @@ def run_live_drift_report(
         return _missing_baseline_report(
             policy, agent_name, as_of, "policy_changed_requires_rebaseline"
         )
+    if not isinstance(policy, _LegacyDriftPolicy):
+        return _missing_baseline_report(policy, agent_name, as_of, "baseline_not_created")
 
     # An unmaterialized baseline can still tell the operator whether the
     # historical window is too small, rather than misleadingly saying merely
@@ -952,6 +1065,8 @@ def run_live_drift_report(
         policy,
         _source_decisions(source.baseline_decisions),
         _source_traces(source.baseline_traces),
+        baseline_start=policy.baseline_start,
+        baseline_end=policy.baseline_end,
     )
     provisional = calculate_report(
         policy,

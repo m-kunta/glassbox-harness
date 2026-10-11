@@ -1,0 +1,21 @@
+policy_version = "drift_v2"
+recent_duration = "7d"
+
+[confidence]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 500
+minimum_recent_samples = 200
+bin_boundaries = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+smoothing = 0.5
+warning_threshold = 0.10
+alert_threshold = 0.16
+
+[decision_type]
+population = "decision"
+algorithm = "psi"
+minimum_baseline_samples = 500
+minimum_recent_samples = 200
+smoothing = 0.5
+warning_threshold = 0.10
+alert_threshold = 0.16
