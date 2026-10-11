@@ -12,7 +12,7 @@ from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from statistics import mean, median, stdev
+from statistics import mean, stdev
 from typing import Callable, Literal, Mapping, Sequence, TypeAlias, cast
 
 from glassbox.store import Database, Repository
@@ -164,6 +164,7 @@ class DriftSignalReport:
     details: dict[str, object]
 
     def to_dict(self) -> dict[str, object]:
+        _validate_diagnostics(self.details, self.name)
         return {
             "name": self.name,
             "population": self.population,
@@ -439,6 +440,29 @@ def _transform_values(rule: SignalPolicy, values: Sequence[float]) -> list[float
     return [math.log1p(value) for value in values] if rule.transform == "log1p" else list(values)
 
 
+def _trace_median(values: Sequence[float]) -> float | None:
+    """Avoid overflowing the midpoint of finite, non-negative trace values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    lower, upper = ordered[middle - 1], ordered[middle]
+    return lower + (upper - lower) / 2
+
+
+def _validate_diagnostics(value: object, name: SignalName) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} produced a non-finite drift diagnostic")
+    if isinstance(value, dict):
+        for nested in value.values():
+            _validate_diagnostics(nested, name)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _validate_diagnostics(nested, name)
+
+
 def calculate_baseline(
     policy: DriftPolicy,
     decisions: Sequence[DecisionSample],
@@ -631,7 +655,7 @@ def calculate_report(
                 "transform": rule.transform,
                 "recent_count": len(raw_values),
                 "recent_mean": mean(raw_values) if raw_values else None,
-                "recent_median": median(raw_values) if raw_values else None,
+                "recent_median": _trace_median(raw_values),
                 "evaluation_count": len(values),
                 "recent_values": values,
             }
@@ -645,7 +669,11 @@ def calculate_report(
         ):
             reason = "baseline_window_too_small"
         elif rule.algorithm == "cusum" and old.standard_deviation == 0:
-            reason = "baseline_has_no_variance"
+            reason = (
+                "baseline_window_too_small"
+                if isinstance(policy, _LegacyDriftPolicy)
+                else "baseline_has_no_variance"
+            )
         elif recent_count < rule.minimum_recent_samples:
             reason = "recent_window_too_small"
         elif rule.algorithm == "psi":
@@ -669,6 +697,7 @@ def calculate_report(
             details["cusum_final_negative"] = path[-1][1] if path else 0.0
         if metric is not None and not math.isfinite(metric):
             raise ValueError(f"{name} produced a non-finite drift metric")
+        _validate_diagnostics(details, name)
         status: DriftStatus = (
             "insufficient_data"
             if reason

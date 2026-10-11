@@ -222,6 +222,70 @@ def test_zero_variance_baseline_has_no_variance_reason(latency_policy: DriftPoli
     assert (report.status, report.reason) == ("insufficient_data", "baseline_has_no_variance")
 
 
+def test_same_zero_variance_data_preserves_distinct_v1_and_v2_reasons(
+    policy, latency_policy: DriftPolicy
+) -> None:  # type: ignore[no-untyped-def]
+    baseline_decisions = decisions(0.5, "review", 500)
+    baseline_traces = traces(10.0, 1.0, 200)
+    recent_decisions = decisions(0.5, "review", 200, recent=True)
+    recent_traces = traces(30.0, 4.0, 100, recent=True)
+    for candidate, expected in (
+        (policy, "baseline_window_too_small"),
+        (latency_policy, "baseline_has_no_variance"),
+    ):
+        baseline = _baseline_v2(candidate, baseline_decisions, baseline_traces)
+        report = calculate_report(candidate, baseline, recent_decisions, recent_traces, AS_OF)
+        assert report.signal("trace_latency_ms").reason == expected
+        assert (report.status, report.reason) == ("insufficient_data", expected)
+
+
+def test_log_transformed_latency_with_huge_even_raw_values_is_json_safe(
+    latency_policy: DriftPolicy,
+) -> None:
+    baseline_traces = tuple(
+        TraceSample("a", "v1", 40.0 if i % 2 else 60.0, None, BASELINE_AT, 1) for i in range(200)
+    )
+    baseline = _baseline_v2(latency_policy, trace_samples=baseline_traces)
+    report = calculate_report(
+        latency_policy, baseline, (), traces(1e308, 1.0, 100, recent=True), AS_OF
+    )
+    signal = report.signal("trace_latency_ms")
+    assert signal.details["recent_mean"] == 1e308
+    assert signal.details["recent_median"] == 1e308
+    json.dumps(report.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"mean": math.inf, "standard_deviation": 0.0}, {"standard_deviation": math.inf}],
+)
+def test_all_numeric_diagnostics_are_validated_before_report_serialization(
+    latency_policy: DriftPolicy, changes: dict[str, float]
+) -> None:
+    baseline_traces = tuple(
+        TraceSample("a", "v1", 40.0 if i % 2 else 60.0, None, BASELINE_AT, 1) for i in range(200)
+    )
+    baseline = _baseline_v2(latency_policy, trace_samples=baseline_traces)
+    malformed = replace(baseline, signals=(replace(baseline.signals[0], **changes),))
+    with pytest.raises(ValueError, match="non-finite drift diagnostic"):
+        calculate_report(latency_policy, malformed, (), traces(30.0, 1.0, 100, recent=True), AS_OF)
+
+
+def test_report_serialization_rejects_nonfinite_nested_diagnostics(
+    latency_policy: DriftPolicy,
+) -> None:
+    baseline_traces = tuple(
+        TraceSample("a", "v1", 40.0 if i % 2 else 60.0, None, BASELINE_AT, 1) for i in range(200)
+    )
+    baseline = _baseline_v2(latency_policy, trace_samples=baseline_traces)
+    report = calculate_report(
+        latency_policy, baseline, (), traces(30.0, 1.0, 100, recent=True), AS_OF
+    )
+    report.signal("trace_latency_ms").details["nested"] = {"values": [math.nan]}
+    with pytest.raises(ValueError, match="non-finite drift diagnostic"):
+        report.to_dict()
+
+
 def test_disabled_known_signals_are_absent_from_persistable_report_rows(
     v2_policy: DriftPolicy,
 ) -> None:
@@ -596,7 +660,7 @@ def test_zero_cusum_variance_is_insufficient_baseline(policy) -> None:  # type: 
     baseline = _baseline_v2(policy, (), traces(10.0, 1.0, 50))
     report = calculate_report(policy, baseline, (), traces(30.0, 4.0, 20, recent=True), AS_OF)
     assert report.signal("trace_latency_ms").status == "insufficient_data"
-    assert report.signal("trace_latency_ms").reason == "baseline_has_no_variance"
+    assert report.signal("trace_latency_ms").reason == "baseline_window_too_small"
     assert report.status == "insufficient_data"
     assert report.reason == "baseline_window_too_small"  # enabled v1 decision samples are absent
 
