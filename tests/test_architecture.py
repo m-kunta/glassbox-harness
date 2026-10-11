@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).parents[1]
         "Select `reconciliation_v2` explicitly",
         "Completion/output captures are categorically excluded",
         "declared input-only contract",
+        "Malformed responses raise `ValueError` from the parser",
     ],
 )
 def test_counterfactual_plan_preserves_independent_input_and_audit_contracts(

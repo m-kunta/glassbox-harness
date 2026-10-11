@@ -85,7 +85,7 @@
           parse_counterfactual_response(raw)
   ```
 
-  Include artifact tests accepting the optional `capture_input_contract = "input_only_no_prior_outputs"`, rejecting every other supplied value/type, and proving an absent contract disables capture enrichment. Include a strict JSON test proving `{"recommendation": {"action": "hold"}, "rationale": "Maintain the current position."}` succeeds and `NaN`, extra top-level keys, and non-object responses fail without raising.
+  Include artifact tests accepting the optional `capture_input_contract = "input_only_no_prior_outputs"`, rejecting every other supplied value/type, and proving an absent contract disables capture enrichment. Include a strict JSON test proving `{"recommendation": {"action": "hold"}, "rationale": "Maintain the current position."}` succeeds. Malformed responses raise `ValueError` from the parser, including `NaN`, extra top-level keys, and non-object responses. Per-case orchestration catches that error, records a failed case, and continues processing later cases.
 
 - [ ] **Step 2: Run the focused tests and observe red.**
 
