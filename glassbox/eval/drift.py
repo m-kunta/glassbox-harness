@@ -227,6 +227,7 @@ class DriftReport:
             "baseline_decisions_per_trace": self.baseline_decisions_per_trace,
             "recent_decisions_per_trace": self.recent_decisions_per_trace,
             "signals": {signal.name: signal.to_dict() for signal in self.signals},
+            "monitored_signals": [signal.name for signal in self.signals],
         }
 
 
@@ -400,7 +401,7 @@ def policy_hash(policy: DriftPolicy) -> str:
 
 def default_policy_path() -> Path:
     """Return the checked-in drift policy location."""
-    return Path(__file__).parent / "policies" / "drift_v1.toml"
+    return Path(__file__).parent / "policies" / "drift_v2.toml"
 
 
 def _confidence_bin(value: float, bounds: tuple[float, ...]) -> int:

@@ -178,6 +178,7 @@ class DriftSignalView:
     baseline_count: int
     recent_count: int
     detail_rows: tuple[tuple[str, str, str], ...]
+    monitored: bool = True
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,7 @@ class DriftReportView:
     recent_versions: tuple[AttributeView, ...]
     decisions_per_trace: str
     signals: tuple[DriftSignalView, ...]
+    monitored_signals: tuple[str, ...]
 
 
 _DRIFT_ACTIONS = {
@@ -209,6 +211,10 @@ _DRIFT_ACTIONS = {
     ),
     "recent_window_too_small": (
         "The recent window has too little usable data. Wait for more recent activity."
+    ),
+    "baseline_has_no_variance": (
+        "The baseline has no variation for an enabled signal. "
+        "Choose a representative baseline window and supersede the current baseline."
     ),
     None: "No operator action is required.",
 }
@@ -256,26 +262,20 @@ def _drift_details(signal: DriftSignalReport) -> tuple[tuple[str, str, str], ...
                 for label, old, new in zip(labels, baseline, recent)
             )
         return ()
-    path = signal.details.get("cusum_path", [])
-    if not isinstance(path, list):
-        return ()
-    rows: list[tuple[str, str, str]] = []
-    for entry in path:
-        if not isinstance(entry, dict):
-            continue
-        rows.append(
-            (
-                f"Sample {entry.get('sample', '?')}",
-                _drift_number(entry.get("positive")),
-                _drift_number(entry.get("negative")),
-            )
+    return tuple(
+        (label, _drift_number(signal.details[key]), "")
+        for key, label in (
+            ("evaluation_count", "Evaluated samples"),
+            ("recent_mean", "Recent mean (raw units)"),
+            ("recent_median", "Recent median (raw units)"),
         )
-    return tuple(rows)
+        if key in signal.details
+    )
 
 
 def build_drift_report_view(report: DriftReport) -> DriftReportView:
     """Render drift math as literal, non-agent-specific planner language."""
-    signals = tuple(
+    enabled_signals = tuple(
         DriftSignalView(
             _DRIFT_SIGNAL_NAMES[signal.name],
             "Decision-level" if signal.population == "decision" else "Trace-level",
@@ -292,6 +292,15 @@ def build_drift_report_view(report: DriftReport) -> DriftReportView:
         )
         for signal in report.signals
     )
+    enabled_names = {signal.name for signal in report.signals}
+    views = {signal.name: view for signal, view in zip(report.signals, enabled_signals)}
+    signals = tuple(
+        views[name] if name in enabled_names else DriftSignalView(
+            label, "Decision-level" if name in ("confidence", "decision_type") else "Trace-level",
+            "", "Not monitored (disabled by policy)", "", "", 0, 0, (), False,
+        )
+        for name, label in _DRIFT_SIGNAL_NAMES.items()
+    )
     decisions_per_trace = "Not available"
     if (
         report.baseline_decisions_per_trace is not None
@@ -304,17 +313,25 @@ def build_drift_report_view(report: DriftReport) -> DriftReportView:
     return DriftReportView(
         report.agent_name or "Unknown agent",
         report.status.replace("_", " ").title(),
-        _DRIFT_ACTIONS[report.reason],
+        (
+            "Review drift report"
+            if report.status in ("drift_detected", "watch") else _DRIFT_ACTIONS[report.reason]
+        ),
         report.as_of.isoformat().replace("+00:00", "Z"),
         report.policy_version,
         report.policy_hash,
         report.baseline_id,
-        f"{_utc_text(report.baseline_start)} to {_utc_text(report.baseline_end)}",
+        (
+            f"{_utc_text(report.baseline_start)} to {_utc_text(report.baseline_end)}"
+            if report.baseline_start is not None and report.baseline_end is not None
+            else "Not materialized"
+        ),
         f"{_utc_text(report.recent_start)} to {_utc_text(report.recent_end)}",
         _drift_versions(report.baseline_versions),
         _drift_versions(report.recent_versions),
         decisions_per_trace,
         signals,
+        tuple(signal.name for signal in report.signals),
     )
 
 

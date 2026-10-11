@@ -206,7 +206,12 @@ def test_live_drift_renders_insufficient_data_guidance_and_unknown_agents_are_no
 
     assert response.status_code == 200
     assert "Calculated now" in response.text
-    assert "historical baseline window has too little usable data" in response.text
+    assert "No baseline exists" in response.text
+    assert "Policy hash" in response.text
+    from glassbox.eval.drift import default_policy_path, load_policy
+    assert load_policy(default_policy_path()).policy_hash in response.text
+    assert "Monitored signals" in response.text
+    assert response.text.count("Not monitored (disabled by policy)") == 2
     assert "Trace-level" in response.text
     assert client.get("/drift?agent=no-such-agent").status_code == 404
 

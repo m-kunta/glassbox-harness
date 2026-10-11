@@ -52,14 +52,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     judge_command.add_argument("--confirm-egress", action="store_true")
     judge_command.add_argument("--require-calibrated", action="store_true")
     drift_command = commands.add_parser("drift", help="create or inspect agent drift reports")
-    drift_command.add_argument("--agent")
+    drift_command.add_argument("--agent", dest="report_agent")
     drift_command.add_argument("--policy", type=Path)
     drift_subcommands = drift_command.add_subparsers(dest="drift_command")
     baseline_command = drift_subcommands.add_parser(
         "baseline", help="materialize an immutable baseline"
     )
-    baseline_command.add_argument("--agent", required=True)
-    baseline_command.add_argument("--policy", type=Path)
+    baseline_command.add_argument("--agent", dest="baseline_agent", required=True)
+    baseline_command.add_argument("--policy", dest="baseline_policy", type=Path)
+    baseline_command.add_argument("--start", required=True, help="UTC ...Z start, inclusive")
+    baseline_command.add_argument(
+        "--end", required=True, help="UTC ...Z end, exclusive; [start, end)"
+    )
     baseline_command.add_argument("--supersede-baseline", action="store_true")
     outcomes_command = commands.add_parser("outcomes", help="import or reconcile deferred outcomes")
     outcomes_subcommands = outcomes_command.add_subparsers(dest="outcomes_command", required=True)
@@ -91,6 +95,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             database_path = Path(arguments.database)
             if arguments.outcomes_command == "import":
+                if not database_path.is_file():
+                    raise OSError("existing database required")
                 summary = import_outcomes(
                     database_path, arguments.input, arguments.rejects, reconciliation_policy,
                     clock=lambda: datetime.now(UTC),
@@ -114,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "drift":
         from glassbox.eval.drift import (
             DriftPolicyError,
+            _timestamp,
             create_baseline,
             default_policy_path,
             load_policy,
@@ -122,19 +129,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         from glassbox.store.database import TimestampMigrationError
         from glassbox.store.repository import DriftBaselineConflictError
 
-        if arguments.drift_command is None and not arguments.agent:
+        if arguments.drift_command is None and not arguments.report_agent:
             print("glassbox: unable to run drift command", file=sys.stderr)
             return 2
         try:
-            policy = load_policy(arguments.policy or default_policy_path())
+            selected_policy = getattr(arguments, "baseline_policy", None) or arguments.policy
+            policy = load_policy(selected_policy or default_policy_path())
             database_path = Path(arguments.database)
             if arguments.drift_command == "baseline":
+                created_at = datetime.now(UTC)
+                start = _timestamp(arguments.start, "baseline_start")
+                end = _timestamp(arguments.end, "baseline_end")
+                if not start < end <= created_at:
+                    raise DriftPolicyError("baseline requires start < end <= created_at")
+                if end > created_at - policy.recent_duration:
+                    print(
+                        "glassbox: warning: baseline overlaps the recent window; "
+                        "this can dilute drift sensitivity",
+                        file=sys.stderr,
+                    )
                 baseline = create_baseline(
                     database_path,
-                    arguments.agent,
+                    arguments.baseline_agent,
                     policy,
                     supersede=arguments.supersede_baseline,
-                    clock=lambda: datetime.now(UTC),
+                    clock=lambda: created_at,
+                    baseline_start=start,
+                    baseline_end=end,
                 )
                 payload: dict[str, object] = {
                     "baseline_id": baseline.baseline_id,
@@ -151,13 +172,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 payload = run_drift_report(
                     database_path,
-                    arguments.agent,
+                    arguments.report_agent,
                     policy,
                     clock=lambda: datetime.now(UTC),
                     persist=True,
                 ).to_dict()
+        except DriftPolicyError as error:
+            message = str(error)
+            if re.fullmatch(
+                r"(?:confidence|decision_type|trace_latency_ms|trace_cost_usd) "
+                r"baseline has [0-9]+ samples; requires [0-9]+", message
+            ) or message in {
+                "baseline_start must be a UTC timestamp ending in Z",
+                "baseline_end must be a UTC timestamp ending in Z",
+                "baseline_start is invalid", "baseline_end is invalid",
+                "baseline requires start < end <= created_at",
+            }:
+                print(f"glassbox: {message}", file=sys.stderr)
+            else:
+                print("glassbox: unable to run drift command", file=sys.stderr)
+            return 2
         except (
-            DriftPolicyError,
             DriftBaselineConflictError,
             ReadOnlyDatabaseError,
             TimestampMigrationError,

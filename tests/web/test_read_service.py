@@ -118,12 +118,70 @@ def test_live_drift_uses_a_fresh_read_only_connection_and_never_writes(
     assert landing.agents == ("agent",)
     assert report is not None
     assert report.status == "Insufficient Data"
-    assert "historical baseline window" in report.action
+    assert "No baseline exists" in report.action
+    assert report.policy_version == "drift_v2"
+    assert report.monitored_signals == ("confidence", "decision_type")
+    assert len([
+        signal for signal in report.signals
+        if signal.status == "Not monitored (disabled by policy)"
+    ]) == 2
     assert {signal.population_label for signal in report.signals} == {
         "Decision-level",
         "Trace-level",
     }
     assert calls == [path, path]
+
+
+def test_drift_display_requires_review_for_detection_and_explains_no_variance(
+    tmp_path: Path,
+) -> None:
+    from glassbox.eval.drift import calculate_baseline, calculate_report, load_policy
+    from glassbox.web.read_models import build_drift_report_view
+    from tests.eval.test_drift import AS_OF, BASELINE_END, BASELINE_START, LATENCY_POLICY_TEXT
+
+    policy_path = tmp_path / "latency.toml"
+    policy_path.write_text(LATENCY_POLICY_TEXT)
+    policy = load_policy(policy_path)
+    baseline = calculate_baseline(
+        policy, (), (), baseline_start=BASELINE_START, baseline_end=BASELINE_END
+    )
+    report = calculate_report(policy, baseline, (), (), AS_OF)
+    detected = build_drift_report_view(replace(report, status="drift_detected", reason=None))
+    assert detected.action == "Review drift report"
+    no_variance = build_drift_report_view(replace(report, reason="baseline_has_no_variance"))
+    assert "variation" in no_variance.action
+    assert "Wait for more activity" not in no_variance.action
+
+
+def test_cusum_display_has_bounded_raw_diagnostics_without_sample_path(tmp_path: Path) -> None:
+    from glassbox.eval.drift import calculate_baseline, calculate_report, load_policy
+    from glassbox.web.read_models import build_drift_report_view
+    from tests.eval.test_drift import (
+        AS_OF,
+        BASELINE_END,
+        BASELINE_START,
+        LATENCY_POLICY_TEXT,
+        traces,
+    )
+    policy_path = tmp_path / "latency.toml"
+    policy_path.write_text(LATENCY_POLICY_TEXT)
+    policy = load_policy(policy_path)
+    baseline = calculate_baseline(
+        policy, (), tuple(
+            replace(sample, latency_ms=10.0 + index % 2)
+            for index, sample in enumerate(traces(10.0, 1.0, 200))
+        ),
+        baseline_start=BASELINE_START, baseline_end=BASELINE_END,
+    )
+    report = calculate_report(policy, baseline, (), traces(30.0, 1.0, 300, recent=True), AS_OF)
+    assert len(report.signal("trace_latency_ms").details["cusum_path"]) == 100
+    view = build_drift_report_view(report)
+    latency = next(signal for signal in view.signals if signal.name == "Trace latency")
+    assert len(latency.detail_rows) == 3
+    assert latency.detail_rows[0] == ("Evaluated samples", "100", "")
+    assert {row[0] for row in latency.detail_rows} == {
+        "Evaluated samples", "Recent mean (raw units)", "Recent median (raw units)"
+    }
 
 
 def test_read_service_parses_dates_bands_and_fixed_sort_aliases(tmp_path: Path) -> None:
