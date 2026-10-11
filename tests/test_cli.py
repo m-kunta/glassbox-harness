@@ -121,6 +121,31 @@ def test_drift_deficient_baseline_names_signal_without_database_path(
     assert str(path) not in captured.err
 
 
+@pytest.mark.parametrize("command", ["report", "baseline"])
+def test_drift_calendar_overflow_returns_safe_operational_failure(
+    tmp_path: Path, capsys, command: str
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_drift import LATENCY_POLICY_TEXT, _seed_drift
+
+    path = tmp_path / "private.sqlite3"
+    _seed_drift(path)
+    policy = tmp_path / "oversized-duration.toml"
+    policy.write_text(LATENCY_POLICY_TEXT.replace('"7d"', '"999999999d"'))
+    operation = ["baseline"] if command == "baseline" else []
+    window = DRIFT_WINDOW_ARGS if command == "baseline" else []
+    assert main([
+        "--database", str(path), "drift", *operation, "--agent", "agent-a",
+        "--policy", str(policy), *window,
+    ]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to run drift command\n"
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM drift_baselines").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 0
+
+
 def test_outcomes_import_returns_one_and_writes_rejects_for_partial_success(
     tmp_path: Path, capsys
 ) -> None:  # type: ignore[no-untyped-def]

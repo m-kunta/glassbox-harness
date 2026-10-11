@@ -196,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             DriftBaselineConflictError,
             ReadOnlyDatabaseError,
             TimestampMigrationError,
+            OverflowError,
             OSError,
             sqlite3.Error,
             ValueError,
