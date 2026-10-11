@@ -15,6 +15,10 @@ PROJECT_ROOT = Path(__file__).parents[1]
         "Persist capture references plus a rendered-input hash; "
         "never persist capture content inline",
         "A run with zero successful cases exits `2`",
+        "007_counterfactual_prompts.sql",
+        "Select `reconciliation_v2` explicitly",
+        "Completion/output captures are categorically excluded",
+        "declared input-only contract",
     ],
 )
 def test_counterfactual_plan_preserves_independent_input_and_audit_contracts(

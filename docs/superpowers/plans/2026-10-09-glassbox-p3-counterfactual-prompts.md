@@ -4,18 +4,19 @@
 
 **Goal:** Add an explicit, auditable CLI experiment that runs a versioned prompt variant against recorded decisions and optionally enriches its hypothetical recommendation with a mature P4 outcome label.
 
-**Architecture:** `glassbox.eval.counterfactual` owns prompt parsing, snapshot construction, response validation, provider orchestration, and report shaping. `glassbox.store` owns migration 006 and all SQLite queries/inserts; it returns typed, policy-neutral decision/outcome source data. The CLI performs configuration validation, database candidate disclosure, and egress consent before it constructs a provider; counterfactual code is imported only in that CLI branch.
+**Architecture:** `glassbox.eval.counterfactual` owns prompt parsing, snapshot construction, response validation, provider orchestration, and report shaping. `glassbox.store` owns migration 007 and all SQLite queries/inserts; it returns typed, policy-neutral decision/outcome source data. The CLI performs configuration validation, database candidate disclosure, and egress consent before it constructs a provider; counterfactual code is imported only in that CLI branch.
 
 **Tech Stack:** Python 3.11, stdlib `tomllib`/`json`/`hashlib`, existing `python-dotenv` judge extra, existing lazy provider adapters, SQLite, Pydantic event records, pytest, Ruff, mypy, import-linter.
 
 ## Global Constraints
 
 - The only shipped execution mode is `glassbox counterfactual run`: an explicit offline batch command. Never call a provider in tracing, collection, serving, or a production agent request.
-- Prompt artifacts are UTF-8 files with exact `+++` TOML front matter containing a non-empty `prompt_version` and exactly one `{{decision_snapshot_json}}` placeholder in the body. The full artifact SHA-256 is its prompt identity.
+- Prompt artifacts are UTF-8 files with exact `+++` TOML front matter containing a non-empty `prompt_version`, an optional `capture_input_contract = "input_only_no_prior_outputs"`, and exactly one `{{decision_snapshot_json}}` placeholder in the body. The full artifact SHA-256 is its prompt identity.
 - Provider/model configuration is mandatory and uses only `GLASSBOX_COUNTERFACTUAL_PROVIDER`, `GLASSBOX_COUNTERFACTUAL_MODEL`, provider credential, and optional `GLASSBOX_COUNTERFACTUAL_OLLAMA_URL` from the project-root `.env` plus process environment; process values win and dotenv parsing must not mutate `os.environ`.
 - Reuse existing optional provider SDK transports lazily. Every adapter receives explicit credential/base URL and uses temperature `0`; no provider SDK is a base dependency.
 - Every remote destination requires `--confirm-egress` after a disclosure of provider, model, destination, prompt version/hash, selected count, and capture-content count. Literal loopback Ollama does not; non-loopback Ollama does.
-- The prompt receives a structured redacted snapshot plus optional blob content only when `--blob-dir PATH` is supplied. Never infer a blob directory. Provider input excludes the original recommendation and rationale, confidence, feedback, and outcomes. Apply that exclusion to the entire rendered input, including optional captures; withhold answer-bearing captures rather than exposing the original answer to the variant.
+- The prompt receives a structured redacted snapshot plus optional blob content only when `--blob-dir PATH` is supplied. Never infer a blob directory. Provider input excludes the original recommendation and rationale, confidence, feedback, and outcomes.
+- Completion/output captures are categorically excluded, as are answer-bearing captures and span prompt captures that may contain prior outputs. Only trace `input_ref` captures may be resolved for provider input, and only under the artifact's declared input-only contract (`capture_input_contract = "input_only_no_prior_outputs"`), which asserts the input source cannot contain prior recommendations, rationale, or other generated outputs. An absent contract disables all capture enrichment even with `--blob-dir`; invalid contract values reject the artifact. Eligibility is determined by reference type and that explicit contract, never a substring heuristic. Preserve all reference IDs for audit without sending their contents.
 - Snapshot JSON is untrusted data inside explicit delimiters. Provider output must be exactly an object with JSON `recommendation` and non-empty string `rationale`.
 - One run captures `as_of` once; selects `decisions.decided_at >= as_of - --since` ordered by parsed UTC instant descending then `decision_id` descending; and applies `--max-cases` only after that fixed order.
 - Runs/results are append-only audit records. One completed command atomically persists one run and every successful/failed case result; per-case provider/parse/blob failures become result rows and never stop later cases.
@@ -36,8 +37,8 @@
 | `glassbox/eval/counterfactual_provider.py` | Thin adapter over the existing lazy provider transport and strict counterfactual response parsing. |
 | `glassbox/eval/counterfactual.py` | Prompt artifact parsing, snapshot rendering, blob enrichment, run orchestration, and JSON-ready report. |
 | `glassbox/eval/prompts/counterfactual_v1.md` | Checked-in safe default/example prompt artifact. |
-| `glassbox/store/migrations/006_counterfactual_prompts.sql` | Counterfactual run/result tables and indexes. |
-| `glassbox/store/database.py` / `schema.sql` | P4-to-P3c upgrade path and exact strict-schema fingerprint. |
+| `glassbox/store/migrations/007_counterfactual_prompts.sql` | Counterfactual run/result tables and indexes. |
+| `glassbox/store/database.py` / `schema.sql` | Post-remediation (through 006)-to-P3c upgrade path and exact strict-schema fingerprint. |
 | `glassbox/store/repository.py` | Candidate reads, immutable run/result transaction, and report reads. |
 | `glassbox/cli.py` | Lazy `counterfactual run` and `counterfactual report` commands plus consent preflight. |
 | `tests/eval/test_counterfactual_*.py` | Pure prompt/config/provider/orchestration tests. |
@@ -84,7 +85,7 @@
           parse_counterfactual_response(raw)
   ```
 
-  Include a strict JSON test proving `{"recommendation": {"action": "hold"}, "rationale": "Maintain the current position."}` succeeds and `NaN`, extra top-level keys, and non-object responses fail without raising.
+  Include artifact tests accepting the optional `capture_input_contract = "input_only_no_prior_outputs"`, rejecting every other supplied value/type, and proving an absent contract disables capture enrichment. Include a strict JSON test proving `{"recommendation": {"action": "hold"}, "rationale": "Maintain the current position."}` succeeds and `NaN`, extra top-level keys, and non-object responses fail without raising.
 
 - [ ] **Step 2: Run the focused tests and observe red.**
 
@@ -100,7 +101,7 @@
 
   Mirror `judge_config.py`'s safe `dotenv_values()` pattern with the counterfactual key names. Build a `CounterfactualConfig(provider, model, credential, base_url, is_remote)` only after all values are valid. Construct an existing `JudgeConfig` from those resolved fields and adapt its `judge()` method to `CounterfactualProvider.complete()`; this reuses the tested explicit-SDK constructor/base-URL/temperature behavior without borrowing judge configuration. Never import `anthropic`, `openai`, or `google.genai` in any new module.
 
-  Implement strict front-matter parsing with `tomllib.loads`, reject unknown metadata keys and empty/non-string versions, and compute the artifact hash from raw UTF-8 bytes. `render_prompt()` must use `canonical_dumps(snapshot)` and replace exactly one token. `parse_counterfactual_response()` must use `json.loads(raw, parse_constant=_reject_non_finite_constant)`, reject extra/missing keys, reject blank rationale, and validate that recommendation is recursively JSON-safe and UTF-8 encodable.
+  Implement strict front-matter parsing with `tomllib.loads`, allow only `prompt_version` and optional `capture_input_contract`, reject unknown metadata keys, empty/non-string versions, and contract values other than the exact `input_only_no_prior_outputs` literal. Store the contract on `PromptArtifact`; absence means capture enrichment disabled. Compute the artifact hash from raw UTF-8 bytes. `render_prompt()` must use `canonical_dumps(snapshot)` and replace exactly one token. `parse_counterfactual_response()` must use `json.loads(raw, parse_constant=_reject_non_finite_constant)`, reject extra/missing keys, reject blank rationale, and validate that recommendation is recursively JSON-safe and UTF-8 encodable.
 
 - [ ] **Step 4: Verify green.**
 
@@ -124,7 +125,7 @@
 ## Task 2: Add counterfactual audit storage and policy-neutral source reads
 
 **Files:**
-- Create: `glassbox/store/migrations/006_counterfactual_prompts.sql`
+- Create: `glassbox/store/migrations/007_counterfactual_prompts.sql`
 - Modify: `glassbox/store/schema.sql`
 - Modify: `glassbox/store/database.py`
 - Modify: `glassbox/store/repository.py`
@@ -139,7 +140,7 @@
 
 - [ ] **Step 1: Write failing migration and repository tests.**
 
-  Add a P4 database fixture, upgrade it with `Database.open()`, and assert current read-only open accepts the P3c schema without mutation. Seed decisions, cited evidence, alternatives, trace/span blob references, and same-type P4 outcomes in two policy hashes. Assert:
+  Add a current post-remediation database fixture through `006_p3_p4_remediation.sql`, upgrade it with `Database.open()`, and assert current read-only open accepts the P3c schema without mutation. Also retain existing older-version upgrade coverage. Seed decisions, cited evidence, alternatives, trace/span blob references, and same-type P4 outcomes in two policy hashes. Assert:
 
   ```python
   def test_counterfactual_candidates_are_ordered_and_policy_hash_scoped(repository: Repository) -> None:
@@ -161,13 +162,13 @@
   .venv/bin/pytest tests/store/test_database.py tests/store/test_repository.py tests/store/test_schema.py -q -k counterfactual
   ```
 
-  Expected: failures because migration 006 and repository methods are absent.
+  Expected: failures because migration 007 and repository methods are absent.
 
-- [ ] **Step 3: Implement migration 006 and strict schema evolution.**
+- [ ] **Step 3: Implement migration 007 and strict schema evolution.**
 
   Add `counterfactual_runs` with ULID primary key; non-empty provider/model/base URL/prompt version/prompt hash/outcome policy version/outcome policy hash; UTC `created_at`/`as_of`; non-negative selected/succeeded/failed counts; and `remote_egress_confirmed` constrained to `0`/`1`. Add `counterfactual_results` with ULID primary key, `run_id` and `decision_id` `ON DELETE RESTRICT` FKs, canonical JSON checks for structured snapshot facts/capture references/source-model provenance/original/hypothetical recommendation, a rendered-input SHA-256 hash when rendering succeeds, a recorded model-parity assessment, nullable paired hypothetical recommendation/rationale, nullable paired failure code, nullable paired outcome ID/derived label, and `UNIQUE(run_id, decision_id)`. Capture references contain reference IDs only, never resolved text or bytes. Original recommendation is audit/comparison data only and is excluded from provider input. A failure before rendering stores a null input hash with its diagnostic. Enforce one of the success/failure result shapes, label membership `tp|fp|tn|fn`, and strict UTC timestamps.
 
-  Extend `_TABLES`, `_INDEXES`, `_initialize_schema()`, released-P4 fingerprint, current fingerprint, and `open_read_only()` validation exactly as migrations 003–005 do. Update `schema.sql` and the byte-for-byte migration mirror test to include 006.
+  Extend `_TABLES`, `_INDEXES`, `_initialize_schema()`, the released post-remediation fingerprint through `006_p3_p4_remediation.sql`, current fingerprint, and `open_read_only()` validation following the existing upgrade pattern. Preserve the 006 remediation schema and data during the 007 upgrade. Update `schema.sql` and the byte-for-byte migration mirror test to include 007.
 
 - [ ] **Step 4: Implement typed repository methods.**
 
@@ -207,7 +208,7 @@
 
 - [ ] **Step 1: Write failing orchestration tests.**
 
-  Use a fake provider returning ordered raw JSON responses and a fixed UTC clock. Assert one selected decision always renders a snapshot without blobs, and supplying a blob directory adds only resolvable capture content that does not expose the original answer. Assert the rendered prompt does not contain the original recommendation or rationale, confidence, feedback, outcome value, or any free-text feedback. Seed distinctive original-answer text both in structured fields and an answer-bearing capture to prove both exclusions.
+  Use a fake provider returning ordered raw JSON responses and a fixed UTC clock. Assert one selected decision always renders a snapshot without blobs. Supplying a blob directory adds trace input capture content only when the artifact declares `capture_input_contract = "input_only_no_prior_outputs"`. Assert no enrichment without the contract, and assert completion/output and span prompt captures are never opened or sent even with the contract. Seed distinctive output text in those ineligible captures and prove exclusion follows the reference type regardless of content; do not implement a substring heuristic. Assert the rendered prompt does not contain the original recommendation or rationale, confidence, feedback, outcome value, or any free-text feedback.
 
   Add a capture-enrichment test with distinctive safe input text: the fake provider sees it, persisted result fields never contain it, capture reference IDs remain queryable, and the stored rendered-input hash equals SHA-256 of the exact UTF-8 system/user input envelope. Test report descriptions for verified provider/model parity and for absent, mismatched, or ambiguous source provenance.
 
@@ -215,7 +216,7 @@
 
   Add `test_run_persists_failed_case_and_continues_after_bad_provider_response`, `test_run_derives_variant_label_from_hypothetical_recommendation_and_raw_outcome`, `test_run_leaves_outcome_label_null_when_decision_is_not_mature`, `test_run_uses_fixed_newest_first_selection_before_max_cases`, and `test_blob_read_failure_becomes_a_case_result_not_a_command_failure`. Each test must use a fresh temporary database and inspect the persisted `CounterfactualRunDetail`, not only the in-memory report.
 
-  For enrichment, seed an original `hold` decision and a mature positive raw outcome; fake a hypothetical `order` recommendation and assert the result stores `tp` rather than the original decision's label. Add an unmatched policy-rule case that succeeds but records `outcome_not_applicable`.
+  Select `reconciliation_v2` explicitly for enrichment. Seed agent `replenishment-triage`, decision type `triage`, an original recommendation with `urgency = "LOW"` (also cover `MEDIUM`), and a mature `stockout_occurred` outcome with `value.occurred = true`. Fake a hypothetical recommendation with `urgency = "CRITICAL"` (also cover `HIGH`) and assert the result stores `tp` rather than the original decision's `fn`. This exercises the policy's `/urgency` rule rather than free-text action matching. Add an unmatched policy-rule case that succeeds but records `outcome_not_applicable`.
 
 - [ ] **Step 2: Run the focused tests and observe red.**
 
@@ -229,7 +230,7 @@
 
 - [ ] **Step 3: Implement snapshot and run orchestration.**
 
-  Capture `as_of = clock()` exactly once and reject non-UTC clock values. Open one writer-capable `Database`, retrieve candidates, truncate after fixed ordering, and build a canonical fact-only snapshot for each candidate. Store capture references and source-model provenance with those facts. Construct a separate transient provider projection that excludes the original recommendation/rationale and the other withheld fields. Resolve blob references only when `blob_dir` is not `None`; decode UTF-8 bytes strictly; withhold captures containing the original answer and record a concise diagnostic. Represent missing, invalid, unreadable, or non-UTF-8 content as `null` plus a concise per-case capture diagnostic. Do not expose filesystem paths in result/error data.
+  Capture `as_of = clock()` exactly once and reject non-UTC clock values. Open one writer-capable `Database`, retrieve candidates, truncate after fixed ordering, and build a canonical fact-only snapshot for each candidate. Store capture references and source-model provenance with those facts. Construct a separate transient provider projection that excludes the original recommendation/rationale and the other withheld fields. Resolve only trace `input_ref` when `blob_dir` is supplied and the prompt artifact declares the exact input-only contract; never open completion/output or span prompt references for enrichment. Absent eligibility records a concise capture diagnostic and preserves the reference. Decode eligible UTF-8 bytes strictly. Represent missing, invalid, unreadable, or non-UTF-8 content as `null` plus a concise per-case capture diagnostic. Do not expose filesystem paths in result/error data.
 
   Render a system prompt that states the response envelope and a user prompt whose snapshot is delimited by `BEGIN UNTRUSTED DECISION DATA`/`END UNTRUSTED DECISION DATA`. Hash `canonical_dumps({"system_prompt": system_prompt, "user_prompt": user_prompt}).encode("utf-8")` with SHA-256 to identify the exact input envelope. Build the provider only after all local candidate/snapshot preconditions are satisfied. Convert provider exceptions and response parse failures into failed result objects, continue the loop, then atomically record the completed run and all results through the repository. Persist the fact-only snapshot, references, and input hash; discard transient capture text before creating persisted result records. Reports use the prompt-and-model description unless source and variant provider/model parity is proved from recorded provenance.
 
@@ -328,7 +329,7 @@
   glassbox counterfactual report --run RUN_ID
   ```
 
-  Explain dedicated credentials/configuration, egress disclosure, why blob location is explicit and optional, immutable run history, capture-reference/input-hash storage, P4 enrichment limits, zero-success exit `2`, and that a result is not an aggregate winner claim. Describe it as a prompt-and-model counterfactual unless recorded source/variant parity is proved. Mark only the offline counterfactual-provider item complete in `TODO.md`; leave live shadow execution, alerts, scheduling/CI, and dashboard work open.
+  Explain dedicated credentials/configuration, egress disclosure, why blob location is explicit and optional, the input-only capture contract and categorical output/prompt-capture exclusions, immutable run history, capture-reference/input-hash storage, P4 enrichment limits, zero-success exit `2`, and that a result is not an aggregate winner claim. Describe it as a prompt-and-model counterfactual unless recorded source/variant parity is proved. Mark only the offline counterfactual-provider item complete in `TODO.md`; leave live shadow execution, alerts, scheduling/CI, and dashboard work open.
 
 - [ ] **Step 2: Run the complete release gate.**
 
@@ -346,7 +347,7 @@
 
 - [ ] **Step 3: Run a local no-egress smoke test.**
 
-  Seed a temporary current-schema database with one decision/evidence/alternative and a matching mature outcome. Configure loopback Ollama only through a fake/monkeypatched provider adapter; run the command with a checked-in prompt and `--blob-dir` containing one valid redacted capture. Assert the emitted run has one successful result, a variant-specific derived label, no remote-confirmation requirement, and a report that reproduces its stored provenance. Rerun the report through `Database.open_read_only()` and verify the database bytes do not change.
+  Seed a temporary current-schema database with one decision/evidence/alternative and a matching mature outcome under explicitly selected `reconciliation_v2`, using original LOW/MEDIUM and hypothetical CRITICAL/HIGH urgency. Configure loopback Ollama only through a fake/monkeypatched provider adapter; run the command with a prompt declaring the input-only capture contract and `--blob-dir` containing one eligible redacted trace input capture. Assert the emitted run has one successful result, a variant-specific derived label, no remote-confirmation requirement, and a report that reproduces its stored provenance. Rerun the report through `Database.open_read_only()` and verify the database bytes do not change.
 
 - [ ] **Step 4: Commit docs and release safeguards.**
 
