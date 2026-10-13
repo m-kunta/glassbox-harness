@@ -118,11 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     database.close()
                 if detail is None:
                     raise ValueError("unknown run")
-                statuses = tuple(
-                    "case_failed" if item.failure_code is not None else
-                    "labelled" if item.outcome_label is not None else "unlabelled"
-                    for item in detail.results
-                )
+                statuses = tuple(item.outcome_status for item in detail.results)
                 counterfactual_result_report = CounterfactualReport(
                     detail.run, detail.results, statuses
                 )
@@ -130,7 +126,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                  sort_keys=True, separators=(",", ":")))
                 return 0
 
-            counterfactual_config = load_counterfactual_config(Path.cwd(), os.environ)
+            counterfactual_config = load_counterfactual_config(
+                Path(__file__).resolve().parents[1], os.environ
+            )
             prompt = load_prompt_artifact(arguments.prompt)
             counterfactual_policy = load_outcome_policy(
                 arguments.outcome_policy
@@ -155,8 +153,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             finally:
                 database.close()
-            if counterfactual_config.is_remote and not arguments.confirm_egress:
-                raise ValueError("remote egress requires confirmation")
             capture_count = sum(
                 candidate.trace.input_ref is not None
                 for candidate in selected
@@ -172,6 +168,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"selected_count={len(selected)} capture_count={capture_count}",
                 file=sys.stderr,
             )
+            if counterfactual_config.is_remote and not arguments.confirm_egress:
+                raise ValueError("remote egress requires confirmation")
             counterfactual_result_report = run_counterfactual(
                 database_path, counterfactual_config, prompt, counterfactual_policy, decided_since,
                 arguments.max_cases, arguments.blob_dir,

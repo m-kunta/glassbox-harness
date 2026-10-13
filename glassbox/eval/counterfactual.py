@@ -529,6 +529,7 @@ def run_counterfactual(
                 failure_code=failure_code,
                 outcome_id=outcome_id,
                 outcome_label=label,
+                outcome_status=status,
             ))
             statuses.append(status)
         run = CounterfactualRun(

@@ -344,10 +344,10 @@ Claude, OpenAI, or Gemini, also set the corresponding `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, or `GEMINI_API_KEY`. Ollama defaults to
 `http://127.0.0.1:11434`; override it with `GLASSBOX_COUNTERFACTUAL_OLLAMA_URL`.
 The counterfactual command reads these dedicated values from the process
-environment or a `.env` in its current working directory. Run it from the
-Glassbox project root when using that project's `.env`; the command does not
-search other directories. Nonempty process values take precedence, and file
-values are not injected into the process environment. `.env` is gitignored.
+environment or the `.env` in the Glassbox project root, independent of the
+working directory. It never reads a sibling agent's `.env`. Nonempty process
+values take precedence, and file values are not injected into the process
+environment. `.env` is gitignored.
 
 Use a checked-in prompt artifact such as
 [`counterfactual_v1.md`](glassbox/eval/prompts/counterfactual_v1.md). Its TOML

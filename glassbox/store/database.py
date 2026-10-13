@@ -201,6 +201,13 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
                 connection,
                 "007_counterfactual_prompts.sql",
                 schema_objects,
+                _released_007_schema_objects(),
+            )
+        elif schema_objects == _released_007_schema_objects():
+            _apply_ordinary_migration(
+                connection,
+                "008_counterfactual_outcome_status.sql",
+                schema_objects,
                 _current_schema_objects(),
             )
         else:
@@ -228,6 +235,7 @@ def _migration_needed(connection: sqlite3.Connection, predecessor: dict[str, str
         _released_p3b_schema_objects(),
         _released_p4_schema_objects(),
         _released_post_remediation_schema_objects(),
+        _released_007_schema_objects(),
         _current_schema_objects(),
     )
     predecessor_index = next((i for i, item in enumerate(releases) if item == predecessor), -1)
@@ -308,6 +316,24 @@ def _released_p2_schema_objects() -> dict[str, str]:
 
 @lru_cache
 def _current_schema_objects() -> dict[str, str]:
+    previous = _released_007_schema_objects()
+    connection = sqlite3.connect(":memory:")
+    try:
+        _execute_schema_statements(connection, _migration_sql("007_counterfactual_prompts.sql"))
+        _execute_schema_statements(
+            connection, _migration_sql("008_counterfactual_outcome_status.sql")
+        )
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='counterfactual_results'"
+        ).fetchone()
+        assert row is not None
+        return previous | {"counterfactual_results": row[0]}
+    finally:
+        connection.close()
+
+
+@lru_cache
+def _released_007_schema_objects() -> dict[str, str]:
     return _released_post_remediation_schema_objects() | _released_schema_objects(
         "007_counterfactual_prompts.sql",
         _COUNTERFACTUAL_TABLES + _COUNTERFACTUAL_INDEXES + _COUNTERFACTUAL_TRIGGERS,

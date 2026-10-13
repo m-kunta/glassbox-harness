@@ -329,6 +329,10 @@ def test_run_leaves_outcome_label_null_when_decision_is_not_mature(tmp_path: Pat
     assert detail.results[0].outcome_id is None
     assert detail.results[0].outcome_label is None
     assert report.to_dict()["results"][0]["outcome_status"] == "decision_not_mature"
+    from glassbox.eval.counterfactual import CounterfactualReport
+    assert CounterfactualReport(detail.run, detail.results, tuple(
+        item.outcome_status for item in detail.results
+    )).to_dict()["results"][0]["outcome_status"] == "decision_not_mature"
 
 
 def test_run_uses_fixed_newest_first_selection_before_max_cases(tmp_path: Path) -> None:

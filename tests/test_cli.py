@@ -95,10 +95,48 @@ def test_counterfactual_remote_preflight_requires_confirmation_before_provider_f
     )
     assert main(_counterfactual_run_args(path)) == 2
     captured = capsys.readouterr()
-    assert captured.err == "glassbox: unable to run counterfactual command\n"
+    assert "provider=openai" in captured.err
+    assert "model=variant-model" in captured.err
+    assert "base_url=https://api.openai.com/v1" in captured.err
+    assert "prompt_version=counterfactual_v1" in captured.err
+    assert "selected_count=1 capture_count=0" in captured.err
+    assert captured.err.endswith("glassbox: unable to run counterfactual command\n")
     assert captured.out == ""
     assert factories == []
     assert provider.calls == []
+
+
+def test_counterfactual_config_reads_glassbox_root_not_caller_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from glassbox.eval import counterfactual_config
+    from tests.eval.test_counterfactual import _seed
+
+    database_path = tmp_path / "cases.sqlite3"
+    _seed(database_path)
+    sibling = tmp_path / "sibling-agent"
+    sibling.mkdir()
+    (sibling / ".env").write_text(
+        "GLASSBOX_COUNTERFACTUAL_PROVIDER=ollama\n"
+        "GLASSBOX_COUNTERFACTUAL_MODEL=from-sibling\n"
+    )
+    monkeypatch.chdir(sibling)
+    for key in (
+        "GLASSBOX_COUNTERFACTUAL_PROVIDER", "GLASSBOX_COUNTERFACTUAL_MODEL",
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    dotenv_paths: list[Path] = []
+
+    def capture_dotenv(path: Path, **kwargs):  # type: ignore[no-untyped-def]
+        dotenv_paths.append(path)
+        return {}
+
+    monkeypatch.setattr(counterfactual_config, "dotenv_values", capture_dotenv)
+    assert main(_counterfactual_run_args(database_path)) == 2
+    assert dotenv_paths == [Path(__file__).resolve().parents[1] / ".env"]
+    assert capsys.readouterr().out == ""
 
 
 def test_counterfactual_loopback_ollama_discloses_without_confirmation(
@@ -177,6 +215,28 @@ def test_counterfactual_run_returns_two_for_empty_selection(
     assert payload["selected_count"] == 0
     assert payload["results"] == []
     assert factories == []
+
+
+def test_counterfactual_report_replays_original_maturity_status(
+    tmp_path: Path, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import (
+        DECIDED,
+        FakeProvider,
+        _answer,
+        _execute,
+        _seed,
+    )
+
+    path = tmp_path / "cases.sqlite3"
+    _seed(path, outcome=True)
+    original, _ = _execute(
+        path, FakeProvider([_answer()]), as_of=DECIDED + timedelta(days=2)
+    )
+    assert main(["--database", str(path), "counterfactual", "report", "--run",
+                 original.run_id]) == 0
+    assert json.loads(capsys.readouterr().out) == original.to_dict()
 
 
 def test_counterfactual_report_returns_two_for_unknown_run_and_never_writes(

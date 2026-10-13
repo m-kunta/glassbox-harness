@@ -149,6 +149,8 @@ def test_counterfactual_schema_rejects_invalid_run_shapes(
     {"hypothetical_rationale": " "}, {"hypothetical_recommendation_json": None},
     {"failure_code": "timeout"}, {"outcome_label": "tp"}, {"outcome_label": "other"},
     {"created_at": "2026-08-22T14:30:45+00:00"},
+    {"outcome_status": "labelled"},
+    {"outcome_status": "case_failed"},
 ])
 def test_counterfactual_schema_rejects_invalid_result_shapes(
     tmp_path: Path, changes: dict[str, object],
@@ -625,9 +627,13 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     counterfactual_migration = (
         STORE_ROOT / "migrations" / "007_counterfactual_prompts.sql"
     ).read_text(encoding="utf-8")
+    counterfactual_status_migration = (
+        STORE_ROOT / "migrations" / "008_counterfactual_outcome_status.sql"
+    ).read_text(encoding="utf-8")
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
         f"\n{outcome_migration}\n{remediation_migration}\n{counterfactual_migration}"
+        f"\n{counterfactual_status_migration}"
     )
 
 

@@ -43,6 +43,38 @@ def _create_post_006_database(path: Path) -> None:
     connection.close()
 
 
+def test_counterfactual_upgrade_from_exact_007_adds_persisted_status(tmp_path: Path) -> None:
+    from tests.store.test_schema import (
+        _counterfactual_result_row,
+        _counterfactual_run_row,
+        _insert_decision,
+        _insert_row,
+    )
+
+    path = tmp_path / "post-007.sqlite3"
+    _create_post_006_database(path)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        (STORE_ROOT / "migrations" / "007_counterfactual_prompts.sql").read_text()
+    )
+    _insert_decision(connection)
+    _insert_row(connection, "counterfactual_runs", _counterfactual_run_row())
+    _insert_row(connection, "counterfactual_results", _counterfactual_result_row())
+    connection.commit()
+    connection.close()
+    database = Database.open(path)
+    columns = {
+        row[1] for row in database.connection.execute("PRAGMA table_info(counterfactual_results)")
+    }
+    assert "outcome_status" in columns
+    assert database.connection.execute(
+        "SELECT outcome_status FROM counterfactual_results"
+    ).fetchone()[0] == "legacy_unrecorded"
+    database.close()
+    reader = Database.open_read_only(path)
+    reader.close()
+
+
 def test_counterfactual_upgrade_from_exact_006_is_read_only_compatible(tmp_path: Path) -> None:
     path = tmp_path / "post-006.sqlite3"
     _create_post_006_database(path)

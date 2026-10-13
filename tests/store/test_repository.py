@@ -69,6 +69,7 @@ def _counterfactual_records():
         failure_code=None,
         outcome_id=None,
         outcome_label=None,
+        outcome_status="outcome_not_applicable",
     )
     return run, result
 
@@ -253,6 +254,8 @@ def test_counterfactual_atomic_write_rolls_back_invalid_second_result(
         {"outcome_label": "tp"},
         {"snapshot_facts": {"x": float("nan")}},
         {"capture_references": {"text": "recognizable secret capture text"}},
+        {"outcome_status": "labelled"},
+        {"outcome_status": "case_failed"},
     ],
 )
 def test_counterfactual_invalid_results_never_persist(
@@ -275,6 +278,7 @@ def test_counterfactual_failure_before_rendering_and_result_order(
         hypothetical_recommendation=None,
         hypothetical_rationale=None,
         failure_code="snapshot_invalid",
+        outcome_status="case_failed",
     )
     run = dataclasses.replace(run, succeeded_count=0, failed_count=1)
     outcome_repository.record_counterfactual_run(run, (failed,))
@@ -308,7 +312,9 @@ def test_counterfactual_enrichment_rejects_cross_policy_outcome(
 ) -> None:
     outcome = outcome_repository.record_outcome(_outcome_submission())
     run, result = _counterfactual_records()
-    enriched = dataclasses.replace(result, outcome_id=outcome.outcome_id, outcome_label="tn")
+    enriched = dataclasses.replace(
+        result, outcome_id=outcome.outcome_id, outcome_label="tn", outcome_status="labelled"
+    )
     outcome_repository.record_counterfactual_run(run, (enriched,))
     assert outcome_repository.counterfactual_run_detail(run.run_id).results[0].outcome_label == "tn"
     changed_policy = dataclasses.replace(run, run_id="01ARZ3NDEKTSV4RRFFQ69G5FC5",
@@ -331,6 +337,7 @@ def test_counterfactual_detail_orders_success_and_failure_by_selected_order(
         decision_id=second_id, selected_order=1, input_hash=None,
         hypothetical_recommendation=None, hypothetical_rationale=None,
         failure_code="blob_unavailable")
+    failed = dataclasses.replace(failed, outcome_status="case_failed")
     run = dataclasses.replace(run, selected_count=2, failed_count=1)
     outcome_repository.record_counterfactual_run(run, (failed, result))
     assert outcome_repository.counterfactual_run_detail(run.run_id).results == (result, failed)

@@ -470,6 +470,7 @@ class CounterfactualResult:
     failure_code: str | None
     outcome_id: str | None
     outcome_label: Literal["tp", "fp", "tn", "fn"] | None
+    outcome_status: str = "outcome_not_applicable"
 
 
 @dataclass(frozen=True)
@@ -619,7 +620,7 @@ class Repository:
                             source_model_provenance_json, model_parity, input_hash,
                             original_recommendation_json, original_rationale,
                             hypothetical_recommendation_json, hypothetical_rationale, failure_code,
-                            outcome_id, outcome_label
+                            outcome_id, outcome_label, outcome_status
                         ) VALUES (
                             :result_id, :run_id, :decision_id, :selected_order, :created_at,
                             :snapshot_facts_json, :capture_references_json,
@@ -627,7 +628,7 @@ class Repository:
                             :original_recommendation_json, :original_rationale,
                             :hypothetical_recommendation_json, :hypothetical_rationale,
                             :failure_code,
-                            :outcome_id, :outcome_label
+                            :outcome_id, :outcome_label, :outcome_status
                         )""",
                         values,
                     )
@@ -742,6 +743,15 @@ class Repository:
                 "fn",
             }:
                 raise ValueError("counterfactual outcome label is invalid")
+            if result.outcome_status not in {
+                "case_failed", "labelled", "decision_not_mature", "outcome_not_applicable",
+            }:
+                raise ValueError("counterfactual outcome status is invalid")
+            if (
+                (result.failure_code is not None) != (result.outcome_status == "case_failed")
+                or (result.outcome_label is not None) != (result.outcome_status == "labelled")
+            ):
+                raise ValueError("counterfactual outcome status disagrees with result")
 
     def write_event(self, event: Event) -> None:
         """Persist one canonical event in a transaction."""
