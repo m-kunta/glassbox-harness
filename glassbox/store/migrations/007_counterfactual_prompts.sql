@@ -58,3 +58,18 @@ CREATE TRIGGER counterfactual_results_no_delete BEFORE DELETE ON counterfactual_
 BEGIN
     SELECT RAISE(ABORT, 'counterfactual history is immutable');
 END;
+CREATE TRIGGER counterfactual_runs_no_replace BEFORE INSERT ON counterfactual_runs
+WHEN EXISTS (SELECT 1 FROM counterfactual_runs WHERE run_id = NEW.run_id)
+BEGIN
+    SELECT RAISE(ABORT, 'counterfactual history is immutable');
+END;
+CREATE TRIGGER counterfactual_results_no_replace BEFORE INSERT ON counterfactual_results
+WHEN EXISTS (
+    SELECT 1 FROM counterfactual_results
+    WHERE result_id = NEW.result_id
+       OR (run_id = NEW.run_id AND decision_id = NEW.decision_id)
+       OR (run_id = NEW.run_id AND selected_order = NEW.selected_order)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'counterfactual history is immutable');
+END;

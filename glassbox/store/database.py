@@ -35,6 +35,8 @@ _COUNTERFACTUAL_TRIGGERS = (
     "counterfactual_runs_no_delete",
     "counterfactual_results_no_update",
     "counterfactual_results_no_delete",
+    "counterfactual_runs_no_replace",
+    "counterfactual_results_no_replace",
 )
 _TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES + _COUNTERFACTUAL_TABLES
 _INDEXES = (

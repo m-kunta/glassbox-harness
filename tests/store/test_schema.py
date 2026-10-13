@@ -61,6 +61,67 @@ def _counterfactual_result_row() -> dict[str, object]:
     }
 
 
+def test_counterfactual_schema_rejects_replacing_an_empty_run(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "immutable-run.sqlite3")
+    connection = database.connection
+    try:
+        row = _counterfactual_run_row() | {
+            "selected_count": 0, "succeeded_count": 0, "failed_count": 0,
+        }
+        _insert_row(connection, "counterfactual_runs", row)
+        connection.commit()
+        original = tuple(connection.execute("SELECT * FROM counterfactual_runs").fetchone())
+        replacement = row | {"provider": "rewritten-provider"}
+        columns = ", ".join(replacement)
+        placeholders = ", ".join("?" for _ in replacement)
+        assert connection.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"INSERT OR REPLACE INTO counterfactual_runs ({columns}) "
+                f"VALUES ({placeholders})", tuple(replacement.values()),
+            )
+        assert tuple(connection.execute("SELECT * FROM counterfactual_runs").fetchone()) == original
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize("conflict", ["result_id", "decision_id", "selected_order"])
+def test_counterfactual_schema_rejects_replacing_existing_result(
+    tmp_path: Path, conflict: str,
+) -> None:
+    database = Database.open(tmp_path / "immutable-result.sqlite3")
+    connection = database.connection
+    try:
+        _insert_decision(connection)
+        alternate_id = JUDGE_EVAL_RESULT_ID_INVALID
+        _insert_row(connection, "decisions", _valid_row("decisions") | {
+            "decision_id": alternate_id,
+        })
+        _insert_row(connection, "counterfactual_runs", _counterfactual_run_row())
+        row = _counterfactual_result_row()
+        _insert_row(connection, "counterfactual_results", row)
+        connection.commit()
+        original = tuple(connection.execute("SELECT * FROM counterfactual_results").fetchone())
+        replacement = row | {"hypothetical_rationale": "rewritten rationale"}
+        if conflict == "decision_id":
+            replacement |= {"result_id": JUDGE_EVAL_RESULT_ID, "selected_order": 1}
+        elif conflict == "selected_order":
+            replacement |= {"result_id": JUDGE_EVAL_RESULT_ID, "decision_id": alternate_id}
+        columns = ", ".join(replacement)
+        placeholders = ", ".join("?" for _ in replacement)
+        assert connection.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"INSERT OR REPLACE INTO counterfactual_results ({columns}) "
+                f"VALUES ({placeholders})", tuple(replacement.values()),
+            )
+        assert tuple(connection.execute(
+            "SELECT * FROM counterfactual_results"
+        ).fetchone()) == original
+    finally:
+        database.close()
+
+
 @pytest.mark.parametrize("changes", [
     {"run_id": "bad"}, {"provider": " "}, {"model": ""}, {"prompt_hash": "short"},
     {"outcome_policy_hash": "g" * 64}, {"created_at": "2026-08-22T14:30:45+00:00"},
