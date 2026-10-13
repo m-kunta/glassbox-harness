@@ -339,6 +339,41 @@ def test_run_uses_fixed_newest_first_selection_before_max_cases(tmp_path: Path) 
     assert [item.decision_id for item in detail.results] == [DECISION_IDS[2], DECISION_IDS[1]]
 
 
+def test_future_decisions_do_not_consume_max_cases_or_reach_provider(tmp_path: Path) -> None:
+    path = tmp_path / "events.sqlite3"
+    _seed(path, count=2)
+    provider = FakeProvider([_answer()])
+    report, detail = _execute(
+        path, provider, max_cases=1, as_of=DECIDED + timedelta(seconds=30),
+    )
+    assert report.selected_count == 1
+    assert len(provider.calls) == 1
+    assert [item.decision_id for item in detail.results] == [DECISION_IDS[0]]
+
+
+@pytest.mark.parametrize(("input_ref", "contract", "use_blob_dir", "diagnostic"), [
+    ("f" * 64, True, False, "blob_dir_not_supplied"),
+    ("f" * 64, False, True, "capture_contract_not_declared"),
+    (None, True, True, "input_ref_absent"),
+])
+def test_structured_only_capture_skip_reason_is_persisted_and_reported(
+    tmp_path: Path, input_ref: str | None, contract: bool,
+    use_blob_dir: bool, diagnostic: str,
+) -> None:
+    path = tmp_path / "events.sqlite3"
+    _seed(path, input_ref=input_ref)
+    provider = FakeProvider([_answer()])
+    report, detail = _execute(
+        path, provider, prompt=_prompt(contract=contract),
+        blob_dir=tmp_path / "unreadable-private-path" if use_blob_dir else None,
+    )
+    assert report.succeeded_count == 1
+    assert detail.results[0].snapshot_facts["capture_diagnostic"] == diagnostic
+    assert report.to_dict()["results"][0]["capture_diagnostic"] == diagnostic
+    assert "capture_diagnostic" not in provider.calls[0][1]
+    assert "unreadable-private-path" not in json.dumps(report.to_dict())
+
+
 def test_blob_read_failure_becomes_a_case_result_not_a_command_failure(tmp_path: Path) -> None:
     path = tmp_path / "events.sqlite3"
     _seed(path, count=2, input_ref="f" * 64)

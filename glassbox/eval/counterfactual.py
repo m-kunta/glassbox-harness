@@ -114,6 +114,7 @@ class CounterfactualReport:
                     "hypothetical_recommendation": item.hypothetical_recommendation,
                     "hypothetical_rationale": item.hypothetical_rationale,
                     "failure_code": item.failure_code,
+                    "capture_diagnostic": item.snapshot_facts.get("capture_diagnostic"),
                     "outcome_id": item.outcome_id,
                     "outcome_label": item.outcome_label,
                     "outcome_status": status,
@@ -337,27 +338,34 @@ def _prepare_case(
     provenance, parity = _source_provenance(candidate, config)
     projection: dict[str, object] = dict(facts)
     projection["input_capture"] = None
-    if (
-        blobs is not None and prompt.capture_input_contract == _CAPTURE_INPUT_CONTRACT
-        and candidate.trace.input_ref is not None
-    ):
+    if blobs is None:
+        facts["capture_diagnostic"] = "blob_dir_not_supplied"
+    elif prompt.capture_input_contract != _CAPTURE_INPUT_CONTRACT:
+        facts["capture_diagnostic"] = "capture_contract_not_declared"
+    elif candidate.trace.input_ref is None:
+        facts["capture_diagnostic"] = "input_ref_absent"
+    else:
         try:
             projection["input_capture"] = blobs.get(candidate.trace.input_ref).decode("utf-8")
         except ValueError:
+            facts["capture_diagnostic"] = "capture_invalid_reference"
             return _PreparedCase(
                 candidate, facts, references, provenance, parity, None, None,
                 "capture_invalid_reference",
             )
         except UnicodeError:
+            facts["capture_diagnostic"] = "capture_non_utf8"
             return _PreparedCase(
                 candidate, facts, references, provenance, parity, None, None,
                 "capture_non_utf8",
             )
         except OSError:
+            facts["capture_diagnostic"] = "capture_unavailable"
             return _PreparedCase(
                 candidate, facts, references, provenance, parity, None, None,
                 "capture_unavailable",
             )
+        facts["capture_diagnostic"] = "input_enriched"
     try:
         user_prompt = _render_user_prompt(prompt, projection)
         input_hash = hashlib.sha256(canonical_dumps({
@@ -441,7 +449,11 @@ def run_counterfactual(
     try:
         repository = Repository(database)
         candidates = repository.counterfactual_candidates(decided_since, policy.policy_hash)
-        selected = candidates if max_cases is None else candidates[:max_cases]
+        eligible = tuple(
+            candidate for candidate in candidates
+            if candidate.decision.event.decided_at <= as_of
+        )
+        selected = eligible if max_cases is None else eligible[:max_cases]
         blobs = BlobStore(blob_dir) if blob_dir is not None else None
         prepared = tuple(_prepare_case(item, config, prompt, blobs) for item in selected)
 
