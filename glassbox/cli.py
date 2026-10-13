@@ -75,7 +75,115 @@ def main(argv: Sequence[str] | None = None) -> int:
     outcomes_import.add_argument("--policy", type=Path)
     outcomes_report = outcomes_subcommands.add_parser("report", help="print reconciliation metrics")
     outcomes_report.add_argument("--policy", type=Path)
+    counterfactual_command = commands.add_parser(
+        "counterfactual", help="run or inspect offline prompt experiments"
+    )
+    counterfactual_subcommands = counterfactual_command.add_subparsers(
+        dest="counterfactual_command", required=True
+    )
+    counterfactual_run = counterfactual_subcommands.add_parser(
+        "run", help="run a counterfactual prompt over recent decisions"
+    )
+    counterfactual_run.add_argument("--prompt", type=Path, required=True)
+    counterfactual_run.add_argument("--since", type=_parse_duration, required=True)
+    counterfactual_run.add_argument("--max-cases", type=_parse_max_cases)
+    counterfactual_run.add_argument("--blob-dir", type=Path)
+    counterfactual_run.add_argument("--confirm-egress", action="store_true")
+    counterfactual_run.add_argument("--outcome-policy", type=Path)
+    counterfactual_report_parser = counterfactual_subcommands.add_parser(
+        "report", help="print one persisted counterfactual run as JSON"
+    )
+    counterfactual_report_parser.add_argument("--run", required=True)
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "counterfactual":
+        # Keep the optional configuration/provider stack out of all other CLI paths.
+        from glassbox.eval.counterfactual import (
+            CounterfactualReport,
+            load_outcome_policy,
+            load_prompt_artifact,
+            run_counterfactual,
+        )
+        from glassbox.eval.counterfactual_config import load_counterfactual_config
+        from glassbox.eval.counterfactual_provider import create_counterfactual_provider
+
+        database_path = Path(arguments.database)
+        try:
+            if arguments.counterfactual_command == "report":
+                database = Database.open_read_only(database_path)
+                try:
+                    detail = Repository(database).counterfactual_run_detail(arguments.run)
+                finally:
+                    database.close()
+                if detail is None:
+                    raise ValueError("unknown run")
+                statuses = tuple(
+                    "case_failed" if item.failure_code is not None else
+                    "labelled" if item.outcome_label is not None else "unlabelled"
+                    for item in detail.results
+                )
+                counterfactual_result_report = CounterfactualReport(
+                    detail.run, detail.results, statuses
+                )
+                print(json.dumps(counterfactual_result_report.to_dict(),
+                                 sort_keys=True, separators=(",", ":")))
+                return 0
+
+            counterfactual_config = load_counterfactual_config(Path.cwd(), os.environ)
+            prompt = load_prompt_artifact(arguments.prompt)
+            counterfactual_policy = load_outcome_policy(
+                arguments.outcome_policy
+                or Path(__file__).parent / "eval/policies/reconciliation_v2.toml"
+            )
+            if not database_path.is_file():
+                raise ValueError("missing database")
+            as_of = datetime.now(UTC)
+            decided_since = as_of - arguments.since
+            database = Database.open_read_only(database_path)
+            try:
+                counterfactual_candidates = Repository(database).counterfactual_candidates(
+                    decided_since, counterfactual_policy.policy_hash
+                )
+                eligible = tuple(
+                    candidate for candidate in counterfactual_candidates
+                    if candidate.decision.event.decided_at <= as_of
+                )
+                selected = (
+                    eligible if arguments.max_cases is None
+                    else eligible[:arguments.max_cases]
+                )
+            finally:
+                database.close()
+            if counterfactual_config.is_remote and not arguments.confirm_egress:
+                raise ValueError("remote egress requires confirmation")
+            capture_count = sum(
+                candidate.trace.input_ref is not None
+                for candidate in selected
+            ) if (arguments.blob_dir is not None and
+                  prompt.capture_input_contract == "input_only_no_prior_outputs") else 0
+            print(
+                "glassbox: counterfactual preflight disclosure -- "
+                f"provider={_safe_disclosure_value(counterfactual_config.provider)} "
+                f"model={_safe_disclosure_value(counterfactual_config.model)} "
+                f"base_url={_safe_disclosure_value(counterfactual_config.base_url)} "
+                f"prompt_version={_safe_disclosure_value(prompt.prompt_version)} "
+                f"prompt_hash={prompt.prompt_hash} "
+                f"selected_count={len(selected)} capture_count={capture_count}",
+                file=sys.stderr,
+            )
+            counterfactual_result_report = run_counterfactual(
+                database_path, counterfactual_config, prompt, counterfactual_policy, decided_since,
+                arguments.max_cases, arguments.blob_dir,
+                clock=lambda: as_of, provider_factory=create_counterfactual_provider,
+            )
+            print(json.dumps(counterfactual_result_report.to_dict(),
+                             sort_keys=True, separators=(",", ":")))
+            return 0 if counterfactual_result_report.succeeded_count else 2
+        except Exception:
+            # This command can touch optional SDKs and operator-selected files.
+            # Never turn their exception text into a credential or path leak.
+            print("glassbox: unable to run counterfactual command", file=sys.stderr)
+            return 2
 
     if arguments.command == "outcomes":
         from glassbox.eval.reconciliation import (
@@ -392,6 +500,11 @@ def _parse_max_cases(text: str) -> int:
     if value <= 0:
         raise argparse.ArgumentTypeError("--max-cases must be a positive integer")
     return value
+
+
+def _safe_disclosure_value(value: str) -> str:
+    """Keep configured labels on one stderr line even with control characters."""
+    return re.sub(r"[\x00-\x1f\x7f]+", "?", value)
 
 
 def _read_trace_tree(database_path: Path, trace_id: str) -> TraceTree | None:

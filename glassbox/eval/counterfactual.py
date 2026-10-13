@@ -25,7 +25,7 @@ from glassbox.store.repository import (
 
 from .counterfactual_config import CounterfactualConfig
 from .counterfactual_provider import CounterfactualProvider
-from .reconciliation import ReconciliationError, ReconciliationPolicy, derive_label
+from .reconciliation import ReconciliationError, ReconciliationPolicy, derive_label, load_policy
 
 _SNAPSHOT_TOKEN = "{{decision_snapshot_json}}"
 _CAPTURE_INPUT_CONTRACT = "input_only_no_prior_outputs"
@@ -122,6 +122,11 @@ class CounterfactualReport:
                 for item, status in zip(self.results, self.outcome_statuses, strict=True)
             ],
         }
+
+
+def load_outcome_policy(path: Path) -> ReconciliationPolicy:
+    """Expose policy loading through the counterfactual command boundary."""
+    return load_policy(path)
 
 
 def load_prompt_artifact(path: Path) -> PromptArtifact:

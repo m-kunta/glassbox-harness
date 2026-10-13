@@ -140,6 +140,9 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.judge_provider",
                 "glassbox.eval.judge_models",
                 "glassbox.eval.reconciliation",
+                "glassbox.eval.counterfactual",
+                "glassbox.eval.counterfactual_config",
+                "glassbox.eval.counterfactual_provider",
                 "glassbox.sdk",
             ],
         },
@@ -228,6 +231,101 @@ def test_package_metadata_declares_judge_extras() -> None:
     assert optional["judge-claude"] == ["python-dotenv>=1.0", "anthropic>=0.45"]
     assert optional["judge-openai"] == ["python-dotenv>=1.0", "openai>=1.0"]
     assert optional["judge-gemini"] == ["python-dotenv>=1.0", "google-genai>=1.0"]
+
+
+def test_package_metadata_declares_counterfactual_extras() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    optional = config["project"]["optional-dependencies"]
+    assert optional["counterfactual"] == optional["judge"]
+    for provider in ("claude", "openai", "gemini"):
+        assert optional[f"counterfactual-{provider}"] == optional[f"judge-{provider}"]
+
+
+def _assert_counterfactual_imports_stay_in_command_branch(source_path: Path) -> None:
+    tree = ast.parse(source_path.read_text())
+    forbidden = {
+        "glassbox.eval.counterfactual",
+        "glassbox.eval.counterfactual_config",
+        "glassbox.eval.counterfactual_provider",
+    }
+
+    def visit(node: ast.AST, *, in_branch: bool = False) -> None:
+        if isinstance(node, ast.If):
+            branch = isinstance(node.test, ast.Compare) and ast.unparse(node.test) == (
+                "arguments.command == 'counterfactual'"
+            )
+            for child in node.body:
+                visit(child, in_branch=in_branch or branch)
+            for child in node.orelse:
+                visit(child, in_branch=in_branch)
+            return
+        if isinstance(node, ast.Import):
+            modules = {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = importlib.util.resolve_name(
+                    "." * node.level + module, "glassbox"
+                )
+            modules = {module, *(f"{module}.{alias.name}" for alias in node.names)}
+        else:
+            modules = set()
+        if any(name in forbidden for name in modules) and not in_branch:
+            raise AssertionError("counterfactual imports must stay in counterfactual branch")
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_branch=in_branch)
+
+    visit(tree)
+
+
+def test_cli_counterfactual_imports_stay_in_command_branch() -> None:
+    _assert_counterfactual_imports_stay_in_command_branch(PROJECT_ROOT / "glassbox/cli.py")
+
+
+@pytest.mark.parametrize("source", [
+    "import glassbox.eval.counterfactual\n",
+    "from glassbox.eval.counterfactual_config import load_counterfactual_config\n",
+    "from glassbox.eval import counterfactual_provider\n",
+    "from .eval.counterfactual import run_counterfactual\n",
+    "from .eval import counterfactual_config\n",
+    "if True:\n    from glassbox.eval.counterfactual import run_counterfactual\n",
+    "class CLI:\n    from glassbox.eval import counterfactual\n",
+    "def main(arguments):\n    from glassbox.eval.counterfactual import run_counterfactual\n",
+    "def main(arguments):\n    if arguments.command == 'serve':\n"
+    "        from glassbox.eval.counterfactual_provider import create_counterfactual_provider\n",
+])
+def test_counterfactual_lazy_import_check_rejects_outside_branch(
+    tmp_path: Path, source: str,
+) -> None:
+    path = tmp_path / "cli.py"
+    path.write_text(source)
+    with pytest.raises(AssertionError, match="counterfactual imports"):
+        _assert_counterfactual_imports_stay_in_command_branch(path)
+
+
+def test_counterfactual_lazy_import_check_allows_handler_branch(tmp_path: Path) -> None:
+    path = tmp_path / "cli.py"
+    path.write_text(
+        "def main(arguments):\n"
+        "    if arguments.command == 'counterfactual':\n"
+        "        from glassbox.eval.counterfactual import run_counterfactual\n"
+        "        from .eval import counterfactual_config\n"
+    )
+    _assert_counterfactual_imports_stay_in_command_branch(path)
+
+
+def test_import_linter_forbids_web_from_counterfactual_modules() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    contracts = config["tool"]["importlinter"]["contracts"]
+    forbidden = next(
+        set(contract["forbidden_modules"])
+        for contract in contracts if contract["source_modules"] == ["glassbox.web"]
+    )
+    assert {
+        "glassbox.eval.counterfactual", "glassbox.eval.counterfactual_config",
+        "glassbox.eval.counterfactual_provider",
+    } <= forbidden
+    assert "glassbox.eval.drift" not in forbidden
 
 
 def test_gitignore_excludes_the_judge_env_secrets_file() -> None:

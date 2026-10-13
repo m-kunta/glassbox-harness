@@ -37,6 +37,10 @@ judge = ["python-dotenv>=1.0"]
 judge-claude = ["python-dotenv>=1.0", "anthropic>=0.45"]
 judge-openai = ["python-dotenv>=1.0", "openai>=1.0"]
 judge-gemini = ["python-dotenv>=1.0", "google-genai>=1.0"]
+counterfactual = ["python-dotenv>=1.0"]
+counterfactual-claude = ["python-dotenv>=1.0", "anthropic>=0.45"]
+counterfactual-openai = ["python-dotenv>=1.0", "openai>=1.0"]
+counterfactual-gemini = ["python-dotenv>=1.0", "google-genai>=1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["glassbox"]
@@ -146,5 +150,8 @@ forbidden_modules = [
   "glassbox.eval.judge_provider",
   "glassbox.eval.judge_models",
   "glassbox.eval.reconciliation",
+  "glassbox.eval.counterfactual",
+  "glassbox.eval.counterfactual_config",
+  "glassbox.eval.counterfactual_provider",
   "glassbox.sdk",
 ]

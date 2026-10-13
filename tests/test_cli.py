@@ -47,6 +47,204 @@ def test_drift_baseline_policy_position_preserves_selected_policy(
     assert payload["baseline_window"]["start"] == "2026-01-01T00:00:00+00:00"
 
 
+def _counterfactual_cli_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
+                              remote: bool, responses: list[str | Exception],
+                              count: int = 1):
+    from glassbox.eval.counterfactual_config import CounterfactualConfig
+    from tests.eval.test_counterfactual import FakeProvider, _seed
+
+    database_path = tmp_path / "counterfactual.sqlite3"
+    _seed(database_path, count=count)
+    config = CounterfactualConfig(
+        "openai" if remote else "ollama", "variant-model",
+        "PRIVATE_CREDENTIAL" if remote else None,
+        "https://api.openai.com/v1" if remote else "http://127.0.0.1:11434", remote,
+    )
+    provider = FakeProvider(responses)
+    factories: list[object] = []
+    monkeypatch.setattr(
+        "glassbox.eval.counterfactual_config.load_counterfactual_config",
+        lambda *_: config,
+    )
+
+    def factory(selected_config):  # type: ignore[no-untyped-def]
+        factories.append(selected_config)
+        return provider
+
+    monkeypatch.setattr("glassbox.eval.counterfactual_provider.create_counterfactual_provider",
+                        factory)
+    return database_path, provider, factories
+
+
+def _counterfactual_run_args(database_path: Path) -> list[str]:
+    return [
+        "--database", str(database_path), "counterfactual", "run",
+        "--prompt", str(Path(__file__).parents[1] / "glassbox/eval/prompts/counterfactual_v1.md"),
+        "--since", "90d",
+    ]
+
+
+def test_counterfactual_remote_preflight_requires_confirmation_before_provider_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import _answer
+
+    path, provider, factories = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=True, responses=[_answer()],
+    )
+    assert main(_counterfactual_run_args(path)) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "glassbox: unable to run counterfactual command\n"
+    assert captured.out == ""
+    assert factories == []
+    assert provider.calls == []
+
+
+def test_counterfactual_loopback_ollama_discloses_without_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import _answer
+
+    path, provider, factories = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=[_answer()],
+    )
+    assert main(_counterfactual_run_args(path)) == 0
+    captured = capsys.readouterr()
+    assert "provider=ollama" in captured.err
+    assert "model=variant-model" in captured.err
+    assert "base_url=http://127.0.0.1:11434" in captured.err
+    assert "prompt_version=counterfactual_v1" in captured.err
+    assert "prompt_hash=" in captured.err
+    assert "selected_count=1" in captured.err
+    assert "capture_count=0" in captured.err
+    assert "PRIVATE_CREDENTIAL" not in captured.err
+    assert len(factories) == len(provider.calls) == 1
+    assert json.loads(captured.out)["succeeded_count"] == 1
+
+
+def test_counterfactual_run_prints_compact_json_and_zero_for_partial_case_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import _answer
+
+    path, _, _ = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=True, responses=["bad JSON", _answer()], count=2,
+    )
+    assert main(_counterfactual_run_args(path) + ["--confirm-egress", "--max-cases", "2"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert (payload["selected_count"], payload["succeeded_count"], payload["failed_count"]) == (
+        2, 1, 1,
+    )
+    assert captured.out == json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    assert "PRIVATE_CREDENTIAL" not in captured.err + captured.out
+    assert "ORIGINAL_RATIONALE" not in captured.err
+
+
+def test_counterfactual_run_returns_two_for_zero_successes_after_persisting_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+
+    path, _, _ = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=["invalid response"],
+    )
+    assert main(_counterfactual_run_args(path)) == 2
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["selected_count"] == 1
+    assert failed["succeeded_count"] == 0
+    assert failed["results"][0]["failure_code"] == "invalid_response"
+    assert main(["--database", str(path), "counterfactual", "report", "--run",
+                 failed["run_id"]]) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["run_id"] == failed["run_id"]
+    assert replay["results"][0]["failure_code"] == "invalid_response"
+
+
+def test_counterfactual_run_returns_two_for_empty_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+
+    path, _, factories = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=[],
+    )
+    assert main(_counterfactual_run_args(path)[:-1] + ["1d"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_count"] == 0
+    assert payload["results"] == []
+    assert factories == []
+
+
+def test_counterfactual_report_returns_two_for_unknown_run_and_never_writes(
+    tmp_path: Path, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+
+    path = tmp_path / "counterfactual.sqlite3"
+    database = Database.open(path)
+    database.close()
+    before = path.read_bytes()
+    assert main(["--database", str(path), "counterfactual", "report", "--run",
+                 "01ARZ3NDEKTSV4RRFFQ69G5FAZ"]) == 2
+    assert capsys.readouterr().err == "glassbox: unable to run counterfactual command\n"
+    assert path.read_bytes() == before
+
+
+def test_counterfactual_preflight_and_run_share_as_of_filter_before_case_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    import glassbox.cli as cli
+    from tests.eval.test_counterfactual import DECIDED, DECISION_IDS, _answer
+
+    path, provider, _ = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=[_answer()], count=2,
+    )
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            assert tz == UTC
+            return DECIDED + timedelta(seconds=30)
+
+    monkeypatch.setattr(cli, "datetime", FixedDatetime)
+    assert cli.main(_counterfactual_run_args(path) + ["--max-cases", "1"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "selected_count=1" in captured.err
+    assert payload["as_of"] == "2026-08-01T12:00:30Z"
+    assert [item["decision_id"] for item in payload["results"]] == [DECISION_IDS[0]]
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("defect", ["prompt", "policy", "database"])
+def test_counterfactual_bad_local_inputs_have_one_safe_error_line_before_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, defect: str,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import _answer
+
+    path, _, factories = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=[_answer()],
+    )
+    args = _counterfactual_run_args(path)
+    private_path = tmp_path / "PRIVATE_PATH"
+    if defect == "prompt":
+        args[args.index("--prompt") + 1] = str(private_path)
+    elif defect == "policy":
+        args.extend(["--outcome-policy", str(private_path)])
+    else:
+        args[args.index("--database") + 1] = str(private_path)
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "glassbox: unable to run counterfactual command\n"
+    assert captured.out == ""
+    assert factories == []
+
+
 @pytest.mark.parametrize("start,end", [
     ("2026-01-01T00:00:00+00:00", "2026-06-01T00:00:00Z"),
     ("2026-06-01T00:00:00Z", "2026-01-01T00:00:00Z"),
