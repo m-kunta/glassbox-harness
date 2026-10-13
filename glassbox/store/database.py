@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -27,10 +28,24 @@ _DRIFT_TABLES = ("drift_baselines", "drift_runs", "drift_results")
 _DRIFT_INDEXES = ("idx_drift_baselines_agent_policy", "idx_drift_runs_agent_created")
 _OUTCOME_INDEXES = ("idx_outcomes_source_id",)
 _REMEDIATION_INDEXES = ("idx_outcomes_source_policy", "idx_drift_baselines_superseded")
-_TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES
-_INDEXES = _BASE_INDEXES + _DRIFT_INDEXES + _OUTCOME_INDEXES + _REMEDIATION_INDEXES
+_COUNTERFACTUAL_TABLES = ("counterfactual_runs", "counterfactual_results")
+_COUNTERFACTUAL_INDEXES = ("idx_counterfactual_runs_created", "idx_counterfactual_results_decision")
+_COUNTERFACTUAL_TRIGGERS = (
+    "counterfactual_runs_no_update",
+    "counterfactual_runs_no_delete",
+    "counterfactual_results_no_update",
+    "counterfactual_results_no_delete",
+)
+_TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES + _COUNTERFACTUAL_TABLES
+_INDEXES = (
+    _BASE_INDEXES
+    + _DRIFT_INDEXES
+    + _OUTCOME_INDEXES
+    + _REMEDIATION_INDEXES
+    + _COUNTERFACTUAL_INDEXES
+)
 _BASE_SCHEMA_OBJECTS = _BASE_TABLES + _BASE_INDEXES
-_SCHEMA_OBJECTS = _TABLES + _INDEXES
+_SCHEMA_OBJECTS = _TABLES + _INDEXES + _COUNTERFACTUAL_TRIGGERS
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 _JUDGE_CALIBRATION_TABLES = ("feedback", "eval_runs", "eval_results")
 _JUDGE_CALIBRATION_TABLE_PREFIX = "__glassbox_pre_judge_calibration_"
@@ -179,6 +194,13 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
             _apply_outcome_reconciliation_migration(connection)
         elif schema_objects == _released_p4_schema_objects():
             _apply_p3_p4_remediation_migration(connection)
+        elif schema_objects == _released_post_remediation_schema_objects():
+            _apply_ordinary_migration(
+                connection,
+                "007_counterfactual_prompts.sql",
+                schema_objects,
+                _current_schema_objects(),
+            )
         else:
             raise _unsupported_schema_error()
 
@@ -203,6 +225,7 @@ def _migration_needed(connection: sqlite3.Connection, predecessor: dict[str, str
         _released_p3a_schema_objects(),
         _released_p3b_schema_objects(),
         _released_p4_schema_objects(),
+        _released_post_remediation_schema_objects(),
         _current_schema_objects(),
     )
     predecessor_index = next((i for i, item in enumerate(releases) if item == predecessor), -1)
@@ -283,6 +306,14 @@ def _released_p2_schema_objects() -> dict[str, str]:
 
 @lru_cache
 def _current_schema_objects() -> dict[str, str]:
+    return _released_post_remediation_schema_objects() | _released_schema_objects(
+        "007_counterfactual_prompts.sql",
+        _COUNTERFACTUAL_TABLES + _COUNTERFACTUAL_INDEXES + _COUNTERFACTUAL_TRIGGERS,
+    )
+
+
+@lru_cache
+def _released_post_remediation_schema_objects() -> dict[str, str]:
     """Return the remediated schema with policy-scoped replay and drift checks."""
     previous = _released_p4_schema_objects().copy()
     previous.pop("idx_outcomes_source_id")
@@ -322,7 +353,7 @@ def _released_schema_objects(
 ) -> dict[str, str]:
     schema = _migration_sql(filename)
     expected: dict[str, str] = {}
-    for statement in schema.split(";"):
+    for statement in _schema_statements(schema):
         normalized = _normalize_schema_sql(statement)
         for name in object_names:
             if normalized.startswith(_schema_prefix(name)):
@@ -339,10 +370,12 @@ def _migration_sql(filename: str) -> str:
 
 def _normalize_schema_sql(schema_sql: str) -> str:
     """Apply only SQLite's known DDL normalization to controlled SQL."""
-    return schema_sql.strip().replace(" IF NOT EXISTS", "", 1)
+    return schema_sql.strip().removesuffix(";").replace(" IF NOT EXISTS", "", 1)
 
 
 def _schema_prefix(name: str) -> str:
+    if name in _COUNTERFACTUAL_TRIGGERS:
+        return f"CREATE TRIGGER {name} "
     if name in _OUTCOME_INDEXES + _REMEDIATION_INDEXES:
         return f"CREATE UNIQUE INDEX {name} "
     object_type = "TABLE" if name in _TABLES else "INDEX"
@@ -548,7 +581,7 @@ def _apply_p3_p4_remediation_migration(connection: sqlite3.Connection) -> None:
                 "Cannot migrate the Glassbox outcome/drift schema because the database "
                 "contains foreign-key violations. Repair the database before reopening it."
             )
-        if _glassbox_schema_sql(connection) != _current_schema_objects():
+        if _glassbox_schema_sql(connection) != _released_post_remediation_schema_objects():
             raise _unsupported_schema_error()
         connection.execute("COMMIT")
     except Exception:
@@ -561,6 +594,20 @@ def _apply_p3_p4_remediation_migration(connection: sqlite3.Connection) -> None:
 
 def _execute_schema_statements(connection: sqlite3.Connection, schema_sql: str) -> None:
     """Execute the controlled schema script without executescript's implicit commit."""
-    for statement in schema_sql.split(";"):
-        if statement.strip():
-            connection.execute(statement)
+    for statement in _schema_statements(schema_sql):
+        connection.execute(statement)
+
+
+def _schema_statements(schema_sql: str) -> Iterator[str]:
+    """Keep trigger bodies intact while splitting controlled migration scripts."""
+    pending = ""
+    for part in schema_sql.splitlines(keepends=True):
+        pending += part
+        if sqlite3.complete_statement(pending):
+            yield pending.strip()
+            pending = ""
+    if pending.strip():
+        if sqlite3.complete_statement(pending + ";"):
+            yield pending.strip()
+        else:
+            raise RuntimeError("The checked-in schema contains an incomplete SQL statement.")

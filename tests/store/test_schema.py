@@ -38,6 +38,71 @@ TIMESTAMP = "2026-08-22T14:30:45.123Z"
 INVALID_TIMESTAMP = "2026-02-30T14:30:45Z"
 
 
+def _counterfactual_run_row() -> dict[str, object]:
+    return {
+        "run_id": EVAL_RUN_ID, "created_at": TIMESTAMP, "as_of": TIMESTAMP,
+        "decided_since": TIMESTAMP, "provider": "openai", "model": "model",
+        "base_url": "https://api.openai.com/v1", "prompt_version": "v1",
+        "prompt_hash": "a" * 64, "outcome_policy_version": "v2",
+        "outcome_policy_hash": "b" * 64, "selected_count": 1,
+        "succeeded_count": 1, "failed_count": 0, "remote_egress_confirmed": 1,
+    }
+
+
+def _counterfactual_result_row() -> dict[str, object]:
+    return {
+        "result_id": EVAL_RESULT_ID, "run_id": EVAL_RUN_ID, "decision_id": DECISION_ID,
+        "selected_order": 0, "created_at": TIMESTAMP, "snapshot_facts_json": "{}",
+        "capture_references_json": "{}", "source_model_provenance_json": "{}",
+        "model_parity": "unknown", "input_hash": "c" * 64,
+        "original_recommendation_json": "{}", "original_rationale": "original",
+        "hypothetical_recommendation_json": "{}", "hypothetical_rationale": "variant",
+        "failure_code": None, "outcome_id": None, "outcome_label": None,
+    }
+
+
+@pytest.mark.parametrize("changes", [
+    {"run_id": "bad"}, {"provider": " "}, {"model": ""}, {"prompt_hash": "short"},
+    {"outcome_policy_hash": "g" * 64}, {"created_at": "2026-08-22T14:30:45+00:00"},
+    {"as_of": "2026-08-22T14:30:45.000Z"}, {"decided_since": "2026-08-22"},
+    {"selected_count": -1}, {"succeeded_count": 0}, {"failed_count": 0.5},
+    {"remote_egress_confirmed": 2},
+])
+def test_counterfactual_schema_rejects_invalid_run_shapes(
+    tmp_path: Path, changes: dict[str, object],
+) -> None:
+    database = Database.open(tmp_path / "counterfactual.sqlite3")
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_row(
+                database.connection, "counterfactual_runs", _counterfactual_run_row() | changes,
+            )
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize("changes", [
+    {"model_parity": "maybe"}, {"selected_order": -1}, {"selected_order": 0.5},
+    {"snapshot_facts_json": "{bad}"}, {"capture_references_json": '{ "x": 1 }'},
+    {"input_hash": None}, {"input_hash": "D" * 64}, {"hypothetical_rationale": None},
+    {"hypothetical_rationale": " "}, {"hypothetical_recommendation_json": None},
+    {"failure_code": "timeout"}, {"outcome_label": "tp"}, {"outcome_label": "other"},
+    {"created_at": "2026-08-22T14:30:45+00:00"},
+])
+def test_counterfactual_schema_rejects_invalid_result_shapes(
+    tmp_path: Path, changes: dict[str, object],
+) -> None:
+    database = Database.open(tmp_path / "counterfactual.sqlite3")
+    try:
+        _insert_decision(database.connection)
+        _insert_row(database.connection, "counterfactual_runs", _counterfactual_run_row())
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_row(database.connection, "counterfactual_results",
+                        _counterfactual_result_row() | changes)
+    finally:
+        database.close()
+
+
 def _insert_trace(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -496,9 +561,12 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     remediation_migration = (STORE_ROOT / "migrations" / "006_p3_p4_remediation.sql").read_text(
         encoding="utf-8"
     )
+    counterfactual_migration = (
+        STORE_ROOT / "migrations" / "007_counterfactual_prompts.sql"
+    ).read_text(encoding="utf-8")
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
-        f"\n{outcome_migration}\n{remediation_migration}"
+        f"\n{outcome_migration}\n{remediation_migration}\n{counterfactual_migration}"
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 import sqlite3
 from dataclasses import dataclass
@@ -411,12 +412,336 @@ class DriftResultRecord(DriftResultInsert):
     drift_run_id: str
 
 
+@dataclass(frozen=True)
+class CounterfactualOutcomeSource(OutcomeRecord):
+    """Raw exact-policy observation; the evaluation layer chooses labels."""
+
+
+@dataclass(frozen=True)
+class CounterfactualEvidenceGroup:
+    evidence_id: str
+    fields: tuple[EvidenceEvent, ...]
+
+
+@dataclass(frozen=True)
+class CounterfactualCandidate:
+    decision: StoredDecision
+    trace: TraceEvent
+    spans: tuple[SpanEvent, ...]
+    outcomes: tuple[CounterfactualOutcomeSource, ...]
+    evidence_groups: tuple[CounterfactualEvidenceGroup, ...]
+    unresolved_citations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CounterfactualRun:
+    run_id: str
+    created_at: datetime
+    as_of: datetime
+    decided_since: datetime
+    provider: str
+    model: str
+    base_url: str
+    prompt_version: str
+    prompt_hash: str
+    outcome_policy_version: str
+    outcome_policy_hash: str
+    selected_count: int
+    succeeded_count: int
+    failed_count: int
+    remote_egress_confirmed: bool
+
+
+@dataclass(frozen=True)
+class CounterfactualResult:
+    result_id: str
+    decision_id: str
+    selected_order: int
+    created_at: datetime
+    snapshot_facts: Mapping[str, object]
+    capture_references: Mapping[str, object]
+    source_model_provenance: Mapping[str, object]
+    model_parity: Literal["matched", "different", "unknown"]
+    input_hash: str | None
+    original_recommendation: object
+    original_rationale: str
+    hypothetical_recommendation: object | None
+    hypothetical_rationale: str | None
+    failure_code: str | None
+    outcome_id: str | None
+    outcome_label: Literal["tp", "fp", "tn", "fn"] | None
+
+
+@dataclass(frozen=True)
+class CounterfactualRunDetail:
+    run: CounterfactualRun
+    results: tuple[CounterfactualResult, ...]
+
+
 class Repository:
     """SQLite persistence for canonical P0 events."""
 
     def __init__(self, database: Database) -> None:
         self._connection = database.connection
         self._operation_lock: RLock = database._operation_lock
+
+    def counterfactual_candidates(
+        self,
+        decided_since: datetime,
+        policy_hash: str,
+    ) -> tuple[CounterfactualCandidate, ...]:
+        """Read chronological source facts and newest outcomes for the exact policy."""
+        stamp = self._timestamp_text(decided_since)
+        _counterfactual_hash(policy_hash)
+        with self._operation_lock:
+            rows = self._connection.execute(
+                "SELECT * FROM decisions WHERE glassbox_timestamp_key(decided_at) >= "
+                "glassbox_timestamp_key(?) ORDER BY glassbox_timestamp_key(decided_at) DESC, "
+                "decision_id DESC",
+                (stamp,),
+            ).fetchall()
+            candidates: list[CounterfactualCandidate] = []
+            for row in rows:
+                decision = self._stored_decision_from_row(row)
+                groups: list[CounterfactualEvidenceGroup] = []
+                unresolved: list[str] = []
+                for citation in dict.fromkeys(decision.event.rationale_citations):
+                    fields = tuple(
+                        field for field in decision.evidence if field.evidence_id == citation
+                    )
+                    if fields:
+                        groups.append(CounterfactualEvidenceGroup(citation, fields))
+                    else:
+                        unresolved.append(citation)
+                decision = StoredDecision(
+                    decision.event, tuple(field for group in groups for field in group.fields),
+                )
+                trace_row = self._connection.execute(
+                    "SELECT * FROM traces WHERE trace_id = ?",
+                    (decision.event.trace_id,),
+                ).fetchone()
+                spans = tuple(
+                    self._span_from_row(item)
+                    for item in self._connection.execute(
+                        "SELECT * FROM spans WHERE trace_id = ? "
+                        "ORDER BY glassbox_timestamp_key(started_at), span_id",
+                        (decision.event.trace_id,),
+                    )
+                )
+                outcomes: list[CounterfactualOutcomeSource] = []
+                seen_types: set[str] = set()
+                for item in self._connection.execute(
+                    "SELECT * FROM outcomes WHERE decision_id = ? "
+                    "AND reconciliation_policy_hash = ? "
+                    "ORDER BY glassbox_timestamp_key(observed_at) DESC, outcome_id DESC",
+                    (decision.event.decision_id, policy_hash),
+                ):
+                    if item["outcome_type"] not in seen_types:
+                        seen_types.add(item["outcome_type"])
+                        outcome = self._outcome_from_row(item)
+                        outcomes.append(CounterfactualOutcomeSource(**vars(outcome)))
+                candidates.append(
+                    CounterfactualCandidate(
+                        decision,
+                        self._trace_from_row(trace_row),
+                        spans,
+                        tuple(outcomes),
+                        tuple(groups),
+                        tuple(unresolved),
+                    )
+                )
+            return tuple(candidates)
+
+    def record_counterfactual_run(
+        self,
+        run: CounterfactualRun,
+        results: tuple[CounterfactualResult, ...],
+    ) -> None:
+        """Append one complete immutable run; a bad row rolls back the whole batch."""
+        self._validate_counterfactual_run(run, results)
+        run_values = vars(run) | {
+            name: self._timestamp_text(getattr(run, name))
+            for name in ("created_at", "as_of", "decided_since")
+        }
+        prepared: list[dict[str, object]] = []
+        for result in results:
+            values = dict(vars(result))
+            values["run_id"] = run.run_id
+            values["created_at"] = self._timestamp_text(result.created_at)
+            for name in (
+                "snapshot_facts",
+                "capture_references",
+                "source_model_provenance",
+                "original_recommendation",
+                "hypothetical_recommendation",
+            ):
+                value = values.pop(name)
+                values[name + "_json"] = (
+                    None
+                    if name == "hypothetical_recommendation" and result.failure_code is not None
+                    else _counterfactual_json(value)
+                )
+            prepared.append(values)
+        with self._operation_lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    """INSERT INTO counterfactual_runs (
+                        run_id, created_at, as_of, decided_since, provider, model, base_url,
+                        prompt_version, prompt_hash, outcome_policy_version, outcome_policy_hash,
+                        selected_count, succeeded_count, failed_count, remote_egress_confirmed
+                    ) VALUES (
+                        :run_id, :created_at, :as_of, :decided_since, :provider, :model, :base_url,
+                        :prompt_version, :prompt_hash, :outcome_policy_version,
+                        :outcome_policy_hash,
+                        :selected_count, :succeeded_count, :failed_count, :remote_egress_confirmed
+                    )""",
+                    run_values,
+                )
+                for values in prepared:
+                    if values["outcome_id"] is not None:
+                        outcome = self._connection.execute(
+                            "SELECT decision_id, reconciliation_policy_hash FROM outcomes "
+                            "WHERE outcome_id = ?",
+                            (values["outcome_id"],),
+                        ).fetchone()
+                        if outcome is None or tuple(outcome) != (
+                            values["decision_id"],
+                            run.outcome_policy_hash,
+                        ):
+                            raise ValueError(
+                                "counterfactual outcome does not match decision/policy"
+                            )
+                    self._connection.execute(
+                        """INSERT INTO counterfactual_results (
+                            result_id, run_id, decision_id, selected_order, created_at,
+                            snapshot_facts_json, capture_references_json,
+                            source_model_provenance_json, model_parity, input_hash,
+                            original_recommendation_json, original_rationale,
+                            hypothetical_recommendation_json, hypothetical_rationale, failure_code,
+                            outcome_id, outcome_label
+                        ) VALUES (
+                            :result_id, :run_id, :decision_id, :selected_order, :created_at,
+                            :snapshot_facts_json, :capture_references_json,
+                            :source_model_provenance_json, :model_parity, :input_hash,
+                            :original_recommendation_json, :original_rationale,
+                            :hypothetical_recommendation_json, :hypothetical_rationale,
+                            :failure_code,
+                            :outcome_id, :outcome_label
+                        )""",
+                        values,
+                    )
+                self._connection.execute("COMMIT")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def counterfactual_run_detail(self, run_id: str) -> CounterfactualRunDetail | None:
+        with self._operation_lock:
+            row = self._connection.execute(
+                "SELECT * FROM counterfactual_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            values = dict(row)
+            for name in ("created_at", "as_of", "decided_since"):
+                values[name] = datetime.fromisoformat(values[name].replace("Z", "+00:00"))
+            values["remote_egress_confirmed"] = bool(values["remote_egress_confirmed"])
+            run = CounterfactualRun(**values)
+            results: list[CounterfactualResult] = []
+            for item in self._connection.execute(
+                "SELECT * FROM counterfactual_results WHERE run_id = ? ORDER BY selected_order",
+                (run_id,),
+            ):
+                result_values = dict(item)
+                result_values.pop("run_id")
+                result_values["created_at"] = datetime.fromisoformat(
+                    result_values["created_at"].replace("Z", "+00:00")
+                )
+                for name in (
+                    "snapshot_facts",
+                    "capture_references",
+                    "source_model_provenance",
+                    "original_recommendation",
+                    "hypothetical_recommendation",
+                ):
+                    payload = result_values.pop(name + "_json")
+                    result_values[name] = None if payload is None else json.loads(payload)
+                results.append(CounterfactualResult(**result_values))
+            return CounterfactualRunDetail(run, tuple(results))
+
+    @staticmethod
+    def _validate_counterfactual_run(
+        run: CounterfactualRun,
+        results: tuple[CounterfactualResult, ...],
+    ) -> None:
+        _counterfactual_ulid(run.run_id)
+        for name in ("provider", "model", "base_url", "prompt_version", "outcome_policy_version"):
+            _counterfactual_nonempty(getattr(run, name))
+        for name in ("prompt_hash", "outcome_policy_hash"):
+            _counterfactual_hash(getattr(run, name))
+        for name in ("created_at", "as_of", "decided_since"):
+            stamp = getattr(run, name)
+            if not isinstance(stamp, datetime):
+                raise ValueError("counterfactual timestamps must be UTC datetimes")
+            Repository._timestamp_text(stamp)
+        if run.decided_since > run.as_of or run.created_at < run.as_of:
+            raise ValueError("counterfactual run timestamps are inconsistent")
+        for name in ("selected_count", "succeeded_count", "failed_count"):
+            _counterfactual_nonnegative(getattr(run, name))
+        if not isinstance(run.remote_egress_confirmed, bool):
+            raise ValueError("counterfactual egress confirmation must be boolean")
+        if (
+            run.selected_count != len(results)
+            or run.failed_count != sum(result.failure_code is not None for result in results)
+            or run.succeeded_count != run.selected_count - run.failed_count
+        ):
+            raise ValueError("counterfactual run counts do not match results")
+        for result in results:
+            _counterfactual_ulid(result.result_id)
+            _counterfactual_ulid(result.decision_id)
+            _counterfactual_nonnegative(result.selected_order)
+            if not isinstance(result.created_at, datetime):
+                raise ValueError("counterfactual timestamps must be UTC datetimes")
+            Repository._timestamp_text(result.created_at)
+            if result.model_parity not in {"matched", "different", "unknown"}:
+                raise ValueError("counterfactual model parity is invalid")
+            if result.input_hash is not None:
+                _counterfactual_hash(result.input_hash)
+            if not isinstance(result.original_rationale, str):
+                raise ValueError("counterfactual original rationale must be text")
+            result.original_rationale.encode("utf-8")
+            for value in (
+                result.snapshot_facts,
+                result.capture_references,
+                result.source_model_provenance,
+            ):
+                if not isinstance(value, Mapping):
+                    raise ValueError("counterfactual source facts must be mappings")
+            _counterfactual_capture_references(result.capture_references)
+            if result.failure_code is None:
+                if result.input_hash is None:
+                    raise ValueError("successful counterfactual requires rendered input hash")
+                _counterfactual_nonempty(result.hypothetical_rationale)
+            else:
+                _counterfactual_nonempty(result.failure_code)
+                if result.hypothetical_recommendation is not None or (
+                    result.hypothetical_rationale is not None or result.outcome_id is not None
+                ):
+                    raise ValueError("failed counterfactual must not carry successful output")
+            if (result.outcome_id is None) != (result.outcome_label is None):
+                raise ValueError("counterfactual outcome ID and label must be paired")
+            if result.outcome_id is not None:
+                _counterfactual_ulid(result.outcome_id)
+            if result.outcome_label is not None and result.outcome_label not in {
+                "tp",
+                "fp",
+                "tn",
+                "fn",
+            }:
+                raise ValueError("counterfactual outcome label is invalid")
 
     def write_event(self, event: Event) -> None:
         """Persist one canonical event in a transaction."""
@@ -1815,6 +2140,63 @@ class Repository:
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         values = cast(dict[str, Any], dict(row))
         return {key: value for key, value in values.items() if value is not None}
+
+
+def _counterfactual_nonempty(value: object) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("counterfactual identity/text must be non-empty")
+    value.encode("utf-8")
+
+
+def _counterfactual_ulid(value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", value):
+        raise ValueError("counterfactual identifier must be a canonical ULID")
+
+
+def _counterfactual_hash(value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("counterfactual hash must be a lowercase SHA-256 digest")
+
+
+def _counterfactual_nonnegative(value: object) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError("counterfactual counts/order must be non-negative integers")
+
+
+def _counterfactual_capture_references(value: object) -> None:
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _counterfactual_capture_references(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _counterfactual_capture_references(item)
+    elif value is not None and not (
+        isinstance(value, str)
+        and (
+            re.fullmatch(r"[0-9a-f]{64}", value)
+            or re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", value)
+        )
+    ):
+        raise ValueError("counterfactual capture references must contain identifiers only")
+
+
+def _counterfactual_json(value: object) -> str:
+    def plain(item: object) -> object:
+        if isinstance(item, Mapping):
+            if any(not isinstance(key, str) for key in item):
+                raise ValueError("counterfactual JSON keys must be strings")
+            return {key: plain(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [plain(child) for child in item]
+        if item is None or isinstance(item, (str, bool, int)):
+            return item
+        if isinstance(item, float) and math.isfinite(item):
+            return item
+        raise ValueError("counterfactual data must be finite JSON")
+
+    text = canonical_dumps(plain(value))
+    text.encode("utf-8")
+    return text
 
 
 def _new_judge_ulid() -> str:

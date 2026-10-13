@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +30,310 @@ DRIFT_MID = datetime(2026, 9, 8, tzinfo=UTC)
 DRIFT_END = datetime(2026, 9, 15, tzinfo=UTC)
 DRIFT_HASH = "a" * 64
 DRIFT_SIGNALS = ("confidence", "decision_type", "trace_latency_ms", "trace_cost_usd")
+
+
+def _counterfactual_records():
+    from glassbox.store.repository import CounterfactualResult, CounterfactualRun
+
+    run = CounterfactualRun(
+        run_id="01ARZ3NDEKTSV4RRFFQ69G5FC0",
+        created_at=TIMESTAMP,
+        as_of=TIMESTAMP,
+        decided_since=TIMESTAMP - timedelta(days=7),
+        provider="openai",
+        model="variant-model",
+        base_url="https://api.openai.com/v1",
+        prompt_version="v1",
+        prompt_hash="b" * 64,
+        outcome_policy_version="v2",
+        outcome_policy_hash="a" * 64,
+        selected_count=1,
+        succeeded_count=1,
+        failed_count=0,
+        remote_egress_confirmed=True,
+    )
+    result = CounterfactualResult(
+        result_id="01ARZ3NDEKTSV4RRFFQ69G5FC1",
+        decision_id=DECISION_ID,
+        selected_order=0,
+        created_at=TIMESTAMP,
+        snapshot_facts={"entity_id": "123-DC04", "evidence": [{"units": 0}]},
+        capture_references={"trace_input_ref": "c" * 64, "span_id": SPAN_ID},
+        source_model_provenance={"models": ["source-model"], "providers": ["openai"]},
+        model_parity="different",
+        input_hash="d" * 64,
+        original_recommendation={"action": "review"},
+        original_rationale="source rationale",
+        hypothetical_recommendation={"action": "hold"},
+        hypothetical_rationale="variant rationale",
+        failure_code=None,
+        outcome_id=None,
+        outcome_label=None,
+    )
+    return run, result
+
+
+def test_counterfactual_candidates_are_ordered_grouped_and_exact_policy_scoped(
+    outcome_repository: Repository,
+) -> None:
+    repository = outcome_repository
+    trace, span, decision, evidence = _events()
+    repository.write_event(trace.model_copy(update={"input_ref": "trace-input-reference"}))
+    repository.write_event(
+        span.model_copy(
+            update={
+                "prompt_ref": "prompt-reference",
+                "completion_ref": "completion-reference",
+            }
+        )
+    )
+    repository.write_event(evidence)
+    repository.write_event(
+        evidence.model_copy(
+            update={
+                "field_name": "open_orders",
+                "field_value": {"units": 7},
+            }
+        )
+    )
+    repository.record_outcome(_outcome_submission())
+    repository.record_outcome(
+        dataclasses.replace(
+            _outcome_submission(),
+            outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE1",
+            source_id="later",
+            observed_at=TIMESTAMP + timedelta(microseconds=1),
+            value={"occurred": False, "units": 0},
+            label="tn",
+        )
+    )
+    repository.record_outcome(
+        dataclasses.replace(
+            _outcome_submission(),
+            outcome_id="01ARZ3NDEKTSV4RRFFQ69G5FE2",
+            reconciliation_policy_hash="b" * 64,
+            value={"occurred": "other policy"},
+        )
+    )
+    newer_id = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+    repository.write_event(
+        decision.model_copy(
+            update={
+                "decision_id": newer_id,
+                "decided_at": TIMESTAMP + timedelta(microseconds=1),
+                "rationale_citations": (),
+            }
+        )
+    )
+    candidates = repository.counterfactual_candidates(TIMESTAMP, "a" * 64)
+    assert [item.decision.event.decision_id for item in candidates] == [newer_id, DECISION_ID]
+    candidate = candidates[1]
+    assert {item.field_name for item in candidate.decision.evidence} == {"on_hand", "open_orders"}
+    assert candidate.trace.input_ref == "trace-input-reference"
+    assert candidate.spans[0].prompt_ref == "prompt-reference"
+    assert candidate.spans[0].completion_ref == "completion-reference"
+    assert len(candidate.outcomes) == 1
+    assert candidate.outcomes[0].value == {"occurred": False, "units": 0}
+    assert candidate.outcomes[0].horizon_days == 14
+    assert candidate.outcomes[0].reconciliation_policy_hash == "a" * 64
+    assert candidate.decision.event.alternatives_considered == decision.alternatives_considered
+
+
+def test_counterfactual_candidates_resolve_cited_groups_and_preserve_dangling_ids(
+    tmp_path: Path,
+) -> None:
+    database = Database.open(tmp_path / "citation-groups.sqlite3")
+    repository = Repository(database)
+    trace, _, decision, evidence = _events()
+    repository.write_event(trace)
+    repository.write_event(decision.model_copy(update={
+        "rationale_citations": ("inventory_position", "dangling", "inventory_position"),
+    }))
+    repository.write_event(evidence)
+    repository.write_event(evidence.model_copy(update={"field_name": "open_orders"}))
+    repository.write_event(evidence.model_copy(update={
+        "evidence_id": "uncited", "field_value": "uncited secret",
+    }))
+    candidate = repository.counterfactual_candidates(TIMESTAMP, "a" * 64)[0]
+    assert {item.evidence_id for item in candidate.decision.evidence} == {"inventory_position"}
+    assert candidate.unresolved_citations == ("dangling",)
+    assert len(candidate.evidence_groups) == 1
+    group = candidate.evidence_groups[0]
+    assert group.evidence_id == "inventory_position"
+    assert {item.field_name for item in group.fields} == {"on_hand", "open_orders"}
+    database.close()
+
+
+def test_counterfactual_run_round_trip_keeps_references_without_capture_content(
+    outcome_repository: Repository,
+    tmp_path: Path,
+) -> None:
+    from glassbox.store.blobs import BlobStore
+
+    capture = b"recognizable secret capture text"
+    reference = BlobStore(tmp_path / "captures").put(capture)
+    run, result = _counterfactual_records()
+    result = dataclasses.replace(result, capture_references={
+        "trace_input_ref": reference, "span_id": SPAN_ID,
+    })
+    outcome_repository.record_counterfactual_run(run, (result,))
+    detail = outcome_repository.counterfactual_run_detail(run.run_id)
+    assert detail is not None and detail.run == run and detail.results == (result,)
+    assert outcome_repository.counterfactual_run_detail("missing") is None
+    row = outcome_repository._connection.execute("SELECT * FROM counterfactual_results").fetchone()
+    assert "recognizable secret capture text" not in repr(tuple(row))
+    assert hashlib.sha256(capture).hexdigest() in repr(tuple(row))
+    assert "d" * 64 in repr(tuple(row))
+
+
+@pytest.mark.parametrize("table", ["counterfactual_runs", "counterfactual_results"])
+def test_counterfactual_history_is_append_only_and_restricts_decision_deletion(
+    outcome_repository: Repository,
+    table: str,
+) -> None:
+    run, result = _counterfactual_records()
+    outcome_repository.record_counterfactual_run(run, (result,))
+    connection = outcome_repository._connection
+    for sql in (
+        f"UPDATE {table} SET created_at = created_at",
+        f"DELETE FROM {table}",
+        "DELETE FROM decisions",
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(sql)
+        connection.rollback()
+    assert connection.execute("SELECT count(*) FROM counterfactual_results").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("kind", ["duplicate_decision", "duplicate_order", "unknown_decision"])
+def test_counterfactual_atomic_write_rolls_back_invalid_second_result(
+    outcome_repository: Repository,
+    kind: str,
+) -> None:
+    run, result = _counterfactual_records()
+    second_id = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+    _, _, decision, _ = _events()
+    outcome_repository.write_event(decision.model_copy(update={"decision_id": second_id}))
+    second = dataclasses.replace(
+        result, result_id="01ARZ3NDEKTSV4RRFFQ69G5FC3", decision_id=second_id, selected_order=1
+    )
+    if kind == "duplicate_decision":
+        second = dataclasses.replace(second, decision_id=DECISION_ID)
+    elif kind == "duplicate_order":
+        second = dataclasses.replace(second, selected_order=0)
+    else:
+        second = dataclasses.replace(second, decision_id="01ARZ3NDEKTSV4RRFFQ69G5FC4")
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        outcome_repository.record_counterfactual_run(
+            dataclasses.replace(run, selected_count=2, succeeded_count=2),
+            (result, second),
+        )
+    assert (
+        outcome_repository._connection.execute(
+            "SELECT count(*) FROM counterfactual_runs"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        outcome_repository._connection.execute(
+            "SELECT count(*) FROM counterfactual_results"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_hash": None},
+        {"model_parity": "maybe"},
+        {"selected_order": -1},
+        {"hypothetical_rationale": None},
+        {"failure_code": "timeout"},
+        {"outcome_label": "tp"},
+        {"snapshot_facts": {"x": float("nan")}},
+        {"capture_references": {"text": "recognizable secret capture text"}},
+    ],
+)
+def test_counterfactual_invalid_results_never_persist(
+    outcome_repository: Repository,
+    changes: dict[str, object],
+) -> None:
+    run, result = _counterfactual_records()
+    with pytest.raises(ValueError):
+        outcome_repository.record_counterfactual_run(run, (dataclasses.replace(result, **changes),))
+    assert outcome_repository.counterfactual_run_detail(run.run_id) is None
+
+
+def test_counterfactual_failure_before_rendering_and_result_order(
+    outcome_repository: Repository,
+) -> None:
+    run, result = _counterfactual_records()
+    failed = dataclasses.replace(
+        result,
+        input_hash=None,
+        hypothetical_recommendation=None,
+        hypothetical_rationale=None,
+        failure_code="snapshot_invalid",
+    )
+    run = dataclasses.replace(run, succeeded_count=0, failed_count=1)
+    outcome_repository.record_counterfactual_run(run, (failed,))
+    assert outcome_repository.counterfactual_run_detail(run.run_id).results == (failed,)
+
+
+@pytest.mark.parametrize("changes", [
+    {"selected_count": 2}, {"succeeded_count": 0}, {"failed_count": 1},
+    {"remote_egress_confirmed": 1}, {"created_at": datetime(2026, 1, 1)},
+    {"prompt_hash": "x" * 64}, {"model": " "},
+    {"prompt_hash": 4}, {"created_at": None},
+])
+def test_counterfactual_run_counts_and_provenance_validate_before_sql(
+    outcome_repository: Repository, changes: dict[str, object],
+) -> None:
+    run, result = _counterfactual_records()
+    queries: list[str] = []
+    outcome_repository._connection.set_trace_callback(queries.append)
+    try:
+        with pytest.raises(ValueError):
+            outcome_repository.record_counterfactual_run(
+                dataclasses.replace(run, **changes), (result,),
+            )
+    finally:
+        outcome_repository._connection.set_trace_callback(None)
+    assert queries == []
+
+
+def test_counterfactual_enrichment_rejects_cross_policy_outcome(
+    outcome_repository: Repository,
+) -> None:
+    outcome = outcome_repository.record_outcome(_outcome_submission())
+    run, result = _counterfactual_records()
+    enriched = dataclasses.replace(result, outcome_id=outcome.outcome_id, outcome_label="tn")
+    outcome_repository.record_counterfactual_run(run, (enriched,))
+    assert outcome_repository.counterfactual_run_detail(run.run_id).results[0].outcome_label == "tn"
+    changed_policy = dataclasses.replace(run, run_id="01ARZ3NDEKTSV4RRFFQ69G5FC5",
+                                         outcome_policy_hash="b" * 64)
+    with pytest.raises(ValueError, match="does not match"):
+        outcome_repository.record_counterfactual_run(changed_policy, (
+            dataclasses.replace(enriched, result_id="01ARZ3NDEKTSV4RRFFQ69G5FC6"),
+        ))
+    assert outcome_repository.counterfactual_run_detail(changed_policy.run_id) is None
+
+
+def test_counterfactual_detail_orders_success_and_failure_by_selected_order(
+    outcome_repository: Repository,
+) -> None:
+    run, result = _counterfactual_records()
+    _, _, decision, _ = _events()
+    second_id = "01ARZ3NDEKTSV4RRFFQ69G5FC5"
+    outcome_repository.write_event(decision.model_copy(update={"decision_id": second_id}))
+    failed = dataclasses.replace(result, result_id="01ARZ3NDEKTSV4RRFFQ69G5FC6",
+        decision_id=second_id, selected_order=1, input_hash=None,
+        hypothetical_recommendation=None, hypothetical_rationale=None,
+        failure_code="blob_unavailable")
+    run = dataclasses.replace(run, selected_count=2, failed_count=1)
+    outcome_repository.record_counterfactual_run(run, (failed, result))
+    assert outcome_repository.counterfactual_run_detail(run.run_id).results == (result, failed)
 
 
 @pytest.fixture

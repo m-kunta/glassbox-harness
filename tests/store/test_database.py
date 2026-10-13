@@ -31,6 +31,65 @@ P2_EVAL_RESULT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBE"
 P2_TIMESTAMP = "2026-09-07T12:00:00Z"
 
 
+def _create_post_006_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    for name in ("001_initial.sql", "002_feedback.sql"):
+        connection.executescript((STORE_ROOT / "migrations" / name).read_text())
+    database_module._apply_judge_calibration_migration(connection)
+    connection.executescript((STORE_ROOT / "migrations" / "004_drift_monitoring.sql").read_text())
+    database_module._apply_outcome_reconciliation_migration(connection)
+    database_module._apply_p3_p4_remediation_migration(connection)
+    connection.close()
+
+
+def test_counterfactual_upgrade_from_exact_006_is_read_only_compatible(tmp_path: Path) -> None:
+    path = tmp_path / "post-006.sqlite3"
+    _create_post_006_database(path)
+    database = Database.open(path)
+    assert (
+        database.connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='counterfactual_runs'"
+        ).fetchone()
+        is not None
+    )
+    database.close()
+    before = path.read_bytes()
+    reader = Database.open_read_only(path)
+    assert (
+        reader.connection.execute("SELECT count(*) FROM counterfactual_results").fetchone()[0] == 0
+    )
+    reader.close()
+    assert path.read_bytes() == before
+
+
+def test_counterfactual_migration_failure_rolls_back_to_006(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "post-006.sqlite3"
+    _create_post_006_database(path)
+    connection = sqlite3.connect(path)
+    before = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL"))
+    connection.close()
+    execute = database_module._execute_schema_statements
+
+    def fail_007(connection: sqlite3.Connection, schema_sql: str) -> None:
+        execute(connection, schema_sql)
+        if "CREATE TABLE IF NOT EXISTS counterfactual_runs" in schema_sql:
+            raise RuntimeError("injected 007 failure")
+
+    monkeypatch.setattr(database_module, "_execute_schema_statements", fail_007)
+    with pytest.raises(RuntimeError, match="injected 007 failure"):
+        Database.open(path)
+    connection = sqlite3.connect(path)
+    assert (
+        dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL"))
+        == before
+    )
+    connection.close()
+
+
 def _create_pre_strict_database(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:
