@@ -220,6 +220,79 @@ def test_counterfactual_preflight_and_run_share_as_of_filter_before_case_cap(
     assert len(provider.calls) == 1
 
 
+@pytest.mark.parametrize("subcommand", ["run", "report"])
+def test_counterfactual_import_failure_is_one_safe_error_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, subcommand: str,
+) -> None:  # type: ignore[no-untyped-def]
+    import builtins
+
+    from glassbox.cli import main
+
+    real_import = builtins.__import__
+
+    def missing_optional(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "glassbox.eval.counterfactual":
+            raise ModuleNotFoundError("secret path and credential must not be printed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_optional)
+    path = tmp_path / "private.sqlite3"
+    args = (_counterfactual_run_args(path) if subcommand == "run" else [
+        "--database", str(path), "counterfactual", "report", "--run",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+    ])
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to run counterfactual command\n"
+
+
+def test_counterfactual_disclosed_selection_is_frozen_against_backdated_insert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    import glassbox.cli as cli
+    import glassbox.eval.counterfactual as counterfactual
+    from tests.eval.test_counterfactual import DECIDED, DECISION_IDS, TRACE_ID, _answer
+
+    path, provider, _ = _counterfactual_cli_setup(
+        tmp_path, monkeypatch, remote=False, responses=[_answer()],
+    )
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            assert tz == UTC
+            return DECIDED + timedelta(seconds=30)
+
+    monkeypatch.setattr(cli, "datetime", FixedDatetime)
+    original_run = counterfactual.run_counterfactual
+
+    def insert_then_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        database = Database.open(path)
+        try:
+            Repository(database).write_event(DecisionEvent(
+                decision_id="01ARZ3NDEKTSV4RRFFQ69G5FA9", trace_id=TRACE_ID,
+                agent_name="replenishment-triage", agent_version="source-v1",
+                entity_type="sku_dc", entity_id="inserted-after-disclosure",
+                decision_type="triage", recommendation={"urgency": "LOW"},
+                rationale="newly inserted", rationale_citations=(), confidence=0.71,
+                alternatives_considered=({"action": "wait"},),
+                decided_at=DECIDED + timedelta(seconds=20),
+            ))
+        finally:
+            database.close()
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(counterfactual, "run_counterfactual", insert_then_run)
+    assert cli.main(_counterfactual_run_args(path) + ["--max-cases", "1"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "selected_count=1" in captured.err
+    assert [result["decision_id"] for result in payload["results"]] == [DECISION_IDS[0]]
+    assert len(provider.calls) == 1
+    assert "inserted-after-disclosure" not in provider.calls[0][1]
+
+
 @pytest.mark.parametrize("defect", ["prompt", "policy", "database"])
 def test_counterfactual_bad_local_inputs_have_one_safe_error_line_before_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, defect: str,

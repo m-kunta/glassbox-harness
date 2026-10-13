@@ -434,6 +434,7 @@ def run_counterfactual(
     *,
     clock: Callable[[], datetime],
     provider_factory: Callable[[CounterfactualConfig], CounterfactualProvider],
+    preselected_candidates: tuple[CounterfactualCandidate, ...] | None = None,
 ) -> CounterfactualReport:
     """Run one offline prompt experiment and atomically persist all case results."""
     as_of = clock()
@@ -453,12 +454,27 @@ def run_counterfactual(
     database = Database.open(database_path)
     try:
         repository = Repository(database)
-        candidates = repository.counterfactual_candidates(decided_since, policy.policy_hash)
-        eligible = tuple(
-            candidate for candidate in candidates
-            if candidate.decision.event.decided_at <= as_of
-        )
-        selected = eligible if max_cases is None else eligible[:max_cases]
+        if preselected_candidates is None:
+            candidates = repository.counterfactual_candidates(decided_since, policy.policy_hash)
+            eligible = tuple(
+                candidate for candidate in candidates
+                if candidate.decision.event.decided_at <= as_of
+            )
+            selected = eligible if max_cases is None else eligible[:max_cases]
+        else:
+            # The CLI already disclosed this exact population. Re-querying
+            # could select a newly inserted, backdated decision instead.
+            selected = preselected_candidates
+            if max_cases is not None and len(selected) > max_cases:
+                raise ValueError("preselected candidates exceed max_cases")
+            keys = tuple(
+                (item.decision.event.decided_at, item.decision.event.decision_id)
+                for item in selected
+            )
+            if (any(not decided_since <= stamp <= as_of for stamp, _ in keys)
+                    or keys != tuple(sorted(keys, reverse=True))
+                    or len({decision_id for _, decision_id in keys}) != len(keys)):
+                raise ValueError("invalid preselected counterfactual candidates")
         blobs = BlobStore(blob_dir) if blob_dir is not None else None
         prepared = tuple(_prepare_case(item, config, prompt, blobs) for item in selected)
 

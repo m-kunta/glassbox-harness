@@ -97,18 +97,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     if arguments.command == "counterfactual":
-        # Keep the optional configuration/provider stack out of all other CLI paths.
-        from glassbox.eval.counterfactual import (
-            CounterfactualReport,
-            load_outcome_policy,
-            load_prompt_artifact,
-            run_counterfactual,
-        )
-        from glassbox.eval.counterfactual_config import load_counterfactual_config
-        from glassbox.eval.counterfactual_provider import create_counterfactual_provider
-
-        database_path = Path(arguments.database)
         try:
+            # Optional dependencies can be absent. Their import errors must
+            # obey the same non-disclosing command boundary as run errors.
+            from glassbox.eval.counterfactual import (
+                CounterfactualReport,
+                load_outcome_policy,
+                load_prompt_artifact,
+                run_counterfactual,
+            )
+            from glassbox.eval.counterfactual_config import load_counterfactual_config
+            from glassbox.eval.counterfactual_provider import create_counterfactual_provider
+
+            database_path = Path(arguments.database)
             if arguments.counterfactual_command == "report":
                 database = Database.open_read_only(database_path)
                 try:
@@ -175,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 database_path, counterfactual_config, prompt, counterfactual_policy, decided_since,
                 arguments.max_cases, arguments.blob_dir,
                 clock=lambda: as_of, provider_factory=create_counterfactual_provider,
+                preselected_candidates=selected,
             )
             print(json.dumps(counterfactual_result_report.to_dict(),
                              sort_keys=True, separators=(",", ":")))
