@@ -326,6 +326,86 @@ Outcomes commands return these exact process exit codes:
 P4 ships this local CLI import/report workflow. Dashboard generation, alerts,
 scheduling, and CI automation remain deferred.
 
+## Run an offline counterfactual prompt experiment
+
+Install the counterfactual extra for your provider. The base extra supports a
+local Ollama endpoint; remote providers need their matching SDK extra:
+
+```shell
+python -m pip install -e '.[counterfactual]'         # Ollama
+python -m pip install -e '.[counterfactual-claude]'  # + anthropic
+python -m pip install -e '.[counterfactual-openai]'  # + openai
+python -m pip install -e '.[counterfactual-gemini]'  # + google-genai
+```
+
+Set `GLASSBOX_COUNTERFACTUAL_PROVIDER` to `ollama`, `claude`, `openai`, or
+`gemini`, and set `GLASSBOX_COUNTERFACTUAL_MODEL` to the selected model. For
+Claude, OpenAI, or Gemini, also set the corresponding `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or `GEMINI_API_KEY`. Ollama defaults to
+`http://127.0.0.1:11434`; override it with `GLASSBOX_COUNTERFACTUAL_OLLAMA_URL`.
+The counterfactual command reads these dedicated values from the process
+environment or a `.env` in its current working directory. Run it from the
+Glassbox project root when using that project's `.env`; the command does not
+search other directories. Nonempty process values take precedence, and file
+values are not injected into the process environment. `.env` is gitignored.
+
+Use a checked-in prompt artifact such as
+[`counterfactual_v1.md`](glassbox/eval/prompts/counterfactual_v1.md). Its TOML
+front matter declares `prompt_version`; Glassbox also hashes the complete raw
+file, so each run records both its stated version and exact content hash.
+The body inserts the decision snapshot at `{{decision_snapshot_json}}`. Run a
+bounded recent batch and retrieve its persisted report with:
+
+```shell
+glassbox --database glassbox.sqlite3 counterfactual run \
+  --prompt glassbox/eval/prompts/counterfactual_v1.md \
+  --since 7d \
+  --blob-dir /path/to/redacted-blobs \
+  --confirm-egress
+glassbox --database glassbox.sqlite3 counterfactual report --run RUN_ID
+```
+
+`--blob-dir` is optional. Omit it when no eligible captured input should be
+read; supply the location of the already redacted blob store only when the
+prompt artifact also declares
+`capture_input_contract = "input_only_no_prior_outputs"`. Only an eligible
+trace input capture may enrich the provider input. Glassbox never adds an
+earlier model completion, an LLM span prompt capture, or an agent output from
+that trace. The shipped `counterfactual_v1.md` omits this contract, so the
+example command records no capture enrichment until you copy the prompt,
+declare the contract in its front matter, and select that copy with `--prompt`.
+Cited structured evidence and alternatives remain available to
+the experiment without blob capture. The provider input excludes the original
+recommendation, original rationale, and realized outcome so the variant can
+reason from the recorded decision facts.
+
+Before the first provider call, the CLI discloses provider, model, destination,
+prompt version/hash, selected-case count, and capture count. Remote providers
+and non-loopback Ollama endpoints require `--confirm-egress`; loopback Ollama
+still prints the disclosure but needs no confirmation. Provider requests may
+send recorded evidence and eligible redacted input content to the disclosed
+destination. Configuration and consent are checked before any provider call.
+
+Each run is append-only. Results store structured snapshot facts, capture
+reference IDs, and a hash of the rendered provider input; they do not store
+capture content in SQLite. A report reconstructs the saved provider, model,
+prompt, policy, case outcomes, and per-case failure diagnostics. A compatible
+mature P4 outcome can label a hypothetical recommendation under the selected
+reconciliation policy; an immature or missing outcome has no derived label.
+The command defaults to
+[`reconciliation_v2.toml`](glassbox/eval/policies/reconciliation_v2.toml),
+whose urgency rule treats `CRITICAL` and `HIGH` as positive predictions.
+Use `--outcome-policy PATH` to select another versioned policy; only outcomes
+from that exact policy-hash cohort can enrich a result.
+
+The report describes a **prompt-and-model counterfactual** unless recorded
+source-model provenance proves provider and model parity for the selected
+cases. It is a record of hypothetical responses, not an aggregate claim that
+one prompt wins. The run command exits `0` when at least one case succeeds,
+including a run with some failed cases. It exits `2` when no case succeeds,
+after persisting and printing that auditable run; `report --run` can retrieve
+it later. Preflight and command-level failures also exit `2`.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:
