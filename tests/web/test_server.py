@@ -296,7 +296,7 @@ def test_decision_card_renders_a_readable_brief_without_python_values(tmp_path: 
     assert "0.25" in response.text
     assert "Is Estimated" in response.text
     assert "No" in response.text
-    assert "{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}" not in response.text
+    assert "FrozenDict object" not in response.text
     assert "FrozenDict" not in response.text
     assert "object at 0x" not in response.text
     assert re.search(r'href="/static/glassbox\.css\?v=\d+"', response.text)
@@ -532,6 +532,20 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
     rendered = client.get(f"/decision/{decision_id}")
     assert "inventory-review" in rendered.text
     assert "Hold until the next inbound shipment is confirmed." in rendered.text
+
+
+def test_override_form_exposes_the_complete_current_recommendation_as_json(
+    tmp_path: Path,
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get(f"/decision/{decision_id}")
+
+    assert response.status_code == 200
+    assert "Current recommendation JSON" in response.text
+    assert "{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}" in response.text
 
 
 def test_modified_override_without_replacement_json_explains_the_required_input(
