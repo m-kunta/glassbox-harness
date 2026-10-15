@@ -168,6 +168,25 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             status_code=status_code,
         )
 
+    def override_verification_error(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Request could not be verified",
+                "message": "Reload the decision and try again.",
+            },
+            status_code=400,
+        )
+
+    def override_validation_error(request: Request, message: str) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"title": "Modified recommendation is required", "message": message},
+            status_code=400,
+        )
+
     @app.get("/")
     def root(request: Request) -> Response:
         try:
@@ -309,8 +328,13 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
         if not _valid_feedback_origin(request, config) or not token_matches(
             csrf_token, request.state.csrf_token
         ):
-            return override_error(request)
+            return override_verification_error(request)
         try:
+            if action == "modified" and not modified_value:
+                return override_validation_error(
+                    request,
+                    "Provide a replacement JSON value when modifying a recommendation.",
+                )
             value = None if not modified_value else json.loads(modified_value)
             submission = _override_submission(
                 decision_id,
@@ -322,7 +346,12 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
                 idempotency_key,
                 clock(),
             )
-        except (ValueError, json.JSONDecodeError):
+        except json.JSONDecodeError:
+            return override_validation_error(
+                request,
+                "Provide a valid replacement JSON value when modifying a recommendation.",
+            )
+        except ValueError:
             return override_error(request)
         database: Database | None = None
         try:

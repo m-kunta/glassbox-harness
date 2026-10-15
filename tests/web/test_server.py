@@ -534,7 +534,9 @@ def test_override_form_writes_an_operational_action_with_prg(tmp_path: Path) -> 
     assert "Hold until the next inbound shipment is confirmed." in rendered.text
 
 
-def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> None:
+def test_modified_override_without_replacement_json_explains_the_required_input(
+    tmp_path: Path,
+) -> None:
     database_path, decision_id, _ = seeded_database(tmp_path)
     client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
     client.post("/login", data={"access_token": TOKEN})
@@ -554,8 +556,35 @@ def test_invalid_override_uses_an_override_specific_error(tmp_path: Path) -> Non
     )
 
     assert response.status_code == 400
-    assert "Override not saved" in response.text
-    assert "Feedback not saved" not in response.text
+    assert "Modified recommendation is required" in response.text
+    assert "Provide a replacement JSON value when modifying a recommendation." in response.text
+
+
+def test_override_request_with_unverified_origin_gives_safe_recovery_guidance(
+    tmp_path: Path,
+) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://untrusted.test")
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+
+    response = client.post(
+        f"/decision/{decision_id}/override",
+        data={
+            "csrf_token": csrf.group(1),
+            "idempotency_key": key.group(1),
+            "action": "accepted",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Request could not be verified" in response.text
+    assert "Reload the decision and try again." in response.text
+    assert "Modified recommendation is required" not in response.text
 
 
 def test_override_for_missing_decision_is_not_found(tmp_path: Path) -> None:
