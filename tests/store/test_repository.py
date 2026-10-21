@@ -1439,6 +1439,37 @@ def test_final_trace_event_updates_the_open_trace_without_losing_children(tmp_pa
     assert tree.spans == (span,)
 
 
+def test_completed_trace_cost_distinguishes_explicit_zero_from_unknown(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "glassbox.sqlite3")
+    repository = Repository(database)
+    common = {
+        "agent_name": "test",
+        "agent_version": "test",
+        "started_at": TIMESTAMP,
+        "environment": "dev",
+    }
+    explicit_zero = TraceEvent(
+        **common,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FC0",
+        ended_at=TIMESTAMP + timedelta(milliseconds=1),
+        total_cost_usd=0.0,
+    )
+    omitted = TraceEvent(
+        **common,
+        trace_id="01ARZ3NDEKTSV4RRFFQ69G5FC1",
+        ended_at=TIMESTAMP + timedelta(milliseconds=1),
+    )
+    for completed in (explicit_zero, omitted):
+        repository.write_event(TraceEvent(**common, trace_id=completed.trace_id))
+        repository.write_event(completed)
+
+    rows = database.connection.execute("SELECT trace_id, total_cost_usd FROM traces").fetchall()
+    assert {row["trace_id"]: row["total_cost_usd"] for row in rows} == {
+        explicit_zero.trace_id: 0.0,
+        omitted.trace_id: None,
+    }
+
+
 def test_final_trace_event_preserves_start_metadata_when_close_omits_it(tmp_path: Path) -> None:
     repository = Repository(Database.open(tmp_path / "glassbox.sqlite3"))
     trace, _, _, _ = _events()

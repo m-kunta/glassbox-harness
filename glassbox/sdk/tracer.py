@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import secrets
 from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import wraps
+from numbers import Real
 from time import perf_counter
 from typing import Any, Callable, Literal, TypeVar, cast
 
@@ -78,6 +80,20 @@ def capture_input(content: str) -> None:
     trace_state = current_trace.get()
     if trace_state is not None:
         set_trace(replace(trace_state, input_capture=capture(content)))
+
+
+def set_trace_cost_usd(total_cost_usd: float) -> None:
+    """Record an explicit total USD cost for the active root trace, fail-open."""
+    if (
+        isinstance(total_cost_usd, bool)
+        or not isinstance(total_cost_usd, Real)
+        or not math.isfinite(total_cost_usd)
+        or total_cost_usd < 0
+    ):
+        return
+    trace_state = current_trace.get()
+    if trace_state is not None and get_config().enabled:
+        set_trace(replace(trace_state, total_cost_usd=float(total_cost_usd)))
 
 
 class _TraceScope(AbstractContextManager[None]):
@@ -299,6 +315,8 @@ def _emit_trace(
         if ended_at is not None:
             values["ended_at"] = ended_at
             values["latency_ms"] = (ended_at - state.started_at).total_seconds() * 1_000
+            if state.total_cost_usd is not None:
+                values["total_cost_usd"] = state.total_cost_usd
             if state.input_capture is None:
                 emit(TraceEvent(**values))
             else:
@@ -338,4 +356,4 @@ def reset_warning_for_testing() -> None:
     _last_incomplete_warning = None
 
 
-__all__ = ["DecisionScope", "SpanScope", "decision_context", "span", "trace"]
+__all__ = ["DecisionScope", "SpanScope", "decision_context", "set_trace_cost_usd", "span", "trace"]

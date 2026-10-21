@@ -2,7 +2,7 @@
 
 from .config import flush, init, shutdown
 from .evidence import evidence
-from .tracer import capture_input, decision_context, span, trace
+from .tracer import capture_input, decision_context, set_trace_cost_usd, span, trace
 
 __all__ = [
     "capture_input",
@@ -10,6 +10,7 @@ __all__ = [
     "evidence",
     "flush",
     "init",
+    "set_trace_cost_usd",
     "shutdown",
     "span",
     "trace",

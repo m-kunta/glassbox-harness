@@ -20,6 +20,7 @@ class TraceState:
     environment: str
     started_at: datetime
     input_capture: Future[str | None] | None = None
+    total_cost_usd: float | None = None
 
 
 @dataclass
