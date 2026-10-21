@@ -100,7 +100,10 @@ def test_explicit_trace_cost_replaces_the_previous_total(monkeypatch):
         reset_for_testing()
 
 
-@pytest.mark.parametrize("invalid_cost", [-0.01, float("nan"), float("inf"), "0.01", True])
+@pytest.mark.parametrize(
+    "invalid_cost",
+    [-0.01, float("nan"), float("inf"), "0.01", True, pytest.param(10**1000, id="oversized")],
+)
 def test_invalid_trace_cost_is_a_no_op(monkeypatch, invalid_cost):
     monkeypatch.delenv("GLASSBOX_ENABLED", raising=False)
     collector = RecordingCollector()
@@ -119,25 +122,27 @@ def test_invalid_trace_cost_is_a_no_op(monkeypatch, invalid_cost):
         reset_for_testing()
 
 
-def test_trace_cost_without_an_active_trace_is_a_no_op(monkeypatch):
+@pytest.mark.parametrize("cost", [0.01, pytest.param(10**1000, id="oversized")])
+def test_trace_cost_without_an_active_trace_is_a_no_op(monkeypatch, cost):
     monkeypatch.delenv("GLASSBOX_ENABLED", raising=False)
     collector = RecordingCollector()
     gb.init(agent="test", version="test", collector=collector)
     try:
-        gb.set_trace_cost_usd(0.01)
+        gb.set_trace_cost_usd(cost)
         assert collector.events == []
     finally:
         reset_for_testing()
 
 
-def test_trace_cost_with_disabled_tracing_is_a_no_op(monkeypatch):
+@pytest.mark.parametrize("cost", [0.01, pytest.param(10**1000, id="oversized")])
+def test_trace_cost_with_disabled_tracing_is_a_no_op(monkeypatch, cost):
     monkeypatch.setenv("GLASSBOX_ENABLED", "0")
     collector = RecordingCollector()
     gb.init(agent="test", version="test", collector=collector)
 
     @gb.trace
     def workload() -> None:
-        gb.set_trace_cost_usd(0.01)
+        gb.set_trace_cost_usd(cost)
 
     try:
         workload()

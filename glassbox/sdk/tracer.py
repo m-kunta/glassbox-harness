@@ -84,16 +84,18 @@ def capture_input(content: str) -> None:
 
 def set_trace_cost_usd(total_cost_usd: float) -> None:
     """Record an explicit total USD cost for the active root trace, fail-open."""
-    if (
-        isinstance(total_cost_usd, bool)
-        or not isinstance(total_cost_usd, Real)
-        or not math.isfinite(total_cost_usd)
-        or total_cost_usd < 0
-    ):
-        return
     trace_state = current_trace.get()
-    if trace_state is not None and get_config().enabled:
-        set_trace(replace(trace_state, total_cost_usd=float(total_cost_usd)))
+    if trace_state is None or not get_config().enabled:
+        return
+    if isinstance(total_cost_usd, bool) or not isinstance(total_cost_usd, Real):
+        return
+    try:
+        cost = float(total_cost_usd)
+        if not math.isfinite(cost) or total_cost_usd < 0:
+            return
+    except (OverflowError, TypeError, ValueError):
+        return
+    set_trace(replace(trace_state, total_cost_usd=cost))
 
 
 class _TraceScope(AbstractContextManager[None]):
