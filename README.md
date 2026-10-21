@@ -59,7 +59,8 @@ glassbox.set_trace_cost_usd(provider_response.total_cost_usd)
 
 Glassbox records a caller-supplied total only; it does not estimate prices from
 model or token metadata. Omit the call when the provider does not expose a
-trusted total.
+trusted total; without the call, the trace cost remains unknown (`null`) and
+Glassbox never substitutes zero.
 
 ## Run the replenishment evaluation suite
 
