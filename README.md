@@ -52,7 +52,14 @@ glassbox.init(agent="triage", version="1.0", collector=collector, blob_store=Blo
 with glassbox.span("llm.complete", kind="llm", prompt=prompt, completion=response):
     call_model()
 glassbox.capture_input(request_payload)
+
+# After the provider reports its own known total for this trace:
+glassbox.set_trace_cost_usd(provider_response.total_cost_usd)
 ```
+
+Glassbox records a caller-supplied total only; it does not estimate prices from
+model or token metadata. Omit the call when the provider does not expose a
+trusted total.
 
 ## Run the replenishment evaluation suite
 
@@ -210,7 +217,9 @@ this appends a linked baseline and preserves its predecessor.
 The default monitors confidence and decision type. Latency and cost display
 “Not monitored (disabled by policy).” Omitting a signal's table disables it;
 an enabled signal with too few usable samples reports insufficient data.
-Cost ingestion is deferred, so missing costs are never treated as zeros.
+Cost capture is available only through `set_trace_cost_usd`; the default drift
+policy still leaves trace cost disabled, so enabling it later requires a
+versioned policy change and a new baseline.
 
 To opt into latency, copy the default policy to a versioned file and append:
 
