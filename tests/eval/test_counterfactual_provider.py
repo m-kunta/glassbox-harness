@@ -20,7 +20,6 @@ CONFIG = CounterfactualConfig("openai", "m", "k", "https://api.openai.com/v1", T
 def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from glassbox.eval import judge_provider
     from glassbox.eval.counterfactual_provider import CounterfactualProviderTimeout
 
     release_stream = threading.Event()
@@ -36,7 +35,7 @@ def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_c
         workers.append(worker)
         return worker
 
-    monkeypatch.setattr(judge_provider.threading, "Thread", create_thread)
+    monkeypatch.setattr(threading, "Thread", create_thread)
 
     class IncrementalResponse:
         def __enter__(self):
@@ -76,6 +75,15 @@ def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_c
             create_counterfactual_provider(config).complete(
                 "system", "user", timeout_seconds=0.02,
             )
+
+        class SwitchedRemoteTransport:
+            def judge(self, *args, **kwargs):
+                pytest.fail("a remote provider must not overlap the stranded Ollama request")
+
+        with pytest.raises(CounterfactualProviderTimeout):
+            create_counterfactual_provider(
+                CONFIG, transport_factory=lambda _: SwitchedRemoteTransport(),
+            ).complete("system", "user", timeout_seconds=0.02)
         assert len(requests) == 1
         assert len(workers) == 1
     finally:
@@ -84,6 +92,84 @@ def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_c
         for worker in workers:
             worker.join(timeout=1.0)
             assert not worker.is_alive()
+
+
+@pytest.mark.parametrize("original_provider", ["claude", "openai", "gemini", "ollama"])
+@pytest.mark.parametrize("next_provider", ["claude", "openai", "gemini", "ollama"])
+def test_finite_timeout_contains_remote_completion_across_provider_switches_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, original_provider: str, next_provider: str,
+) -> None:
+    from glassbox.eval.counterfactual_provider import CounterfactualProviderTimeout
+
+    release_stream = threading.Event()
+    completed = threading.Event()
+    chunks: list[int] = []
+    workers: list[threading.Thread] = []
+    replacement_calls: list[int] = []
+    thread_factory = threading.Thread
+
+    def create_thread(*args, **kwargs):
+        worker = thread_factory(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(threading, "Thread", create_thread)
+
+    class IncrementalRemoteTransport:
+        def judge(self, system_prompt, user_prompt, *, timeout_seconds=None):
+            assert timeout_seconds == 0.04
+            try:
+                for index in range(30):
+                    release_stream.wait(0.01)
+                    chunks.append(index)
+                return "late remote result"
+            finally:
+                completed.set()
+
+    class ReplacementTransport:
+        def judge(self, system_prompt, user_prompt, *, timeout_seconds=None):
+            replacement_calls.append(threading.get_ident())
+            return "replacement result"
+
+    original_config = CounterfactualConfig(
+        original_provider, "original", "credential", "https://original.example", True,
+    )
+    next_config = CounterfactualConfig(
+        next_provider, "replacement", "credential", "https://replacement.example", True,
+    )
+    original = create_counterfactual_provider(
+        original_config, transport_factory=lambda _: IncrementalRemoteTransport(),
+    )
+    replacement = create_counterfactual_provider(
+        next_config, transport_factory=lambda _: ReplacementTransport(),
+    )
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(CounterfactualProviderTimeout):
+            original.complete("system", "user", timeout_seconds=0.04)
+        assert time.monotonic() - started_at < 0.2
+        assert 0 < len(chunks) < 30
+        assert not completed.is_set()
+        with pytest.raises(CounterfactualProviderTimeout):
+            replacement.complete("system", "user", timeout_seconds=0.02)
+        assert replacement_calls == []
+        assert len(workers) == 1
+
+        # Unbounded offline calls still run synchronously, without admission.
+        assert replacement.complete("system", "user") == "replacement result"
+        assert replacement_calls == [threading.get_ident()]
+        assert len(workers) == 1
+    finally:
+        release_stream.set()
+        assert completed.wait(1.0)
+        for worker in workers:
+            worker.join(timeout=1.0)
+            assert not worker.is_alive()
+
+    # Finishing the stranded operation restores admission for a new provider.
+    assert replacement.complete("system", "user", timeout_seconds=1.0) == "replacement result"
+    assert len(workers) == 2
+    assert len(replacement_calls) == 2
 
 
 def test_counterfactual_provider_forwards_request_timeout() -> None:
