@@ -450,6 +450,7 @@ class CounterfactualRun:
     succeeded_count: int
     failed_count: int
     remote_egress_confirmed: bool
+    execution_mode: Literal["offline", "live_shadow"] = "offline"
 
 
 @dataclass(frozen=True)
@@ -501,57 +502,70 @@ class Repository:
                 "decision_id DESC",
                 (stamp,),
             ).fetchall()
-            candidates: list[CounterfactualCandidate] = []
-            for row in rows:
-                decision = self._stored_decision_from_row(row)
-                groups: list[CounterfactualEvidenceGroup] = []
-                unresolved: list[str] = []
-                for citation in dict.fromkeys(decision.event.rationale_citations):
-                    fields = tuple(
-                        field for field in decision.evidence if field.evidence_id == citation
-                    )
-                    if fields:
-                        groups.append(CounterfactualEvidenceGroup(citation, fields))
-                    else:
-                        unresolved.append(citation)
-                decision = StoredDecision(
-                    decision.event, tuple(field for group in groups for field in group.fields),
-                )
-                trace_row = self._connection.execute(
-                    "SELECT * FROM traces WHERE trace_id = ?",
-                    (decision.event.trace_id,),
-                ).fetchone()
-                spans = tuple(
-                    self._span_from_row(item)
-                    for item in self._connection.execute(
-                        "SELECT * FROM spans WHERE trace_id = ? "
-                        "ORDER BY glassbox_timestamp_key(started_at), span_id",
-                        (decision.event.trace_id,),
-                    )
-                )
-                outcomes: list[CounterfactualOutcomeSource] = []
-                seen_types: set[str] = set()
-                for item in self._connection.execute(
-                    "SELECT * FROM outcomes WHERE decision_id = ? "
-                    "AND reconciliation_policy_hash = ? "
-                    "ORDER BY glassbox_timestamp_key(observed_at) DESC, outcome_id DESC",
-                    (decision.event.decision_id, policy_hash),
-                ):
-                    if item["outcome_type"] not in seen_types:
-                        seen_types.add(item["outcome_type"])
-                        outcome = self._outcome_from_row(item)
-                        outcomes.append(CounterfactualOutcomeSource(**vars(outcome)))
-                candidates.append(
-                    CounterfactualCandidate(
-                        decision,
-                        self._trace_from_row(trace_row),
-                        spans,
-                        tuple(outcomes),
-                        tuple(groups),
-                        tuple(unresolved),
-                    )
-                )
-            return tuple(candidates)
+            return tuple(self._counterfactual_candidate_from_row(row, policy_hash) for row in rows)
+
+    def counterfactual_candidate(
+        self, decision_id: str, policy_hash: str,
+    ) -> CounterfactualCandidate | None:
+        """Read source facts and exact-policy outcomes for one decision."""
+        _counterfactual_hash(policy_hash)
+        with self._operation_lock:
+            row = self._connection.execute(
+                "SELECT * FROM decisions WHERE decision_id = ?", (decision_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._counterfactual_candidate_from_row(row, policy_hash)
+
+    def _counterfactual_candidate_from_row(
+        self, row: sqlite3.Row, policy_hash: str,
+    ) -> CounterfactualCandidate:
+        decision = self._stored_decision_from_row(row)
+        groups: list[CounterfactualEvidenceGroup] = []
+        unresolved: list[str] = []
+        for citation in dict.fromkeys(decision.event.rationale_citations):
+            fields = tuple(
+                field for field in decision.evidence if field.evidence_id == citation
+            )
+            if fields:
+                groups.append(CounterfactualEvidenceGroup(citation, fields))
+            else:
+                unresolved.append(citation)
+        decision = StoredDecision(
+            decision.event, tuple(field for group in groups for field in group.fields),
+        )
+        trace_row = self._connection.execute(
+            "SELECT * FROM traces WHERE trace_id = ?",
+            (decision.event.trace_id,),
+        ).fetchone()
+        spans = tuple(
+            self._span_from_row(item)
+            for item in self._connection.execute(
+                "SELECT * FROM spans WHERE trace_id = ? "
+                "ORDER BY glassbox_timestamp_key(started_at), span_id",
+                (decision.event.trace_id,),
+            )
+        )
+        outcomes: list[CounterfactualOutcomeSource] = []
+        seen_types: set[str] = set()
+        for item in self._connection.execute(
+            "SELECT * FROM outcomes WHERE decision_id = ? "
+            "AND reconciliation_policy_hash = ? "
+            "ORDER BY glassbox_timestamp_key(observed_at) DESC, outcome_id DESC",
+            (decision.event.decision_id, policy_hash),
+        ):
+            if item["outcome_type"] not in seen_types:
+                seen_types.add(item["outcome_type"])
+                outcome = self._outcome_from_row(item)
+                outcomes.append(CounterfactualOutcomeSource(**vars(outcome)))
+        return CounterfactualCandidate(
+            decision,
+            self._trace_from_row(trace_row),
+            spans,
+            tuple(outcomes),
+            tuple(groups),
+            tuple(unresolved),
+        )
 
     def record_counterfactual_run(
         self,
@@ -590,12 +604,14 @@ class Repository:
                     """INSERT INTO counterfactual_runs (
                         run_id, created_at, as_of, decided_since, provider, model, base_url,
                         prompt_version, prompt_hash, outcome_policy_version, outcome_policy_hash,
-                        selected_count, succeeded_count, failed_count, remote_egress_confirmed
+                        selected_count, succeeded_count, failed_count, remote_egress_confirmed,
+                        execution_mode
                     ) VALUES (
                         :run_id, :created_at, :as_of, :decided_since, :provider, :model, :base_url,
                         :prompt_version, :prompt_hash, :outcome_policy_version,
                         :outcome_policy_hash,
-                        :selected_count, :succeeded_count, :failed_count, :remote_egress_confirmed
+                        :selected_count, :succeeded_count, :failed_count, :remote_egress_confirmed,
+                        :execution_mode
                     )""",
                     run_values,
                 )
@@ -678,6 +694,8 @@ class Repository:
         run: CounterfactualRun,
         results: tuple[CounterfactualResult, ...],
     ) -> None:
+        if run.execution_mode not in {"offline", "live_shadow"}:
+            raise ValueError("counterfactual execution mode is invalid")
         _counterfactual_ulid(run.run_id)
         for name in ("provider", "model", "base_url", "prompt_version", "outcome_policy_version"):
             _counterfactual_nonempty(getattr(run, name))

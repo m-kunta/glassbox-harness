@@ -450,3 +450,7 @@ ALTER TABLE counterfactual_results ADD COLUMN outcome_status TEXT NOT NULL
         OR (outcome_status = 'labelled' AND outcome_label IS NOT NULL)
         OR (outcome_status IN ('decision_not_mature', 'outcome_not_applicable')
             AND failure_code IS NULL AND outcome_label IS NULL));
+
+ALTER TABLE counterfactual_runs ADD COLUMN execution_mode TEXT NOT NULL
+    DEFAULT 'offline'
+    CHECK (execution_mode IN ('offline', 'live_shadow'));

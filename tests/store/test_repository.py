@@ -74,6 +74,46 @@ def _counterfactual_records():
     return run, result
 
 
+def test_counterfactual_candidate_reads_one_exact_decision(
+    outcome_repository: Repository,
+) -> None:
+    repository = outcome_repository
+    _, _, decision, _ = _events()
+    other_id = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+    repository.write_event(decision.model_copy(update={"decision_id": other_id}))
+    candidate = repository.counterfactual_candidate(DECISION_ID, "a" * 64)
+    assert candidate is not None
+    assert candidate.decision.event.decision_id == DECISION_ID
+    assert repository.counterfactual_candidate("missing", "a" * 64) is None
+    assert repository.counterfactual_candidate("' OR 1=1 --", "a" * 64) is None
+
+
+def test_counterfactual_execution_mode_live_shadow_round_trips(
+    outcome_repository: Repository,
+) -> None:
+    run, result = _counterfactual_records()
+    assert run.execution_mode == "offline"
+    run = dataclasses.replace(run, execution_mode="live_shadow")
+    outcome_repository.record_counterfactual_run(run, (result,))
+    detail = outcome_repository.counterfactual_run_detail(run.run_id)
+    assert detail is not None and detail.run == run
+
+
+def test_counterfactual_execution_mode_validates_before_sql(
+    outcome_repository: Repository,
+) -> None:
+    run, result = _counterfactual_records()
+    run = dataclasses.replace(run, execution_mode="batch")
+    queries: list[str] = []
+    outcome_repository._connection.set_trace_callback(queries.append)
+    try:
+        with pytest.raises(ValueError, match="counterfactual execution mode is invalid"):
+            outcome_repository.record_counterfactual_run(run, (result,))
+    finally:
+        outcome_repository._connection.set_trace_callback(None)
+    assert queries == []
+
+
 def test_counterfactual_candidates_are_ordered_grouped_and_exact_policy_scoped(
     outcome_repository: Repository,
 ) -> None:
@@ -129,6 +169,7 @@ def test_counterfactual_candidates_are_ordered_grouped_and_exact_policy_scoped(
     candidates = repository.counterfactual_candidates(TIMESTAMP, "a" * 64)
     assert [item.decision.event.decision_id for item in candidates] == [newer_id, DECISION_ID]
     candidate = candidates[1]
+    assert repository.counterfactual_candidate(DECISION_ID, "a" * 64) == candidate
     assert {item.field_name for item in candidate.decision.evidence} == {"on_hand", "open_orders"}
     assert candidate.trace.input_ref == "trace-input-reference"
     assert candidate.spans[0].prompt_ref == "prompt-reference"
@@ -156,6 +197,7 @@ def test_counterfactual_candidates_resolve_cited_groups_and_preserve_dangling_id
         "evidence_id": "uncited", "field_value": "uncited secret",
     }))
     candidate = repository.counterfactual_candidates(TIMESTAMP, "a" * 64)[0]
+    assert repository.counterfactual_candidate(DECISION_ID, "a" * 64) == candidate
     assert {item.evidence_id for item in candidate.decision.evidence} == {"inventory_position"}
     assert candidate.unresolved_citations == ("dangling",)
     assert len(candidate.evidence_groups) == 1

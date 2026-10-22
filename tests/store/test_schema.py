@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from glassbox.store import Database
-from glassbox.store.database import TimestampMigrationError
+from glassbox.store.database import TimestampMigrationError, _released_007_schema_objects
 from glassbox.store.repository import (
     DriftBaselineInsert,
     DriftResultInsert,
@@ -59,6 +59,39 @@ def _counterfactual_result_row() -> dict[str, object]:
         "hypothetical_recommendation_json": "{}", "hypothetical_rationale": "variant",
         "failure_code": None, "outcome_id": None, "outcome_label": None,
     }
+
+
+def test_counterfactual_execution_mode_migrates_legacy_rows_as_offline(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-008.sqlite3"
+    connection = sqlite3.connect(path)
+    try:
+        for statement in _released_007_schema_objects().values():
+            connection.execute(statement)
+        connection.executescript((
+            STORE_ROOT / "migrations" / "008_counterfactual_outcome_status.sql"
+        ).read_text())
+        _insert_row(connection, "counterfactual_runs", _counterfactual_run_row())
+        connection.commit()
+    finally:
+        connection.close()
+    database = Database.open(path)
+    try:
+        assert database.connection.execute(
+            "SELECT execution_mode FROM counterfactual_runs"
+        ).fetchone()[0] == "offline"
+    finally:
+        database.close()
+
+
+def test_counterfactual_execution_mode_rejects_invalid_sql_value(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "execution-mode.sqlite3")
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_row(database.connection, "counterfactual_runs", _counterfactual_run_row() | {
+                "execution_mode": "batch",
+            })
+    finally:
+        database.close()
 
 
 def test_counterfactual_schema_rejects_replacing_an_empty_run(tmp_path: Path) -> None:
@@ -630,10 +663,14 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     counterfactual_status_migration = (
         STORE_ROOT / "migrations" / "008_counterfactual_outcome_status.sql"
     ).read_text(encoding="utf-8")
+    counterfactual_execution_migration = (
+        STORE_ROOT / "migrations" / "009_counterfactual_execution_mode.sql"
+    ).read_text(encoding="utf-8")
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
         f"\n{outcome_migration}\n{remediation_migration}\n{counterfactual_migration}"
         f"\n{counterfactual_status_migration}"
+        f"\n{counterfactual_execution_migration}"
     )
 
 
