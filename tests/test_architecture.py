@@ -143,6 +143,7 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.counterfactual",
                 "glassbox.eval.counterfactual_config",
                 "glassbox.eval.counterfactual_provider",
+                "glassbox.eval.shadow",
                 "glassbox.sdk",
             ],
         },
@@ -247,6 +248,7 @@ def _assert_counterfactual_imports_stay_in_command_branch(source_path: Path) -> 
         "glassbox.eval.counterfactual",
         "glassbox.eval.counterfactual_config",
         "glassbox.eval.counterfactual_provider",
+        "glassbox.eval.shadow",
     }
 
     def visit(node: ast.AST, *, in_branch: bool = False) -> None:
@@ -284,6 +286,7 @@ def test_cli_counterfactual_imports_stay_in_command_branch() -> None:
 
 @pytest.mark.parametrize("source", [
     "import glassbox.eval.counterfactual\n",
+    "from glassbox.eval import shadow\n",
     "from glassbox.eval.counterfactual_config import load_counterfactual_config\n",
     "from glassbox.eval import counterfactual_provider\n",
     "from .eval.counterfactual import run_counterfactual\n",
@@ -324,8 +327,59 @@ def test_import_linter_forbids_web_from_counterfactual_modules() -> None:
     assert {
         "glassbox.eval.counterfactual", "glassbox.eval.counterfactual_config",
         "glassbox.eval.counterfactual_provider",
+        "glassbox.eval.shadow",
     } <= forbidden
     assert "glassbox.eval.drift" not in forbidden
+
+
+def _assert_no_shadow_imports(source_path: Path, package: str) -> None:
+    forbidden = {
+        "glassbox.eval.shadow", "glassbox.eval.counterfactual",
+        "glassbox.eval.counterfactual_config", "glassbox.eval.counterfactual_provider",
+        "glassbox.eval.reconciliation",
+    }
+    for node in ast.walk(ast.parse(source_path.read_text())):
+        if isinstance(node, ast.Import):
+            names = {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = importlib.util.resolve_name("." * node.level + module, package)
+            names = {module, *(f"{module}.{alias.name}" for alias in node.names)}
+        else:
+            continue
+        assert not any(
+            name == blocked or name.startswith(blocked + ".")
+            for name in names for blocked in forbidden
+        ), f"{source_path} imports shadow execution or its helpers"
+
+
+@pytest.mark.parametrize("package", ["sdk", "collector", "web"])
+def test_production_packages_never_import_shadow_or_direct_helpers(package: str) -> None:
+    root = PROJECT_ROOT / "glassbox"
+    for source in (root / package).rglob("*.py"):
+        module_package = "glassbox." + ".".join(source.parent.relative_to(root).parts)
+        _assert_no_shadow_imports(source, module_package)
+
+
+@pytest.mark.parametrize("source", [
+    "import glassbox.eval.shadow\n",
+    "from glassbox.eval.shadow import LiveShadowExecutor\n",
+    "from glassbox.eval import shadow as live\n",
+    "from ..eval import shadow\n",
+    "from ..eval.counterfactual import run_counterfactual\n",
+    "def request():\n"
+    "    from glassbox.eval.counterfactual_provider import CounterfactualProvider\n",
+    "from glassbox.eval.counterfactual_config import load_counterfactual_config\n",
+    "from glassbox.eval.reconciliation import load_policy\n",
+])
+def test_shadow_ast_guard_rejects_direct_and_relative_helpers(
+    tmp_path: Path, source: str,
+) -> None:
+    path = tmp_path / "module.py"
+    path.write_text(source)
+    with pytest.raises(AssertionError, match="imports shadow execution"):
+        _assert_no_shadow_imports(path, "glassbox.sdk")
 
 
 def test_gitignore_excludes_the_judge_env_secrets_file() -> None:

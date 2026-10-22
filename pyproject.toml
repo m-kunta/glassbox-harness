@@ -153,5 +153,6 @@ forbidden_modules = [
   "glassbox.eval.counterfactual",
   "glassbox.eval.counterfactual_config",
   "glassbox.eval.counterfactual_provider",
+  "glassbox.eval.shadow",
   "glassbox.sdk",
 ]
