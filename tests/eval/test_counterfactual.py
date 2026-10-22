@@ -128,9 +128,13 @@ class FakeProvider:
     def __init__(self, responses: list[str | Exception]) -> None:
         self.responses = iter(responses)
         self.calls: list[tuple[str, str]] = []
+        self.timeouts: list[float | None] = []
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
         self.calls.append((system_prompt, user_prompt))
+        self.timeouts.append(timeout_seconds)
         answer = next(self.responses)
         if isinstance(answer, Exception):
             raise answer
@@ -211,11 +215,13 @@ def _seed(
 def _execute(
     path: Path, provider: FakeProvider, *, prompt=None, max_cases: int | None = None,
     blob_dir: Path | None = None, as_of: datetime = AS_OF,
+    **kwargs: Any,
 ) -> tuple[Any, Any]:
     assert hasattr(counterfactual, "run_counterfactual"), "counterfactual runner is missing"
     report = counterfactual.run_counterfactual(
         path, CONFIG, prompt or _prompt(), _policy(), DECIDED - timedelta(days=1),
         max_cases, blob_dir, clock=lambda: as_of, provider_factory=lambda _: provider,
+        **kwargs,
     )
     database = Database.open_read_only(path)
     try:
@@ -224,6 +230,76 @@ def _execute(
         return report, detail
     finally:
         database.close()
+
+
+def test_live_shadow_run_persists_one_case_without_outcome_enrichment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events.sqlite3"
+    _seed(path, outcome=True)
+    database = Database.open_read_only(path)
+    try:
+        candidate = Repository(database).counterfactual_candidate(
+            DECISION_IDS[0], _policy().policy_hash,
+        )
+    finally:
+        database.close()
+    assert candidate is not None
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("live run must not select candidates or derive outcomes")
+
+    monkeypatch.setattr(Repository, "counterfactual_candidates", forbidden)
+    monkeypatch.setattr(counterfactual, "_enrich_result", forbidden)
+    provider = FakeProvider([_answer()])
+    report, detail = _execute(
+        path, provider, preselected_candidates=(candidate,),
+        execution_mode="live_shadow", enrich_outcomes=False, request_timeout_seconds=10.0,
+    )
+    assert report.run.execution_mode == detail.run.execution_mode == "live_shadow"
+    assert report.selected_count == report.succeeded_count == 1
+    assert detail.results[0].outcome_status == "outcome_not_applicable"
+    assert detail.results[0].outcome_id is detail.results[0].outcome_label is None
+    assert provider.timeouts == [10.0]
+    for forbidden_text in (
+        "ORIGINAL_RECOMMENDATION", "ORIGINAL_RATIONALE", "OUTCOME_VALUE",
+        '"confidence"', '"feedback"', '"outcomes"',
+    ):
+        assert forbidden_text not in "".join(provider.calls[0])
+
+
+@pytest.mark.parametrize("options", [
+    {"execution_mode": "invalid"}, {"execution_mode": "live_shadow"},
+])
+def test_runner_rejects_invalid_execution_mode_options(tmp_path: Path, options: dict) -> None:
+    path = tmp_path / "events.sqlite3"
+    _seed(path)
+    with pytest.raises(ValueError):
+        _execute(path, FakeProvider([]), **options)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), -float("inf")])
+def test_runner_rejects_invalid_timeout_before_provider_call(
+    tmp_path: Path, timeout: float,
+) -> None:
+    path = tmp_path / "events.sqlite3"
+    _seed(path)
+    provider = FakeProvider([])
+    with pytest.raises(ValueError):
+        _execute(path, provider, request_timeout_seconds=timeout)
+    assert provider.calls == []
+
+
+def test_runner_persists_provider_timeout_and_continues(tmp_path: Path) -> None:
+    from glassbox.eval.counterfactual_provider import CounterfactualProviderTimeout
+
+    path = tmp_path / "events.sqlite3"
+    _seed(path, count=2)
+    provider = FakeProvider([CounterfactualProviderTimeout("private timeout"), _answer()])
+    report, detail = _execute(path, provider, request_timeout_seconds=10.0)
+    assert (report.failed_count, report.succeeded_count) == (1, 1)
+    assert detail.results[0].failure_code == "provider_timeout"
+    assert "private timeout" not in json.dumps(report.to_dict())
 
 
 def test_run_sends_only_cited_facts_and_persists_audit_data(tmp_path: Path) -> None:

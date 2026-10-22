@@ -21,8 +21,11 @@ from __future__ import annotations
 import json
 import math
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.error import URLError
 
 from .judge_config import JudgeConfig
 
@@ -35,9 +38,41 @@ _MAX_SCORE = 5
 class JudgeProvider(Protocol):
     """A configured adapter that can put one system/user prompt to a judge model."""
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
+    def judge(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
         """Return the model's raw text response; callers parse it themselves."""
         ...
+
+
+class JudgeProviderTimeout(TimeoutError):
+    """A request failed because its explicit timeout expired."""
+
+
+def validate_request_timeout(timeout_seconds: float | None) -> None:
+    if timeout_seconds is not None and (
+        isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+    ):
+        raise ValueError("request timeout must be positive and finite")
+
+
+@contextmanager
+def _request_deadline(
+    timeout_seconds: float | None, timeout_errors: tuple[type[Exception], ...] = (),
+) -> Iterator[None]:
+    validate_request_timeout(timeout_seconds)
+    errors = (TimeoutError,) + timeout_errors
+    try:
+        yield
+    except errors as exc:
+        if timeout_seconds is None:
+            raise
+        raise JudgeProviderTimeout("provider request timed out") from exc
+    except URLError as exc:
+        if timeout_seconds is None or not isinstance(exc.reason, TimeoutError):
+            raise
+        raise JudgeProviderTimeout("provider request timed out") from exc
 
 
 @dataclass(frozen=True)
@@ -109,75 +144,112 @@ def _reject_non_finite_constant(token: str) -> float:
 
 
 def _create_claude_provider(config: JudgeConfig) -> JudgeProvider:
-    from anthropic import Anthropic
+    import anthropic
 
-    client = Anthropic(api_key=config.credential, base_url=config.base_url)
-    return _ClaudeJudgeProvider(client=client, model=config.model)
+    client = anthropic.Anthropic(api_key=config.credential, base_url=config.base_url)
+    return _ClaudeJudgeProvider(
+        client=client, model=config.model,
+        timeout_errors=(getattr(anthropic, "APITimeoutError", TimeoutError),),
+    )
 
 
 @dataclass(frozen=True)
 class _ClaudeJudgeProvider:
     client: Any
     model: str
+    timeout_errors: tuple[type[Exception], ...] = ()
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            temperature=_JUDGE_TEMPERATURE,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+    def judge(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
+        with _request_deadline(timeout_seconds, self.timeout_errors):
+            client = self.client
+            options = {}
+            if timeout_seconds is not None:
+                client = client.with_options(max_retries=0)
+                options["timeout"] = timeout_seconds
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                temperature=_JUDGE_TEMPERATURE,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                **options,
+            )
         return str(response.content[0].text)
 
 
 def _create_openai_provider(config: JudgeConfig) -> JudgeProvider:
-    from openai import OpenAI
+    import openai
 
-    client = OpenAI(api_key=config.credential, base_url=config.base_url)
-    return _OpenAIJudgeProvider(client=client, model=config.model)
+    client = openai.OpenAI(api_key=config.credential, base_url=config.base_url)
+    return _OpenAIJudgeProvider(
+        client=client, model=config.model,
+        timeout_errors=(getattr(openai, "APITimeoutError", TimeoutError),),
+    )
 
 
 @dataclass(frozen=True)
 class _OpenAIJudgeProvider:
     client: Any
     model: str
+    timeout_errors: tuple[type[Exception], ...] = ()
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=_JUDGE_TEMPERATURE,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
+    def judge(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
+        with _request_deadline(timeout_seconds, self.timeout_errors):
+            client = self.client
+            options = {}
+            if timeout_seconds is not None:
+                client = client.with_options(max_retries=0)
+                options["timeout"] = timeout_seconds
+            response = client.chat.completions.create(
+                model=self.model,
+                temperature=_JUDGE_TEMPERATURE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **options,
+            )
         return str(response.choices[0].message.content)
 
 
 def _create_gemini_provider(config: JudgeConfig) -> JudgeProvider:
+    import httpx
     from google import genai
 
     client = genai.Client(
         api_key=config.credential, http_options={"base_url": config.base_url}
     )
-    return _GeminiJudgeProvider(client=client, model=config.model)
+    return _GeminiJudgeProvider(
+        client=client, model=config.model, timeout_errors=(httpx.TimeoutException,),
+    )
 
 
 @dataclass(frozen=True)
 class _GeminiJudgeProvider:
     client: Any
     model: str
+    timeout_errors: tuple[type[Exception], ...] = ()
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=user_prompt,
-            config={
+    def judge(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
+        with _request_deadline(timeout_seconds, self.timeout_errors):
+            config: dict[str, Any] = {
                 "system_instruction": system_prompt,
                 "temperature": _JUDGE_TEMPERATURE,
-            },
-        )
+            }
+            if timeout_seconds is not None:
+                config["http_options"] = {
+                    "timeout": max(1, math.ceil(timeout_seconds * 1000)),
+                    "retry_options": {"attempts": 1},
+                }
+            response = self.client.models.generate_content(
+                model=self.model, contents=user_prompt, config=config,
+            )
         return str(response.text)
 
 
@@ -192,7 +264,10 @@ class _OllamaJudgeProvider:
     base_url: str
     model: str
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
+    def judge(
+        self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
+    ) -> str:
+        validate_request_timeout(timeout_seconds)
         payload = json.dumps(
             {
                 "model": self.model,
@@ -208,10 +283,12 @@ class _OllamaJudgeProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(
-            request, timeout=_OLLAMA_REQUEST_TIMEOUT_SECONDS
-        ) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        with _request_deadline(timeout_seconds):
+            with urllib.request.urlopen(
+                request, timeout=(timeout_seconds if timeout_seconds is not None
+                                  else _OLLAMA_REQUEST_TIMEOUT_SECONDS),
+            ) as response:
+                body = json.loads(response.read().decode("utf-8"))
         return str(body["response"])
 
 

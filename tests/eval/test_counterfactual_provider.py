@@ -2,12 +2,144 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import types
+from typing import Any
+from urllib.error import URLError
 
 import pytest
 
 from glassbox.eval.counterfactual_config import CounterfactualConfig
 from glassbox.eval.counterfactual_provider import create_counterfactual_provider
 from glassbox.eval.judge_config import JudgeConfig
+
+CONFIG = CounterfactualConfig("openai", "m", "k", "https://api.openai.com/v1", True)
+
+
+def test_counterfactual_provider_forwards_request_timeout() -> None:
+    class RecordingJudgeTransport:
+        timeout_seconds: float | None = None
+
+        def judge(self, system_prompt: str, user_prompt: str, *, timeout_seconds=None) -> str:
+            self.timeout_seconds = timeout_seconds
+            return "answer"
+
+    transport = RecordingJudgeTransport()
+    provider = create_counterfactual_provider(CONFIG, transport_factory=lambda _: transport)
+    assert provider.complete("system", "user", timeout_seconds=10.0) == "answer"
+    assert transport.timeout_seconds == 10.0
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), -float("inf")])
+def test_counterfactual_provider_rejects_invalid_timeout(timeout: float) -> None:
+    class NeverTransport:
+        def judge(self, *args, **kwargs):
+            pytest.fail("invalid timeout must fail before a request")
+
+    provider = create_counterfactual_provider(CONFIG, transport_factory=lambda _: NeverTransport())
+    with pytest.raises(ValueError):
+        provider.complete("system", "user", timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("provider_name", ["claude", "openai", "gemini", "ollama"])
+@pytest.mark.parametrize("failure", [None, "timeout", "other"])
+@pytest.mark.parametrize("timeout", [None, 10.0])
+def test_lazy_transports_forward_timeout_and_normalize_only_deadline_errors(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str, failure: str | None,
+    timeout: float | None,
+) -> None:
+    from glassbox.eval.counterfactual_provider import CounterfactualProviderTimeout
+
+    captured: dict[str, Any] = {}
+
+    class SDKTimeout(Exception):
+        pass
+
+    error = SDKTimeout("deadline") if failure == "timeout" else RuntimeError("provider failure")
+    if provider_name == "gemini":
+        import httpx
+        error = httpx.ReadTimeout("deadline") if failure == "timeout" else error
+    elif provider_name == "ollama":
+        error = URLError(TimeoutError("deadline")) if failure == "timeout" else error
+
+    def request(**kwargs):
+        captured["request"] = kwargs
+        if failure:
+            raise error
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(text="answer")], text="answer",
+            choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="answer"))],
+        )
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured["constructor"] = kwargs
+            self.messages = types.SimpleNamespace(create=request)
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=request))
+            self.models = types.SimpleNamespace(generate_content=request)
+
+        def with_options(self, **kwargs):
+            captured["options"] = kwargs
+            return self
+
+    if provider_name in {"claude", "openai"}:
+        module = types.ModuleType("anthropic" if provider_name == "claude" else "openai")
+        module.APITimeoutError = SDKTimeout
+        setattr(module, "Anthropic" if provider_name == "claude" else "OpenAI", Client)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    elif provider_name == "gemini":
+        google = types.ModuleType("google")
+        google.genai = types.SimpleNamespace(Client=Client)
+        monkeypatch.setitem(sys.modules, "google", google)
+    else:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self):
+                return b'{"response":"answer"}'
+
+        def urlopen(request, *, timeout):
+            captured["request"] = {"timeout": timeout}
+            if failure:
+                raise error
+            return Response()
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    config = CounterfactualConfig(provider_name, "model", "credential", CONFIG.base_url, True)
+    provider = create_counterfactual_provider(config)
+    if failure == "timeout" and timeout is not None:
+        with pytest.raises(CounterfactualProviderTimeout):
+            provider.complete("system", "user", timeout_seconds=timeout)
+    elif failure:
+        with pytest.raises(type(error)) as caught:
+            provider.complete("system", "user", timeout_seconds=timeout)
+        assert caught.value is error
+    else:
+        assert provider.complete("system", "user", timeout_seconds=timeout) == "answer"
+    if provider_name == "gemini":
+        if timeout is None:
+            assert "http_options" not in captured["request"]["config"]
+        else:
+            assert captured["request"]["config"]["http_options"] == {
+                "timeout": 10000, "retry_options": {"attempts": 1},
+            }
+        assert captured["request"]["config"]["temperature"] == 0
+    elif provider_name == "ollama":
+        assert captured["request"]["timeout"] == (120 if timeout is None else timeout)
+    if provider_name in {"openai", "claude"}:
+        if timeout is None:
+            assert "options" not in captured
+            assert "timeout" not in captured["request"]
+        else:
+            assert captured["options"] == {"max_retries": 0}
+            assert captured["request"]["timeout"] == timeout
+        assert captured["request"]["temperature"] == 0
+    if provider_name != "ollama":
+        assert captured["constructor"]["api_key"] == "credential"
 
 
 def test_adapter_passes_explicit_config_and_prompts(monkeypatch: pytest.MonkeyPatch) -> None:

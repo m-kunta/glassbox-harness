@@ -24,7 +24,11 @@ from glassbox.store.repository import (
 )
 
 from .counterfactual_config import CounterfactualConfig
-from .counterfactual_provider import CounterfactualProvider
+from .counterfactual_provider import (
+    CounterfactualProvider,
+    CounterfactualProviderTimeout,
+    validate_request_timeout,
+)
 from .reconciliation import ReconciliationError, ReconciliationPolicy, derive_label, load_policy
 
 _SNAPSHOT_TOKEN = "{{decision_snapshot_json}}"
@@ -435,8 +439,16 @@ def run_counterfactual(
     clock: Callable[[], datetime],
     provider_factory: Callable[[CounterfactualConfig], CounterfactualProvider],
     preselected_candidates: tuple[CounterfactualCandidate, ...] | None = None,
+    execution_mode: Literal["offline", "live_shadow"] = "offline",
+    enrich_outcomes: bool = True,
+    request_timeout_seconds: float | None = None,
 ) -> CounterfactualReport:
-    """Run one offline prompt experiment and atomically persist all case results."""
+    """Run a prompt experiment and atomically persist its immutable case results."""
+    if execution_mode not in {"offline", "live_shadow"}:
+        raise ValueError("counterfactual execution mode is invalid")
+    if execution_mode == "live_shadow" and enrich_outcomes:
+        raise ValueError("live shadow cannot enrich outcomes")
+    validate_request_timeout(request_timeout_seconds)
     as_of = clock()
     _require_utc(as_of)
     _require_utc(decided_since)
@@ -495,7 +507,15 @@ def run_counterfactual(
                 failure_code = "provider_unavailable"
             elif failure_code is None and provider is not None and case.user_prompt is not None:
                 try:
-                    raw = provider.complete(_SYSTEM_PROMPT, case.user_prompt)
+                    if request_timeout_seconds is None:
+                        raw = provider.complete(_SYSTEM_PROMPT, case.user_prompt)
+                    else:
+                        raw = provider.complete(
+                            _SYSTEM_PROMPT, case.user_prompt,
+                            timeout_seconds=request_timeout_seconds,
+                        )
+                except CounterfactualProviderTimeout:
+                    failure_code = "provider_timeout"
                 except Exception:
                     failure_code = "provider_failure"
                 else:
@@ -506,6 +526,9 @@ def run_counterfactual(
             if failure_code is not None:
                 outcome_id = label = None
                 status = "case_failed"
+            elif not enrich_outcomes:
+                outcome_id = label = None
+                status = "outcome_not_applicable"
             else:
                 assert parsed is not None
                 outcome_id, label, status = _enrich_result(
@@ -541,6 +564,7 @@ def run_counterfactual(
             succeeded_count=sum(item.failure_code is None for item in results),
             failed_count=sum(item.failure_code is not None for item in results),
             remote_egress_confirmed=config.is_remote,
+            execution_mode=execution_mode,
         )
         repository.record_counterfactual_run(run, tuple(results))
         return CounterfactualReport(run, tuple(results), tuple(statuses))
