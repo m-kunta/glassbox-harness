@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
+import time
 import types
 from typing import Any
 from urllib.error import URLError
@@ -13,6 +15,75 @@ from glassbox.eval.counterfactual_provider import create_counterfactual_provider
 from glassbox.eval.judge_config import JudgeConfig
 
 CONFIG = CounterfactualConfig("openai", "m", "k", "https://api.openai.com/v1", True)
+
+
+def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from glassbox.eval import judge_provider
+    from glassbox.eval.counterfactual_provider import CounterfactualProviderTimeout
+
+    release_stream = threading.Event()
+    stream_closed = threading.Event()
+    request_started = threading.Event()
+    requests: list[object] = []
+    chunks: list[bytes] = []
+    workers: list[threading.Thread] = []
+    thread_factory = threading.Thread
+
+    def create_thread(*args, **kwargs):
+        worker = thread_factory(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(judge_provider.threading, "Thread", create_thread)
+
+    class IncrementalResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            stream_closed.set()
+
+        def read(self):
+            # Every chunk arrives within the socket timeout. The complete body
+            # still takes much longer than the caller's overall deadline.
+            for chunk in b'{"response":"incremental answer"}':
+                release_stream.wait(0.01)
+                chunks.append(bytes([chunk]))
+            return b"".join(chunks)
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        request_started.set()
+        return IncrementalResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    config = CounterfactualConfig("ollama", "model", None, "http://localhost:11434", False)
+    provider = create_counterfactual_provider(config)
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(CounterfactualProviderTimeout):
+            provider.complete("system", "user", timeout_seconds=0.04)
+        assert time.monotonic() - started_at < 0.2
+        assert request_started.is_set()
+        assert 0 < len(chunks) < len(b'{"response":"incremental answer"}')
+        assert not stream_closed.is_set()
+
+        # A new provider instance must share containment, and must not launch
+        # another call while the timed-out request is still completing.
+        with pytest.raises(CounterfactualProviderTimeout):
+            create_counterfactual_provider(config).complete(
+                "system", "user", timeout_seconds=0.02,
+            )
+        assert len(requests) == 1
+        assert len(workers) == 1
+    finally:
+        release_stream.set()
+        assert stream_closed.wait(1.0)
+        for worker in workers:
+            worker.join(timeout=1.0)
+            assert not worker.is_alive()
 
 
 def test_counterfactual_provider_forwards_request_timeout() -> None:

@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+import time
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -30,6 +33,9 @@ from urllib.error import URLError
 from .judge_config import JudgeConfig
 
 _OLLAMA_REQUEST_TIMEOUT_SECONDS = 120
+# A timed-out bounded request retains this slot until its network call ends.
+# Later calls cannot create overlapping requests or additional blocked threads.
+_OLLAMA_BOUNDED_REQUEST_SLOT = threading.BoundedSemaphore(1)
 _JUDGE_TEMPERATURE = 0
 _MIN_SCORE = 1
 _MAX_SCORE = 5
@@ -257,6 +263,41 @@ def _create_ollama_provider(config: JudgeConfig) -> JudgeProvider:
     return _OllamaJudgeProvider(base_url=config.base_url, model=config.model)
 
 
+def _ollama_response(request: urllib.request.Request, timeout_seconds: float) -> str:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    return str(body["response"])
+
+
+def _bounded_ollama_response(request: urllib.request.Request, timeout_seconds: float) -> str:
+    """Bound caller elapsed time while containing any unfinished network call."""
+    deadline = time.monotonic() + timeout_seconds
+    result: Future[str] = Future()
+    if not _OLLAMA_BOUNDED_REQUEST_SLOT.acquire(blocking=False):
+        raise TimeoutError("a bounded Ollama request is still active")
+
+    def complete() -> None:
+        try:
+            response = _ollama_response(request, timeout_seconds)
+        except BaseException as exc:
+            _OLLAMA_BOUNDED_REQUEST_SLOT.release()
+            result.set_exception(exc)
+        else:
+            _OLLAMA_BOUNDED_REQUEST_SLOT.release()
+            result.set_result(response)
+
+    try:
+        worker = threading.Thread(target=complete, name="glassbox-ollama-request", daemon=True)
+        worker.start()
+    except BaseException:
+        _OLLAMA_BOUNDED_REQUEST_SLOT.release()
+        raise
+    response = result.result(timeout=max(0.0, deadline - time.monotonic()))
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Ollama request exceeded its elapsed deadline")
+    return response
+
+
 @dataclass(frozen=True)
 class _OllamaJudgeProvider:
     """Standard-library HTTP adapter -- needs no runtime HTTP extra installed."""
@@ -284,12 +325,9 @@ class _OllamaJudgeProvider:
             method="POST",
         )
         with _request_deadline(timeout_seconds):
-            with urllib.request.urlopen(
-                request, timeout=(timeout_seconds if timeout_seconds is not None
-                                  else _OLLAMA_REQUEST_TIMEOUT_SECONDS),
-            ) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        return str(body["response"])
+            if timeout_seconds is None:
+                return _ollama_response(request, _OLLAMA_REQUEST_TIMEOUT_SECONDS)
+            return _bounded_ollama_response(request, timeout_seconds)
 
 
 _FACTORIES = {
