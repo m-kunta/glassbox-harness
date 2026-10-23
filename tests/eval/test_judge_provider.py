@@ -177,7 +177,9 @@ def test_create_judge_provider_for_ollama_uses_urllib_and_needs_no_optional_sdk(
         def read(self) -> bytes:
             return json.dumps({"response": _RAW_JUDGE_JSON}).encode("utf-8")
 
-    def _fake_urlopen(request: Any, timeout: float | None = None) -> _FakeResponse:
+    def _fake_open(
+        opener: Any, request: Any, timeout: float | None = None,
+    ) -> _FakeResponse:
         captured["url"] = request.full_url
         captured["method"] = request.get_method()
         captured["data"] = json.loads(request.data.decode("utf-8"))
@@ -186,7 +188,7 @@ def test_create_judge_provider_for_ollama_uses_urllib_and_needs_no_optional_sdk(
 
     import urllib.request
 
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", _fake_open)
 
     provider = create_judge_provider(_ollama_config())
     raw = provider.judge("system prompt", "user prompt")

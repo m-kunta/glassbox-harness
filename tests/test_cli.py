@@ -217,6 +217,25 @@ def test_counterfactual_run_returns_two_for_empty_selection(
     assert factories == []
 
 
+@pytest.mark.parametrize("execution_mode", ["offline", "live_shadow"])
+def test_counterfactual_report_exposes_saved_execution_mode(
+    tmp_path: Path, capsys, execution_mode: str,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+    from tests.eval.test_counterfactual import FakeProvider, _answer, _execute, _seed
+
+    path = tmp_path / "cases.sqlite3"
+    _seed(path)
+    original, detail = _execute(
+        path, FakeProvider([_answer()]), execution_mode=execution_mode,
+        enrich_outcomes=execution_mode == "offline",
+    )
+    assert detail.run.execution_mode == execution_mode
+    assert main(["--database", str(path), "counterfactual", "report", "--run",
+                 original.run_id]) == 0
+    assert json.loads(capsys.readouterr().out)["execution_mode"] == execution_mode
+
+
 def test_counterfactual_report_replays_original_maturity_status(
     tmp_path: Path, capsys,
 ) -> None:  # type: ignore[no-untyped-def]

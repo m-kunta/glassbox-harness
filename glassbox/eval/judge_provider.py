@@ -254,11 +254,22 @@ class _GeminiJudgeProvider:
 
 
 def _create_ollama_provider(config: JudgeConfig) -> JudgeProvider:
-    return _OllamaJudgeProvider(base_url=config.base_url, model=config.model)
+    return _OllamaJudgeProvider(
+        base_url=config.base_url, model=config.model, is_remote=config.is_remote,
+    )
 
 
-def _ollama_response(request: urllib.request.Request, timeout_seconds: float) -> str:
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+def _ollama_response(
+    request: urllib.request.Request, timeout_seconds: float, *, is_remote: bool,
+) -> str:
+    if is_remote:
+        response = urllib.request.urlopen(request, timeout=timeout_seconds)
+    else:
+        # Local eligibility must describe the actual transport destination,
+        # regardless of ambient proxy settings or a cached global opener.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        response = opener.open(request, timeout=timeout_seconds)
+    with response:
         body = json.loads(response.read().decode("utf-8"))
     return str(body["response"])
 
@@ -269,6 +280,7 @@ class _OllamaJudgeProvider:
 
     base_url: str
     model: str
+    is_remote: bool
 
     def judge(
         self, system_prompt: str, user_prompt: str, *, timeout_seconds: float | None = None,
@@ -293,6 +305,7 @@ class _OllamaJudgeProvider:
             return _ollama_response(
                 request, timeout_seconds if timeout_seconds is not None
                 else _OLLAMA_REQUEST_TIMEOUT_SECONDS,
+                is_remote=self.is_remote,
             )
 
 

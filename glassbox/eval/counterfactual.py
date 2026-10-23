@@ -91,6 +91,7 @@ class CounterfactualReport:
         )
         return {
             "run_id": self.run_id,
+            "execution_mode": self.run.execution_mode,
             "created_at": self.run.created_at.isoformat().replace("+00:00", "Z"),
             "as_of": self.run.as_of.isoformat().replace("+00:00", "Z"),
             "decided_since": self.run.decided_since.isoformat().replace("+00:00", "Z"),

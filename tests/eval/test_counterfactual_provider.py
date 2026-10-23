@@ -52,12 +52,12 @@ def test_ollama_timeout_contains_incremental_response_and_prevents_overlapping_c
                 chunks.append(bytes([chunk]))
             return b"".join(chunks)
 
-    def urlopen(request, *, timeout):
+    def open_request(opener, request, *, timeout):
         requests.append(request)
         request_started.set()
         return IncrementalResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", open_request)
     config = CounterfactualConfig("ollama", "model", None, "http://localhost:11434", False)
     provider = create_counterfactual_provider(config)
     started_at = time.monotonic()

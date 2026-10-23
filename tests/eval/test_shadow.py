@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +209,68 @@ def test_persisted_source_writes_one_live_run_and_deadline(
     assert result.outcome_id is None
     assert provider.timeouts == [10.0]
     assert "ORIGINAL_RATIONALE" not in provider.calls[0][1]
+
+
+@pytest.mark.parametrize("proxy_variable", ["http_proxy", "HTTP_PROXY"])
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_local_ollama_shadow_bypasses_ambient_proxy(
+    executors: Any, artifact: ShadowArtifact, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, proxy_variable: str, host: str,
+) -> None:
+    requests: list[tuple[int, str, bytes]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append((self.server.server_port, self.path, body))
+            response = json.dumps({"response": _answer()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), Handler) for _ in range(2)]
+    local, proxy = servers
+    workers = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+    for worker in workers:
+        worker.start()
+    try:
+        for key in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                    "all_proxy", "ALL_PROXY", "REQUEST_METHOD"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setenv("NO_PROXY", "")
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        monkeypatch.setenv(proxy_variable, proxy_url)
+        # Exercise urllib's actual environment-derived proxy handler, including
+        # a previously initialized global opener; no network helper is mocked.
+        monkeypatch.setattr(urllib.request, "_opener", urllib.request.build_opener())
+        assert urllib.request.getproxies()["http"] == proxy_url
+        _seed(tmp_path / "events.sqlite3")
+        executor = executors(
+            environ=ENV | {
+                "GLASSBOX_COUNTERFACTUAL_OLLAMA_URL": f"http://{host}:{local.server_port}",
+            },
+            provider_factory=create_counterfactual_provider,
+        )
+        executor.submit(DECISION_ID, artifact)
+        executor.shutdown(timeout=2)
+        assert executor.diagnostics["completed"] == 1, dict(executor.diagnostics)
+        assert [port for port, _, _ in requests] == [local.server_port]
+        assert requests[0][1] == "/api/generate"
+        assert "BEGIN UNTRUSTED DECISION DATA" in json.loads(requests[0][2])["prompt"]
+        stored, = details(tmp_path / "events.sqlite3")
+        assert stored.run.execution_mode == "live_shadow"
+        assert stored.run.remote_egress_confirmed is False
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for worker in workers:
+            worker.join(timeout=2)
 
 
 def test_poll_sees_later_persistence_and_closes_each_connection(
