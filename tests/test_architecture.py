@@ -53,6 +53,31 @@ def test_readme_documents_live_shadow_as_explicit_and_fail_open() -> None:
     assert "does not change the production decision" in readme
 
 
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "disabled",
+        "configuration_unavailable",
+        "egress_not_authorized",
+        "queue_full",
+        "lifetime_cap",
+        "source_decision_unavailable",
+        "provider_timeout",
+        "provider_failure",
+        "parse_failure",
+        "storage_failure",
+        "completed",
+    ],
+)
+def test_readme_documents_live_shadow_diagnostic_keys(diagnostic: str) -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+    live_shadow_section = readme.split(
+        "## Submit an explicit live counterfactual shadow", 1
+    )[1].split("\n## ", 1)[0]
+
+    assert f"`{diagnostic}`" in live_shadow_section
+
+
 def _events_import_violations(events_root: Path) -> list[str]:
     violations: list[str] = []
 

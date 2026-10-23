@@ -499,10 +499,16 @@ never appears, no provider is constructed or called. Each provider request has
 a **ten-second elapsed deadline**. A timed-out transport may still be finishing;
 no overlapping bounded provider call is admitted until it returns.
 
-`shadow.diagnostics` is a read-only snapshot of local counters for disabled or
-rejected submissions, unavailable configuration/source decisions, provider
-timeouts/failures, parsing/storage failures, and completed jobs. Operational
-failures are contained. `shutdown(timeout=...)` closes that executor's admission
+`shadow.diagnostics` is a read-only snapshot of local counters.
+`dict(shadow.diagnostics)` exposes these keys:
+
+- Admission: `disabled`, `configuration_unavailable`, `egress_not_authorized`,
+  `queue_full`, `lifetime_cap`.
+- Execution failures: `source_decision_unavailable`, `provider_timeout`,
+  `provider_failure`, `parse_failure`, `storage_failure`.
+- Successful jobs: `completed`.
+
+Operational failures are contained. `shutdown(timeout=...)` closes that executor's admission
 and waits only for its accepted jobs; a finite timeout leaves unfinished daemon
 work running, so process exit can abandon it.
 
