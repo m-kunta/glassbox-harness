@@ -44,6 +44,15 @@ def test_readme_distinguishes_explicit_reconciliation_v2_from_the_legacy_default
     assert "The explicitly selected v2" in outcomes_section
 
 
+def test_readme_documents_live_shadow_as_explicit_and_fail_open() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+
+    assert "GLASSBOX_SHADOW_ENABLED=1" in readme
+    assert "GLASSBOX_SHADOW_ALLOW_EGRESS=1" in readme
+    assert "after `DecisionScope.complete()`" in readme
+    assert "does not change the production decision" in readme
+
+
 def _events_import_violations(events_root: Path) -> list[str]:
     violations: list[str] = []
 

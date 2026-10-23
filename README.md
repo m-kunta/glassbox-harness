@@ -416,6 +416,107 @@ including a run with some failed cases. It exits `2` when no case succeeds,
 after persisting and printing that auditable run; `report --run` can retrieve
 it later. Preflight and command-level failures also exit `2`.
 
+## Submit an explicit live counterfactual shadow
+
+Live shadowing is an application-owned, fail-open integration. It evaluates an
+approved prompt in the background and does not change the production decision,
+agent return value, or exception. Install the existing counterfactual extras
+shown above (`.[counterfactual]` for Ollama, or the matching
+`.[counterfactual-claude]`, `.[counterfactual-openai]`, or
+`.[counterfactual-gemini]` extra). Configure the same
+`GLASSBOX_COUNTERFACTUAL_PROVIDER`, `GLASSBOX_COUNTERFACTUAL_MODEL`, provider
+credential, and optional Ollama URL in the process environment or the `.env`
+at the explicitly supplied Glassbox `project_root`. Nonempty process values
+take precedence; a sibling agent's `.env` is never read.
+
+Enable admission explicitly in the **process environment**:
+
+```shell
+export GLASSBOX_SHADOW_ENABLED=1
+# Also required for Claude, OpenAI, Gemini, or non-loopback Ollama:
+export GLASSBOX_SHADOW_ALLOW_EGRESS=1
+```
+
+Both flags must be exactly `1` for remote egress. Loopback Ollama needs only
+`GLASSBOX_SHADOW_ENABLED=1`. Putting these flags only in `.env` does not enable
+them, and the offline CLI's `--confirm-egress` does not authorize live egress.
+Authorize only a reviewed provider destination and approved prompt artifact;
+live submission has no interactive consent prompt.
+
+Create one long-lived executor and validate the approved `ShadowArtifact`
+during application setup, where artifact errors can be handled before serving
+production traffic. Point it at the same database used by the tracing collector:
+
+```python
+import os
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+from glassbox.eval.counterfactual_provider import create_counterfactual_provider
+from glassbox.eval.shadow import LiveShadowExecutor, ShadowArtifact, load_shadow_artifact
+
+project_root = Path("/absolute/path/to/glassbox")
+approved_artifact: ShadowArtifact = load_shadow_artifact(
+    project_root / "glassbox/eval/prompts/counterfactual_v1.md",
+    project_root / "glassbox/eval/policies/reconciliation_v2.toml",
+)
+shadow = LiveShadowExecutor(
+    database_path=project_root / "glassbox.sqlite3",
+    project_root=project_root,
+    blob_dir=None,
+    environ=os.environ,
+    clock=lambda: datetime.now(UTC),
+    monotonic_clock=time.monotonic,
+    sleep=time.sleep,
+    provider_factory=create_counterfactual_provider,
+)
+
+
+def on_completed_decision(decision_id: str) -> None:
+    # The application invokes this hook only after DecisionScope.complete().
+    shadow.submit(decision_id, approved_artifact)
+
+
+# During application shutdown, inspect local counters and close admission:
+# local_metrics = dict(shadow.diagnostics)
+# shadow.shutdown(timeout=0.0)
+```
+
+Wire that hook explicitly for each selected decision after `DecisionScope.complete()`;
+pass the exact recorded `DecisionEvent.decision_id`
+from your integration. `complete()` returns no ID, and the SDK supplies no
+automatic shadow hook. Do not submit an incomplete decision or create a new
+executor per decision. Submission does not wait for source persistence or a
+provider request; SDK, collector, and web code do not initiate shadow work.
+
+All executors share a process-wide limit of **one active job, one queued job,
+and ten accepted jobs over the process lifetime**. Completed jobs and executor
+shutdown do not replenish that budget. Full-queue and lifetime-cap submissions
+are dropped with local diagnostic counters and no audit rows. A worker waits
+up to **five seconds** for the collector to persist the source decision; if it
+never appears, no provider is constructed or called. Each provider request has
+a **ten-second elapsed deadline**. A timed-out transport may still be finishing;
+no overlapping bounded provider call is admitted until it returns.
+
+`shadow.diagnostics` is a read-only snapshot of local counters for disabled or
+rejected submissions, unavailable configuration/source decisions, provider
+timeouts/failures, parsing/storage failures, and completed jobs. Operational
+failures are contained. `shutdown(timeout=...)` closes that executor's admission
+and waits only for its accepted jobs; a finite timeout leaves unfinished daemon
+work running, so process exit can abandon it.
+
+Once the source decision exists, each executed shadow uses the append-only,
+immutable `counterfactual_runs` / `counterfactual_results` audit history with
+`execution_mode="live_shadow"`; existing offline history stays `offline`.
+Retrieve a saved run with the same `counterfactual report --run RUN_ID` command.
+Live results record `outcome_not_applicable`: there is no decision-time outcome
+enrichment. The provider receives fact-only snapshot input, excluding the
+original recommendation, rationale, confidence, feedback, and realized outcomes.
+Earlier completions, LLM prompt captures, and agent outputs remain excluded;
+optional redacted input enrichment requires the same declared input-only
+contract as offline experiments. The example disables blob enrichment.
+
 ## Development
 
 Use Python 3.11 or newer, then install the development extras and run the checks:
