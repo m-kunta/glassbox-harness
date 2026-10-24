@@ -36,6 +36,10 @@ Delivery is enabled only when both values are present:
 - `GLASSBOX_DISCORD_ALLOW_EGRESS=1`: an explicit acknowledgement that the
   compact operational alert may leave the machine.
 
+`GLASSBOX_DISCORD_REPORT_URL` is optional. When present, it is included in the
+alert only if it is an exact loopback HTTP(S) URL; it may point to the local
+Glassbox report but never to a remote host.
+
 The URL is a credential. Glassbox never persists, prints, displays, or includes
 it in an error. It accepts only `https://discord.com/api/webhooks/...`; any
 other host, scheme, path, fragment, credentials component, or malformed value
@@ -77,12 +81,14 @@ failure cannot roll back, alter, or reclassify the drift run.
 
 Add a dedicated append-only `discord_deliveries` table and typed repository
 methods. Each row contains an opaque delivery ID, `drift_run_id`, destination
-hash, attempt number, status (`delivered` or `failed`), creation/finalization
-timestamps, and a normalized non-sensitive error category for failures. A
-unique successful-delivery constraint protects `(drift_run_id,
-destination_hash)` from duplicate posts, while preserving earlier failed
-attempts. The raw URL, request payload, response body, and exception text are
-never stored.
+hash, attempt number, status (`pending`, `delivered`, or `failed`),
+creation/finalization timestamps, and a normalized non-sensitive error category
+for failures. A `pending` row is a durable pre-send claim; it transitions once
+to one immutable terminal state, and an abandoned stale claim is finalized as
+failed before a later retry creates its own row. A unique successful-delivery
+constraint protects `(drift_run_id, destination_hash)` from duplicate posts,
+while preserving earlier failed attempts. The raw URL, request payload,
+response body, and exception text are never stored.
 
 The report remains usable even if no delivery table exists in a historical
 database until the regular forward migration has run; no read-only endpoint
