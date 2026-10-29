@@ -54,6 +54,45 @@ def test_readme_documents_live_shadow_as_explicit_and_fail_open() -> None:
 
 
 @pytest.mark.parametrize(
+    "contract",
+    [
+        "GLASSBOX_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN",
+        "GLASSBOX_DISCORD_ALLOW_EGRESS=1",
+        "GLASSBOX_DISCORD_REPORT_URL=http://127.0.0.1:8787/drift",
+        "Glassbox project-root `.env`, independent of the working directory",
+        "Nonblank process-environment values take precedence",
+        "Treat the webhook URL as a secret",
+        "`https://discord.com/api/webhooks/<numeric-id>/<token>`",
+        "ASCII letters, digits, `_`, and `-`",
+        "no port, user information, query, fragment, or trailing slash",
+        "exactly `1`",
+        "`localhost` or a loopback IP address",
+        "automatically only after a `drift_detected` report is persisted",
+        "compact operational summary",
+        "no decision data, evidence, rationale, recommendations, feedback, or blob content",
+        "direct no-proxy transport",
+        "one retry",
+        "two-second timeout",
+        "Durable idempotency",
+        "`(drift_run_id, destination_hash)`",
+        "`pending` claim before network I/O",
+        "stale after 30 seconds",
+        "unchanged drift exit semantics",
+        "`0` for a successfully calculated report, including `drift_detected`",
+        "`2` for command-level failures",
+    ],
+)
+def test_readme_documents_discord_drift_alert_operations(contract: str) -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+
+    assert "## Send Discord drift alerts" in readme
+    discord_section = readme.split("## Send Discord drift alerts", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    assert contract in " ".join(discord_section.split())
+
+
+@pytest.mark.parametrize(
     "diagnostic",
     [
         "disabled",

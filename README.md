@@ -251,6 +251,77 @@ Both views keep confidence and decision type at decision level. Optional latency
 and cost use traces as their sample unit, with decisions-per-trace shown as
 context for batch-size changes.
 
+## Send Discord drift alerts
+
+Discord incoming-webhook delivery is opt-in. Configure the following in the
+Glassbox project-root `.env`, independent of the working directory, or in the
+process environment. Nonblank process-environment values take precedence;
+configuration does not modify the process environment or read a sibling agent's
+`.env`. The examples below are non-real placeholders; replace the webhook ID
+and token with your channel's values.
+
+```dotenv
+GLASSBOX_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
+GLASSBOX_DISCORD_ALLOW_EGRESS=1
+# Optional: link to this machine's report view only.
+GLASSBOX_DISCORD_REPORT_URL=http://127.0.0.1:8787/drift
+```
+
+Treat the webhook URL as a secret: keep it out of source control, screenshots,
+and shared logs. `.env` is gitignored. Glassbox never prints or persists the
+raw URL or includes it in errors. The accepted form is exactly
+`https://discord.com/api/webhooks/<numeric-id>/<token>`: the ID contains only
+digits and the token contains only ASCII letters, digits, `_`, and `-`, with
+no port, user information, query, fragment, or trailing slash. Alternate hosts
+and schemes are rejected. Both a valid URL and the explicit egress gate
+`GLASSBOX_DISCORD_ALLOW_EGRESS` set to exactly `1` are required to send the
+operational summary to Discord; missing gates disable delivery.
+
+The optional report URL must be HTTP(S) with an exact host of `localhost` or a
+loopback IP address (including IPv6), without user information, whitespace,
+backslashes, or an invalid/zero port. Remote hosts and lookalike hostnames such
+as `localhost.example.com` are rejected; an invalid report URL is omitted from
+the alert. A loopback link opens the viewer's own machine, so it is useful only
+where that local Glassbox report is available; normal local login is required.
+
+Run `glassbox drift --agent replenishment-triage-ai` as usual. Delivery occurs
+automatically only after a `drift_detected` report is persisted. Baseline
+creation, `healthy`, `watch`, insufficient-data reports, and the read-only
+`/drift` page do not send alerts. The payload is a compact operational summary:
+agent, drift-run ID, policy version/hash, report timestamp, detected signal
+values, thresholds, sample counts, and the optional local report URL. It contains
+no decision data, evidence, rationale, recommendations, feedback, or blob content;
+Discord mentions are disabled.
+
+Requests use direct no-proxy transport, ignoring environment proxy variables,
+and do not follow redirects. Each request has a two-second timeout. Transport
+errors, HTTP `429`, and `5xx` allow one retry, at most two requests in total,
+with a delay capped at two seconds. A valid `Retry-After` within that cap is
+honored; otherwise the delay is 0.25 seconds. Other `4xx` responses fail without
+retrying. Any `2xx` response marks delivery successful.
+
+Durable idempotency uses `(drift_run_id, destination_hash)`, where the destination
+hash is SHA-256 of the exact webhook URL. SQLite records a `pending` claim before
+network I/O and finalizes it as `delivered` or `failed`; completed audit rows are
+immutable. Successful deliveries and active claims suppress duplicate attempts
+for that same pair, including across process restarts. Failed deliveries may be
+retried on a later invocation; a pending claim becomes stale after 30 seconds
+and is finalized as `failed`/`stale_claim` before a new claim is created. A new
+drift run or a changed destination is a different pair. If Discord accepted a
+request before a crash prevented local finalization, a later stale-claim retry
+can still duplicate the remote message. Audit rows retain only delivery metadata
+and normalized error categories, never request payloads, response bodies, or
+exception text.
+
+Delivery failures are isolated from monitoring: the persisted report remains
+authoritative, with unchanged drift exit semantics: `0` for a successfully
+calculated report, including `drift_detected` or `insufficient_data`, and
+`2` for command-level failures (such as invalid policy or baseline creation
+with too few samples).
+Detected-report JSON includes a concise `discord_delivery` status, reason, and
+delivery ID without exposing secrets or remote response details. No scheduler
+or background delivery service is started.
+
 ## Import and reconcile deferred outcomes
 
 Import observed outcomes from JSONL, then print a read-only reconciliation
