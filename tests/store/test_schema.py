@@ -96,6 +96,64 @@ def test_discord_schema_allows_only_one_pending_or_delivered(
     database.close()
 
 
+def test_discord_update_or_replace_cannot_delete_delivered_history(tmp_path: Path) -> None:
+    from tests.store.test_repository import _stored_drift_run
+
+    database = Database.open(tmp_path / "discord-replace.sqlite3")
+    repository = Repository(database)
+    run = _stored_drift_run(repository)
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    delivered = repository.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now).delivery
+    assert delivered is not None
+    repository.finalize_discord_delivery(
+        delivered.delivery_id,
+        status="delivered",
+        error_category=None,
+        finalized_at=now,
+    )
+    pending_id = "01ARZ3NDEKTSV4RRFFQ69G5FF1"
+    _insert_row(
+        database.connection,
+        "discord_deliveries",
+        {
+            "delivery_id": pending_id,
+            "drift_run_id": run.drift_run_id,
+            "destination_hash": "a" * 64,
+            "attempt_number": 2,
+            "status": "pending",
+            "error_category": None,
+            "created_at": "2026-10-24T12:00:00Z",
+            "finalized_at": None,
+        },
+    )
+    database.connection.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        database.connection.execute(
+            "UPDATE OR REPLACE discord_deliveries SET status='delivered',finalized_at=? "
+            "WHERE delivery_id=?",
+            ("2026-10-24T12:00:01Z", pending_id),
+        )
+    database.connection.rollback()
+    assert [
+        tuple(row)
+        for row in database.connection.execute(
+            "SELECT delivery_id,attempt_number,status FROM discord_deliveries "
+            "ORDER BY attempt_number",
+        )
+    ] == [(delivered.delivery_id, 1, "delivered"), (pending_id, 2, "pending")]
+    # A delivered sibling still permits legal failed finalization of this attempt.
+    assert (
+        repository.finalize_discord_delivery(
+            pending_id,
+            status="failed",
+            error_category="transport_error",
+            finalized_at=now + timedelta(seconds=1),
+        ).status
+        == "failed"
+    )
+    database.close()
+
+
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 CHILD_SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB2"

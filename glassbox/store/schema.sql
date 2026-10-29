@@ -486,6 +486,11 @@ WHEN OLD.status != 'pending' OR NEW.status NOT IN ('delivered', 'failed')
     OR NEW.destination_hash IS NOT OLD.destination_hash
     OR NEW.attempt_number IS NOT OLD.attempt_number
     OR NEW.created_at IS NOT OLD.created_at
+    OR (NEW.status = 'delivered' AND EXISTS (
+        SELECT 1 FROM discord_deliveries
+        WHERE drift_run_id = NEW.drift_run_id AND destination_hash = NEW.destination_hash
+            AND status = 'delivered' AND delivery_id != OLD.delivery_id
+    ))
 BEGIN
     SELECT RAISE(ABORT, 'Discord delivery history is immutable');
 END;
