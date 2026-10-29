@@ -178,6 +178,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.counterfactual_config",
                 "glassbox.eval.counterfactual_provider",
                 "glassbox.eval.shadow",
+                "glassbox.eval.discord",
+                "glassbox.eval.discord_config",
                 "glassbox.sdk",
             ],
         },
@@ -568,6 +570,16 @@ def test_import_linter_forbids_sdk_collector_and_web_from_reconciliation() -> No
             or "glassbox.eval.reconciliation".startswith(module + ".")
             for module in forbidden
         ), f"{name} must forbid glassbox.eval.reconciliation or a parent package"
+
+
+def test_import_linter_forbids_production_discord_imports() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    contracts = {contract["name"]: contract
+                 for contract in config["tool"]["importlinter"]["contracts"]}
+    for name in ("sdk-dependencies", "collector-dependencies", "web-dependencies"):
+        forbidden = contracts[name]["forbidden_modules"]
+        for module in ("glassbox.eval.discord", "glassbox.eval.discord_config"):
+            assert any(module == parent or module.startswith(parent + ".") for parent in forbidden)
 
 
 def test_import_linter_forbids_sdk_collector_and_web_from_the_judge_module() -> None:

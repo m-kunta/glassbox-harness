@@ -154,5 +154,7 @@ forbidden_modules = [
   "glassbox.eval.counterfactual_config",
   "glassbox.eval.counterfactual_provider",
   "glassbox.eval.shadow",
+  "glassbox.eval.discord",
+  "glassbox.eval.discord_config",
   "glassbox.sdk",
 ]
