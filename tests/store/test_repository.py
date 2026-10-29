@@ -3,8 +3,10 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -388,6 +390,239 @@ def test_counterfactual_detail_orders_success_and_failure_by_selected_order(
 @pytest.fixture
 def drift_repository(tmp_path: Path) -> Repository:
     return Repository(Database.open(tmp_path / "drift.sqlite3"))
+
+
+def _stored_drift_run(repository: Repository) -> DriftRunInsert:
+    baseline = repository.record_drift_baseline(_drift_baseline("01ARZ3NDEKTSV4RRFFQ69G5FE0"))
+    return repository.record_drift_run(_drift_run(baseline.baseline_id), _drift_results())
+
+
+def test_discord_delivery_concurrent_claims_have_one_winner(drift_repository: Repository) -> None:
+    run = _stored_drift_run(drift_repository)
+    path = drift_repository._connection.execute("PRAGMA database_list").fetchone()[2]
+    databases = (Database.open(path), Database.open(path))
+    barrier = Barrier(2)
+
+    def claim(database: Database) -> str:
+        barrier.wait(timeout=5)
+        return (
+            Repository(database)
+            .claim_discord_delivery(
+                run.drift_run_id,
+                "a" * 64,
+                now=DRIFT_END,
+            )
+            .status
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            assert sorted(executor.map(claim, databases)) == ["claimed", "in_progress"]
+        assert (
+            drift_repository._connection.execute(
+                "SELECT count(*) FROM discord_deliveries",
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        for database in databases:
+            database.close()
+
+
+def test_discord_delivery_rejects_non_datetime_input(drift_repository: Repository) -> None:
+    with pytest.raises(ValueError):
+        drift_repository.claim_discord_delivery(
+            "01ARZ3NDEKTSV4RRFFQ69G5FE2",
+            "a" * 64,
+            now="2026-10-24T12:00:00Z",
+        )
+    with pytest.raises(ValueError):
+        drift_repository.finalize_discord_delivery(
+            "01ARZ3NDEKTSV4RRFFQ69G5FE2",
+            status="delivered",
+            error_category=None,
+            finalized_at="2026-10-24T12:00:00Z",
+        )
+
+
+def test_discord_delivery_claim_is_atomic_and_delivery_is_idempotent(
+    drift_repository: Repository,
+) -> None:
+    run = _stored_drift_run(drift_repository)
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    claimed = drift_repository.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now)
+    assert claimed.status == "claimed"
+    assert claimed.delivery is not None
+    assert claimed.delivery.attempt_number == 1
+    # A separate SQLite connection must see the committed claim as occupied.
+    path = drift_repository._connection.execute("PRAGMA database_list").fetchone()[2]
+    other_database = Database.open(path)
+    other = Repository(other_database)
+    assert other.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now).status == "in_progress"
+    delivered = other.finalize_discord_delivery(
+        claimed.delivery.delivery_id,
+        status="delivered",
+        error_category=None,
+        finalized_at=now + timedelta(seconds=2),
+    )
+    assert delivered.status == "delivered"
+    assert (
+        drift_repository.claim_discord_delivery(
+            run.drift_run_id,
+            "a" * 64,
+            now=now + timedelta(seconds=3),
+        ).status
+        == "already_delivered"
+    )
+    assert other.claim_discord_delivery(run.drift_run_id, "b" * 64, now=now).status == "claimed"
+    other_database.close()
+
+
+def test_discord_delivery_retries_failed_and_stale_attempts(drift_repository: Repository) -> None:
+    run = _stored_drift_run(drift_repository)
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    first = drift_repository.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now).delivery
+    assert first is not None
+    drift_repository.finalize_discord_delivery(
+        first.delivery_id,
+        status="failed",
+        error_category="transport_error",
+        finalized_at=now,
+    )
+    second = drift_repository.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now).delivery
+    assert second is not None and second.attempt_number == 2
+    assert (
+        drift_repository.claim_discord_delivery(
+            run.drift_run_id,
+            "a" * 64,
+            now=now + timedelta(seconds=29),
+        ).status
+        == "in_progress"
+    )
+    third = drift_repository.claim_discord_delivery(
+        run.drift_run_id,
+        "a" * 64,
+        now=now + timedelta(seconds=30),
+    ).delivery
+    assert third is not None and third.attempt_number == 3
+    row = drift_repository._connection.execute(
+        "SELECT status,error_category,finalized_at FROM discord_deliveries WHERE delivery_id=?",
+        (second.delivery_id,),
+    ).fetchone()
+    assert tuple(row) == ("failed", "stale_claim", "2026-10-24T12:00:30Z")
+    with pytest.raises(ValueError):
+        drift_repository.finalize_discord_delivery(
+            second.delivery_id,
+            status="delivered",
+            error_category=None,
+            finalized_at=now,
+        )
+
+
+@pytest.mark.parametrize("destination_hash", ["a", "A" * 64, "g" * 64, "a" * 65])
+def test_discord_delivery_rejects_invalid_hash(
+    drift_repository: Repository, destination_hash: str
+) -> None:
+    with pytest.raises(ValueError):
+        drift_repository.claim_discord_delivery(
+            "01ARZ3NDEKTSV4RRFFQ69G5FE2",
+            destination_hash,
+            now=DRIFT_END,
+        )
+
+
+def test_discord_delivery_validates_run_timestamp_and_stale_interval(
+    drift_repository: Repository,
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        drift_repository.claim_discord_delivery(
+            "01ARZ3NDEKTSV4RRFFQ69G5FE2", "a" * 64, now=DRIFT_END
+        )
+    assert not drift_repository._connection.in_transaction
+    for changes in (
+        {"now": DRIFT_END.replace(tzinfo=None)},
+        {"stale_after": timedelta(0)},
+        {"stale_after": timedelta(seconds=-1)},
+    ):
+        with pytest.raises(ValueError):
+            drift_repository.claim_discord_delivery(
+                "01ARZ3NDEKTSV4RRFFQ69G5FE2",
+                "a" * 64,
+                **({"now": DRIFT_END} | changes),
+            )
+
+
+@pytest.mark.parametrize(
+    "status,error",
+    [
+        ("pending", None),
+        ("unknown", None),
+        ("delivered", "http_429"),
+        ("failed", None),
+        ("failed", "secret text"),
+    ],
+)
+def test_discord_delivery_rejects_invalid_finalization(
+    drift_repository: Repository, status: str, error: str | None
+) -> None:
+    run = _stored_drift_run(drift_repository)
+    delivery = drift_repository.claim_discord_delivery(
+        run.drift_run_id, "a" * 64, now=DRIFT_END
+    ).delivery
+    assert delivery is not None
+    with pytest.raises(ValueError):
+        drift_repository.finalize_discord_delivery(
+            delivery.delivery_id,
+            status=status,
+            error_category=error,
+            finalized_at=DRIFT_END,
+        )
+
+
+def test_discord_delivery_finalization_timestamp_and_history_are_immutable(
+    drift_repository: Repository,
+) -> None:
+    run = _stored_drift_run(drift_repository)
+    delivery = drift_repository.claim_discord_delivery(
+        run.drift_run_id, "a" * 64, now=DRIFT_END
+    ).delivery
+    assert delivery is not None
+    for stamp in (DRIFT_END.replace(tzinfo=None), DRIFT_END - timedelta(seconds=1)):
+        with pytest.raises(ValueError):
+            drift_repository.finalize_discord_delivery(
+                delivery.delivery_id,
+                status="delivered",
+                error_category=None,
+                finalized_at=stamp,
+            )
+    connection = drift_repository._connection
+    for statement in (
+        "DELETE FROM discord_deliveries",
+        "UPDATE discord_deliveries SET attempt_number=2",
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(statement)
+        connection.rollback()
+    drift_repository.finalize_discord_delivery(
+        delivery.delivery_id,
+        status="delivered",
+        error_category=None,
+        finalized_at=DRIFT_END,
+    )
+    for statement in (
+        "UPDATE discord_deliveries SET status='pending',finalized_at=NULL",
+        "INSERT OR REPLACE INTO discord_deliveries SELECT * FROM discord_deliveries",
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(statement)
+        connection.rollback()
+    with pytest.raises(ValueError):
+        drift_repository.finalize_discord_delivery(
+            delivery.delivery_id,
+            status="delivered",
+            error_category=None,
+            finalized_at=DRIFT_END,
+        )
 
 
 def _drift_baseline(baseline_id: str) -> DriftBaselineInsert:

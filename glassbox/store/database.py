@@ -38,16 +38,24 @@ _COUNTERFACTUAL_TRIGGERS = (
     "counterfactual_runs_no_replace",
     "counterfactual_results_no_replace",
 )
-_TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES + _COUNTERFACTUAL_TABLES
+_DISCORD_TABLES = ("discord_deliveries",)
+_DISCORD_INDEXES = ("idx_discord_deliveries_delivered", "idx_discord_deliveries_pending")
+_DISCORD_TRIGGERS = (
+    "discord_deliveries_no_delete",
+    "discord_deliveries_finalize_only",
+    "discord_deliveries_no_replace",
+)
+_TABLES = _BASE_TABLES + ("feedback",) + _DRIFT_TABLES + _COUNTERFACTUAL_TABLES + _DISCORD_TABLES
 _INDEXES = (
     _BASE_INDEXES
     + _DRIFT_INDEXES
     + _OUTCOME_INDEXES
     + _REMEDIATION_INDEXES
     + _COUNTERFACTUAL_INDEXES
+    + _DISCORD_INDEXES
 )
 _BASE_SCHEMA_OBJECTS = _BASE_TABLES + _BASE_INDEXES
-_SCHEMA_OBJECTS = _TABLES + _INDEXES + _COUNTERFACTUAL_TRIGGERS
+_SCHEMA_OBJECTS = _TABLES + _INDEXES + _COUNTERFACTUAL_TRIGGERS + _DISCORD_TRIGGERS
 _LEGACY_TABLE_PREFIX = "__glassbox_pre_strict_"
 _JUDGE_CALIBRATION_TABLES = ("feedback", "eval_runs", "eval_results")
 _JUDGE_CALIBRATION_TABLE_PREFIX = "__glassbox_pre_judge_calibration_"
@@ -215,6 +223,13 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
                 connection,
                 "009_counterfactual_execution_mode.sql",
                 schema_objects,
+                _released_009_schema_objects(),
+            )
+        elif schema_objects == _released_009_schema_objects():
+            _apply_ordinary_migration(
+                connection,
+                "010_discord_deliveries.sql",
+                schema_objects,
                 _current_schema_objects(),
             )
         else:
@@ -244,6 +259,7 @@ def _migration_needed(connection: sqlite3.Connection, predecessor: dict[str, str
         _released_post_remediation_schema_objects(),
         _released_007_schema_objects(),
         _released_008_schema_objects(),
+        _released_009_schema_objects(),
         _current_schema_objects(),
     )
     predecessor_index = next((i for i, item in enumerate(releases) if item == predecessor), -1)
@@ -324,6 +340,13 @@ def _released_p2_schema_objects() -> dict[str, str]:
 
 @lru_cache
 def _current_schema_objects() -> dict[str, str]:
+    return _released_009_schema_objects() | _released_schema_objects(
+        "010_discord_deliveries.sql", _DISCORD_TABLES + _DISCORD_INDEXES + _DISCORD_TRIGGERS
+    )
+
+
+@lru_cache
+def _released_009_schema_objects() -> dict[str, str]:
     previous = _released_008_schema_objects()
     connection = sqlite3.connect(":memory:")
     try:
@@ -430,9 +453,9 @@ def _normalize_schema_sql(schema_sql: str) -> str:
 
 
 def _schema_prefix(name: str) -> str:
-    if name in _COUNTERFACTUAL_TRIGGERS:
+    if name in _COUNTERFACTUAL_TRIGGERS + _DISCORD_TRIGGERS:
         return f"CREATE TRIGGER {name} "
-    if name in _OUTCOME_INDEXES + _REMEDIATION_INDEXES:
+    if name in _OUTCOME_INDEXES + _REMEDIATION_INDEXES + _DISCORD_INDEXES:
         return f"CREATE UNIQUE INDEX {name} "
     object_type = "TABLE" if name in _TABLES else "INDEX"
     return f"CREATE {object_type} {name} "

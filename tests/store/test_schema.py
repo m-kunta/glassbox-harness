@@ -17,6 +17,85 @@ from glassbox.store.repository import (
 
 STORE_ROOT = Path(__file__).parents[2] / "glassbox" / "store"
 
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"delivery_id": "invalid"},
+        {"destination_hash": "A" * 64},
+        {"attempt_number": 0},
+        {"attempt_number": 1.5},
+        {"status": "unknown"},
+        {"error_category": "http_429"},
+        {"status": "delivered"},
+        {"status": "failed", "finalized_at": "2026-10-24T12:00:00Z"},
+        {"status": "failed", "error_category": "secret", "finalized_at": "2026-10-24T12:00:00Z"},
+        {"created_at": "2026-10-24T12:00:00+00:00"},
+        {"created_at": "2026-10-24T12:00:00.000Z"},
+        {"status": "delivered", "finalized_at": "2026-10-24T11:59:59Z"},
+        {
+            "status": "delivered",
+            "created_at": "2026-10-24T12:00:00.000002Z",
+            "finalized_at": "2026-10-24T12:00:00.000001Z",
+        },
+        {"status": "delivered", "finalized_at": "2026-10-24T12:00:00+00:00"},
+    ],
+)
+def test_discord_schema_rejects_invalid_delivery_rows(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    from tests.store.test_repository import _stored_drift_run
+
+    database = Database.open(tmp_path / "discord.sqlite3")
+    run = _stored_drift_run(Repository(database))
+    row = {
+        "delivery_id": "01ARZ3NDEKTSV4RRFFQ69G5FF0",
+        "drift_run_id": run.drift_run_id,
+        "destination_hash": "a" * 64,
+        "attempt_number": 1,
+        "status": "pending",
+        "error_category": None,
+        "created_at": "2026-10-24T12:00:00Z",
+        "finalized_at": None,
+    }
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(database.connection, "discord_deliveries", row | changes)
+    database.close()
+
+
+@pytest.mark.parametrize("status,error", [("pending", None), ("delivered", None)])
+def test_discord_schema_allows_only_one_pending_or_delivered(
+    tmp_path: Path, status: str, error: str | None
+) -> None:
+    from tests.store.test_repository import _stored_drift_run
+
+    database = Database.open(tmp_path / "discord.sqlite3")
+    run = _stored_drift_run(Repository(database))
+    row = {
+        "delivery_id": "01ARZ3NDEKTSV4RRFFQ69G5FF0",
+        "drift_run_id": run.drift_run_id,
+        "destination_hash": "a" * 64,
+        "attempt_number": 1,
+        "status": status,
+        "error_category": error,
+        "created_at": "2026-10-24T12:00:00Z",
+        "finalized_at": "2026-10-24T12:00:00Z" if status == "delivered" else None,
+    }
+    _insert_row(database.connection, "discord_deliveries", row)
+    database.connection.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_row(
+            database.connection,
+            "discord_deliveries",
+            row
+            | {
+                "delivery_id": "01ARZ3NDEKTSV4RRFFQ69G5FF1",
+                "attempt_number": 2,
+            },
+        )
+    database.close()
+
+
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 CHILD_SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
@@ -666,11 +745,15 @@ def test_schema_sql_matches_the_released_migrations() -> None:
     counterfactual_execution_migration = (
         STORE_ROOT / "migrations" / "009_counterfactual_execution_mode.sql"
     ).read_text(encoding="utf-8")
+    discord_migration = (STORE_ROOT / "migrations" / "010_discord_deliveries.sql").read_text(
+        encoding="utf-8"
+    )
     assert schema_sql == (
         f"{initial_migration}\n{feedback_migration}\n{judge_calibration_migration}\n{drift_migration}"
         f"\n{outcome_migration}\n{remediation_migration}\n{counterfactual_migration}"
         f"\n{counterfactual_status_migration}"
         f"\n{counterfactual_execution_migration}"
+        f"\n{discord_migration}"
     )
 
 

@@ -43,6 +43,63 @@ def _create_post_006_database(path: Path) -> None:
     connection.close()
 
 
+def test_discord_migration_upgrades_exact_009_and_current_is_read_only(tmp_path: Path) -> None:
+    path = tmp_path / "post-009.sqlite3"
+    _create_post_006_database(path)
+    connection = sqlite3.connect(path)
+    for name in (
+        "007_counterfactual_prompts.sql",
+        "008_counterfactual_outcome_status.sql",
+        "009_counterfactual_execution_mode.sql",
+    ):
+        connection.executescript((STORE_ROOT / "migrations" / name).read_text())
+    connection.close()
+    with pytest.raises(ReadOnlyDatabaseError):
+        Database.open_read_only(path)
+    database = Database.open(path)
+    assert database.connection.execute("SELECT count(*) FROM discord_deliveries").fetchone()[0] == 0
+    database.close()
+    before = path.read_bytes()
+    reader = Database.open_read_only(path)
+    assert reader.connection.execute("SELECT count(*) FROM discord_deliveries").fetchone()[0] == 0
+    reader.close()
+    assert path.read_bytes() == before
+
+
+def test_discord_migration_failure_rolls_back_to_009(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "post-009.sqlite3"
+    _create_post_006_database(path)
+    connection = sqlite3.connect(path)
+    for name in (
+        "007_counterfactual_prompts.sql",
+        "008_counterfactual_outcome_status.sql",
+        "009_counterfactual_execution_mode.sql",
+    ):
+        connection.executescript((STORE_ROOT / "migrations" / name).read_text())
+    before = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL"))
+    connection.close()
+    execute = database_module._execute_schema_statements
+
+    def fail_010(connection: sqlite3.Connection, schema_sql: str) -> None:
+        execute(connection, schema_sql)
+        if "CREATE TABLE IF NOT EXISTS discord_deliveries" in schema_sql:
+            raise RuntimeError("injected 010 failure")
+
+    # Resolve cached fingerprints before injecting a failure in the actual migration.
+    database_module._current_schema_objects()
+    monkeypatch.setattr(database_module, "_execute_schema_statements", fail_010)
+    with pytest.raises(RuntimeError, match="injected 010 failure"):
+        Database.open(path)
+    connection = sqlite3.connect(path)
+    assert (
+        dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL"))
+        == before
+    )
+    connection.close()
+
+
 def test_counterfactual_upgrade_from_exact_007_adds_persisted_status(tmp_path: Path) -> None:
     from tests.store.test_schema import (
         _counterfactual_result_row,

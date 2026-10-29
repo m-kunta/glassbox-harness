@@ -391,6 +391,37 @@ class DriftRunRecord(DriftRunInsert):
     pass
 
 
+DiscordDeliveryStatus = Literal["pending", "delivered", "failed"]
+DiscordDeliveryClaimStatus = Literal["claimed", "already_delivered", "in_progress"]
+_DISCORD_ERROR_CATEGORIES = frozenset(
+    (
+        "stale_claim",
+        "transport_error",
+        "http_429",
+        "http_5xx",
+        "http_4xx",
+    )
+)
+
+
+@dataclass(frozen=True)
+class DiscordDeliveryRecord:
+    delivery_id: str
+    drift_run_id: str
+    destination_hash: str
+    attempt_number: int
+    status: DiscordDeliveryStatus
+    error_category: str | None
+    created_at: datetime
+    finalized_at: datetime | None
+
+
+@dataclass(frozen=True)
+class DiscordDeliveryClaim:
+    status: DiscordDeliveryClaimStatus
+    delivery: DiscordDeliveryRecord | None
+
+
 @dataclass(frozen=True)
 class DriftResultInsert:
     drift_result_id: str
@@ -1166,6 +1197,142 @@ class Repository:
                 if self._connection.in_transaction:
                     self._connection.execute("ROLLBACK")
                 raise
+
+    def claim_discord_delivery(
+        self,
+        drift_run_id: str,
+        destination_hash: str,
+        *,
+        now: datetime,
+        stale_after: timedelta = timedelta(seconds=30),
+    ) -> DiscordDeliveryClaim:
+        """Atomically reserve one delivery attempt, recovering expired claims."""
+        _counterfactual_ulid(drift_run_id)
+        _counterfactual_hash(destination_hash)
+        if not isinstance(now, datetime):
+            raise ValueError("Discord claim timestamp must be a UTC datetime")
+        now_text = self._timestamp_text(now)
+        if not isinstance(stale_after, timedelta) or stale_after <= timedelta(0):
+            raise ValueError("Discord claim lifetime must be positive")
+        with self._operation_lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._connection.execute(
+                    "SELECT * FROM discord_deliveries WHERE drift_run_id=? AND destination_hash=? "
+                    "ORDER BY attempt_number DESC",
+                    (drift_run_id, destination_hash),
+                ).fetchall()
+                delivered = next((row for row in rows if row["status"] == "delivered"), None)
+                pending = next((row for row in rows if row["status"] == "pending"), None)
+                if delivered is not None:
+                    result = DiscordDeliveryClaim(
+                        "already_delivered", self._discord_delivery_from_row(delivered)
+                    )
+                elif (
+                    pending is not None
+                    and now - self._drift_datetime(pending["created_at"]) < stale_after
+                ):
+                    result = DiscordDeliveryClaim(
+                        "in_progress", self._discord_delivery_from_row(pending)
+                    )
+                else:
+                    if pending is not None:
+                        self._connection.execute(
+                            "UPDATE discord_deliveries SET status='failed',"
+                            "error_category='stale_claim',"
+                            "finalized_at=? WHERE delivery_id=?",
+                            (now_text, pending["delivery_id"]),
+                        )
+                    delivery_id = _new_judge_ulid()
+                    attempt = rows[0]["attempt_number"] + 1 if rows else 1
+                    self._connection.execute(
+                        "INSERT INTO discord_deliveries (delivery_id,drift_run_id,destination_hash,"
+                        "attempt_number,status,created_at) VALUES (?,?,?,?,'pending',?)",
+                        (delivery_id, drift_run_id, destination_hash, attempt, now_text),
+                    )
+                    result = DiscordDeliveryClaim(
+                        "claimed",
+                        DiscordDeliveryRecord(
+                            delivery_id,
+                            drift_run_id,
+                            destination_hash,
+                            attempt,
+                            "pending",
+                            None,
+                            now,
+                            None,
+                        ),
+                    )
+                self._connection.execute("COMMIT")
+                return result
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def finalize_discord_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: Literal["delivered", "failed"],
+        error_category: str | None,
+        finalized_at: datetime,
+    ) -> DiscordDeliveryRecord:
+        """Finalize exactly one pending attempt; final history cannot be rewritten."""
+        _counterfactual_ulid(delivery_id)
+        if (
+            status not in ("delivered", "failed")
+            or (status == "delivered" and error_category is not None)
+            or (status == "failed" and error_category not in _DISCORD_ERROR_CATEGORIES)
+        ):
+            raise ValueError("invalid Discord delivery status/error category")
+        if not isinstance(finalized_at, datetime):
+            raise ValueError("Discord finalization timestamp must be a UTC datetime")
+        finalized_text = self._timestamp_text(finalized_at)
+        with self._operation_lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM discord_deliveries WHERE delivery_id=? AND status='pending'",
+                    (delivery_id,),
+                ).fetchone()
+                if row is None or finalized_at < self._drift_datetime(row["created_at"]):
+                    raise ValueError(
+                        "Discord delivery must be pending and finalized after creation"
+                    )
+                cursor = self._connection.execute(
+                    "UPDATE discord_deliveries SET status=?,error_category=?,finalized_at=? "
+                    "WHERE delivery_id=? AND status='pending'",
+                    (status, error_category, finalized_text, delivery_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("Discord delivery is no longer pending")
+                updated = self._connection.execute(
+                    "SELECT * FROM discord_deliveries WHERE delivery_id=?",
+                    (delivery_id,),
+                ).fetchone()
+                result = self._discord_delivery_from_row(updated)
+                self._connection.execute("COMMIT")
+                return result
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _discord_delivery_from_row(row: sqlite3.Row) -> DiscordDeliveryRecord:
+        return DiscordDeliveryRecord(
+            delivery_id=row["delivery_id"],
+            drift_run_id=row["drift_run_id"],
+            destination_hash=row["destination_hash"],
+            attempt_number=row["attempt_number"],
+            status=row["status"],
+            error_category=row["error_category"],
+            created_at=Repository._drift_datetime(row["created_at"]),
+            finalized_at=Repository._drift_datetime(row["finalized_at"])
+            if row["finalized_at"]
+            else None,
+        )
 
     def drift_agent_names(self) -> tuple[str, ...]:
         """List every known decision or trace agent in stable order."""
