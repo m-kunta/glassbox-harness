@@ -1235,7 +1235,7 @@ class Repository:
                 "SELECT drift_run_id,baseline_id,agent_name,policy_version,"
                 "policy_hash,as_of,status "
                 "FROM drift_runs WHERE agent_name=? AND drift_run_id!=? "
-                "ORDER BY as_of DESC,drift_run_id DESC LIMIT 100",
+                "ORDER BY glassbox_timestamp_key(as_of) DESC,drift_run_id DESC LIMIT 100",
                 (agent_name, exclude_run_id),
             ).fetchall()
             for run in runs:

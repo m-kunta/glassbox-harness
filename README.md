@@ -295,10 +295,16 @@ Discord mentions are disabled.
 
 Requests use direct no-proxy transport, ignoring environment proxy variables,
 and do not follow redirects. Each request has a two-second timeout. Transport
-errors, HTTP `429`, and `5xx` allow one retry, at most two requests in total,
+errors, HTTP `429`, and `5xx` allow one retry, at most two requests per delivery attempt,
 with a delay capped at two seconds. A valid `Retry-After` within that cap is
 honored; otherwise the delay is 0.25 seconds. Other `4xx` responses fail without
 retrying. Any `2xx` response marks delivery successful.
+
+Recovery runs only after a newly persisted `drift_detected` report. It examines
+at most 100 runs for that agent, newest first, excluding the current run, and
+retries at most 3 eligible prior attempts for the same destination. Together
+with the current report's delivery attempt, a qualifying invocation may issue
+up to 8 requests and 4 capped waits.
 
 Durable idempotency uses `(drift_run_id, destination_hash)`, where the destination
 hash is SHA-256 of the exact webhook URL. SQLite records a `pending` claim before

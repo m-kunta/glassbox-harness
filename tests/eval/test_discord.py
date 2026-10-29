@@ -617,6 +617,54 @@ def test_recovery_is_bounded_and_uses_only_previously_attempted_destination(repo
     ) == ()
 
 
+@pytest.mark.parametrize("newer_run_count", [0, 99])
+def test_recovery_orders_mixed_precision_timestamps_before_applying_caps(
+    repository, newer_run_count,
+):
+    candidate_ids = []
+    for index, microseconds in enumerate([0, 1, 1000, 1000]):
+        run_id = f"{index + 200:026X}"
+        candidate_ids.append(run_id)
+        repository.record_drift_run(
+            DriftRunInsert(
+                run_id, BASELINE_ID, "agent-a", "v1", "a" * 64,
+                NOW + timedelta(microseconds=microseconds), NOW - timedelta(days=7), NOW,
+                "drift_detected", None, {}, {},
+            ),
+            (DriftResultInsert(
+                f"{index + 400:026X}", "confidence", "decision", "psi",
+                "drift_detected", 100, 30, 0.8, 0.1, 0.2, {},
+            ),),
+            enabled_signal_names=frozenset({"confidence"}),
+        )
+        claim = repository.claim_discord_delivery(run_id, DESTINATION_HASH, now=NOW)
+        repository.finalize_discord_delivery(
+            claim.delivery.delivery_id, status="failed", error_category="transport_error",
+            finalized_at=NOW,
+        )
+    for index in range(newer_run_count):
+        # Unattempted newer runs still count toward the 100-run inspection cap.
+        repository.record_drift_run(
+            DriftRunInsert(
+                f"{index + 600:026X}", BASELINE_ID, "agent-a", "v1", "a" * 64,
+                NOW + timedelta(seconds=index + 1), NOW - timedelta(days=7), NOW,
+                "healthy", None, {}, {},
+            ),
+            (DriftResultInsert(
+                f"{index + 800:026X}", "confidence", "decision", "psi",
+                "healthy", 100, 30, 0.0, 0.1, 0.2, {},
+            ),),
+            enabled_signal_names=frozenset({"confidence"}),
+        )
+
+    recovered = repository.recoverable_discord_reports(
+        "agent-a", DESTINATION_HASH, exclude_run_id=RUN_ID, now=NOW,
+    )
+
+    expected = candidate_ids[3:0:-1] if newer_run_count == 0 else [candidate_ids[3]]
+    assert [item.persisted_run_id for item in recovered] == expected
+
+
 def test_request_deadline_kills_and_reaps_slow_dns_operation(monkeypatch):
     original_popen = subprocess.Popen
     children = []
