@@ -24,6 +24,7 @@ BEGIN
 END;
 CREATE TRIGGER discord_deliveries_finalize_only BEFORE UPDATE ON discord_deliveries
 WHEN OLD.status != 'pending' OR NEW.status NOT IN ('delivered', 'failed')
+    OR NEW.rowid IS NOT OLD.rowid
     OR NEW.delivery_id IS NOT OLD.delivery_id
     OR NEW.drift_run_id IS NOT OLD.drift_run_id
     OR NEW.destination_hash IS NOT OLD.destination_hash

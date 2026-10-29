@@ -96,7 +96,11 @@ def test_discord_schema_allows_only_one_pending_or_delivered(
     database.close()
 
 
-def test_discord_update_or_replace_cannot_delete_delivered_history(tmp_path: Path) -> None:
+@pytest.mark.parametrize("conflict", ["delivered_status", "rowid"])
+def test_discord_update_or_replace_cannot_delete_delivered_history(
+    tmp_path: Path,
+    conflict: str,
+) -> None:
     from tests.store.test_repository import _stored_drift_run
 
     database = Database.open(tmp_path / "discord-replace.sqlite3")
@@ -127,13 +131,32 @@ def test_discord_update_or_replace_cannot_delete_delivered_history(tmp_path: Pat
         },
     )
     database.connection.commit()
-    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-        database.connection.execute(
-            "UPDATE OR REPLACE discord_deliveries SET status='delivered',finalized_at=? "
-            "WHERE delivery_id=?",
-            ("2026-10-24T12:00:01Z", pending_id),
+    original_rows = [
+        tuple(row)
+        for row in database.connection.execute(
+            "SELECT rowid,* FROM discord_deliveries ORDER BY attempt_number",
         )
+    ]
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        if conflict == "rowid":
+            database.connection.execute(
+                "UPDATE OR REPLACE discord_deliveries SET rowid=?,status='failed',"
+                "error_category='transport_error',finalized_at=? WHERE delivery_id=?",
+                (original_rows[0][0], "2026-10-24T12:00:01Z", pending_id),
+            )
+        else:
+            database.connection.execute(
+                "UPDATE OR REPLACE discord_deliveries SET status='delivered',finalized_at=? "
+                "WHERE delivery_id=?",
+                ("2026-10-24T12:00:01Z", pending_id),
+            )
     database.connection.rollback()
+    assert [
+        tuple(row)
+        for row in database.connection.execute(
+            "SELECT rowid,* FROM discord_deliveries ORDER BY attempt_number",
+        )
+    ] == original_rows
     assert [
         tuple(row)
         for row in database.connection.execute(
