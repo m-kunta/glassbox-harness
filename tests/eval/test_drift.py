@@ -487,6 +487,54 @@ def test_run_drift_report_captures_as_of_once_and_persists_exact_snapshot(
         database.close()
 
 
+def test_persisted_drift_report_exposes_its_exact_persisted_run_id(
+    tmp_path: Path, policy: DriftPolicy,
+) -> None:
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+
+    report = run_drift_report(path, "agent-a", policy, clock=lambda: AS_OF, persist=True)
+
+    assert report.persisted_run_id is not None
+    assert report.to_dict()["persisted_run_id"] == report.persisted_run_id
+    database = Database.open_read_only(path)
+    try:
+        rows = database.connection.execute("SELECT drift_run_id FROM drift_runs").fetchall()
+        assert [row["drift_run_id"] for row in rows] == [report.persisted_run_id]
+    finally:
+        database.close()
+
+
+def test_drift_report_persisted_run_id_preserves_constructor_compatibility() -> None:
+    from inspect import Parameter, signature
+
+    from glassbox.eval.drift import DriftReport
+
+    parameter = signature(DriftReport).parameters["persisted_run_id"]
+    assert parameter.kind == Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+
+
+@pytest.mark.parametrize("with_baseline", [False, True])
+@pytest.mark.parametrize("persist", [False, True])
+def test_drift_report_persisted_run_id_requires_persistence_and_baseline(
+    tmp_path: Path, policy: DriftPolicy, with_baseline: bool, persist: bool,
+) -> None:
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    if with_baseline:
+        create_baseline(path, "agent-a", policy, supersede=False, clock=lambda: AS_OF)
+
+    report = run_drift_report(path, "agent-a", policy, clock=lambda: AS_OF, persist=persist)
+
+    if persist and with_baseline:
+        assert report.persisted_run_id is not None
+    else:
+        assert report.persisted_run_id is None
+        assert report.to_dict()["persisted_run_id"] is None
+
+
 def test_baseline_rejects_insufficient_named_signal_and_duplicate(tmp_path: Path, policy) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "drift.sqlite3"
     _seed_drift(path, baseline_decisions=99)

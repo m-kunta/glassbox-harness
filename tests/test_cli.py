@@ -22,6 +22,245 @@ LEGACY_DRIFT_POLICY_ARGS = [
 DRIFT_WINDOW_ARGS = ["--start", "2026-01-01T00:00:00Z", "--end", "2026-06-01T00:00:00Z"]
 
 
+@pytest.fixture(autouse=True)
+def _disable_ambient_discord_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from glassbox.eval.discord_config import DiscordConfig
+
+    monkeypatch.setattr(
+        "glassbox.eval.discord_config.load_discord_config",
+        lambda *_: DiscordConfig("disabled", None, None, "missing_url"),
+    )
+
+
+@pytest.fixture
+def discord_drift_path(tmp_path: Path) -> Path:
+    from glassbox.eval.drift import create_baseline, load_policy
+    from tests.eval.test_drift import AS_OF, POLICY_PATH, _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path, recent_at=datetime.now(UTC).replace(microsecond=0) - timedelta(days=2))
+    create_baseline(path, "agent-a", load_policy(POLICY_PATH),
+                    supersede=False, clock=lambda: AS_OF)
+    return path
+
+
+@pytest.mark.parametrize("status,reason,delivery_id", [
+    ("delivered", None, "delivery-one"),
+    ("disabled", "missing_url", None),
+    ("invalid", "invalid_url", None),
+    ("skipped", "already_delivered", "delivery-one"),
+    ("failed", "transport_error", "delivery-one"),
+])
+def test_discord_cli_delivers_exact_persisted_report_with_safe_metadata(
+    discord_drift_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+    status: str, reason: str | None, delivery_id: str | None,
+) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    import glassbox.cli as cli
+    from glassbox.eval.discord_config import DiscordConfig
+
+    secret_url = "https://discord.com/api/webhooks/123/PRIVATE_TOKEN"
+    config = DiscordConfig("ready", secret_url, "http://localhost:8000/drift", None)
+    calls = []
+    connections = []
+
+    def load(project_root, environ):  # type: ignore[no-untyped-def]
+        assert project_root == Path(cli.__file__).resolve().parents[1]
+        assert environ is cli.os.environ
+        with sqlite3.connect(discord_drift_path) as connection:
+            assert connection.execute("SELECT count(*) FROM drift_runs").fetchone()[0] == 1
+        return config
+
+    def send(repository, report, drift_run_id, selected_config, **kwargs):  # type: ignore[no-untyped-def]
+        assert selected_config is config
+        assert drift_run_id == report.persisted_run_id
+        assert report.status == "drift_detected"
+        with sqlite3.connect(discord_drift_path) as connection:
+            assert connection.execute(
+                "SELECT drift_run_id FROM drift_runs"
+            ).fetchone()[0] == drift_run_id
+            assert connection.execute("SELECT count(*) FROM drift_results").fetchone()[0] == 4
+        # The CLI owns a writable connection and must release it after delivery.
+        repository._connection.execute("BEGIN IMMEDIATE")
+        repository._connection.rollback()
+        connections.append(repository._connection)
+        calls.append(drift_run_id)
+        assert callable(kwargs["clock"]) and callable(kwargs["sleep"])
+        return SimpleNamespace(status=status, reason=reason, delivery_id=delivery_id,
+                               webhook_url=secret_url, response_body="PRIVATE_RESPONSE")
+
+    monkeypatch.setattr("glassbox.eval.discord_config.load_discord_config", load)
+    monkeypatch.setattr("glassbox.eval.discord.deliver_drift_alert", send)
+
+    assert cli.main(["--database", str(discord_drift_path), "drift", "--agent", "agent-a",
+                     *LEGACY_DRIFT_POLICY_ARGS]) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert calls == [payload["persisted_run_id"]]
+    assert payload["discord_delivery"] == {
+        "status": status, "reason": reason, "delivery_id": delivery_id,
+    }
+    assert "PRIVATE" not in captured.out + captured.err
+    assert "http" not in captured.out + captured.err
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize("failure_stage", ["import", "config", "open", "send", "close"])
+def test_discord_cli_boundary_failure_preserves_report_and_exit_zero(
+    discord_drift_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, failure_stage: str,
+) -> None:  # type: ignore[no-untyped-def]
+    import builtins
+
+    from glassbox.cli import main
+    from glassbox.eval.discord_config import DiscordConfig
+
+    original_import = builtins.__import__
+    original_open = Database.open
+    original_close = Database.close
+    boundary_started = False
+    connections = []
+
+    def fail():  # type: ignore[no-untyped-def]
+        raise RuntimeError("https://discord.com/api/webhooks/123/PRIVATE_TOKEN")
+
+    def load(*_):  # type: ignore[no-untyped-def]
+        nonlocal boundary_started
+        boundary_started = True
+        if failure_stage == "config":
+            fail()
+        return DiscordConfig("disabled", None, None, "missing_url")
+
+    def open_database(path):  # type: ignore[no-untyped-def]
+        if boundary_started and failure_stage == "open":
+            fail()
+        database = original_open(path)
+        if boundary_started:
+            connections.append(database.connection)
+        return database
+
+    def send(*args, **kwargs):  # type: ignore[no-untyped-def]
+        from glassbox.eval.discord import DiscordDeliveryOutcome
+
+        if failure_stage == "send":
+            fail()
+        return DiscordDeliveryOutcome("disabled", "missing_url", None)
+
+    def close(database):  # type: ignore[no-untyped-def]
+        original_close(database)
+        if boundary_started and failure_stage == "close":
+            fail()
+
+    def import_module(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if failure_stage == "import" and name == "glassbox.eval.discord":
+            fail()
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("glassbox.eval.discord_config.load_discord_config", load)
+    monkeypatch.setattr("glassbox.eval.discord.deliver_drift_alert", send)
+    monkeypatch.setattr(Database, "open", open_database)
+    monkeypatch.setattr(Database, "close", close)
+    monkeypatch.setattr(builtins, "__import__", import_module)
+
+    assert main(["--database", str(discord_drift_path), "drift", "--agent", "agent-a",
+                 *LEGACY_DRIFT_POLICY_ARGS]) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "drift_detected"
+    assert payload["discord_delivery"] == {
+        "status": "failed", "reason": "delivery_unavailable", "delivery_id": None,
+    }
+    assert "PRIVATE" not in captured.out + captured.err
+    with sqlite3.connect(discord_drift_path) as connection:
+        assert connection.execute("SELECT drift_run_id FROM drift_runs").fetchone()[0] == (
+            payload["persisted_run_id"]
+        )
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("status", ["healthy", "watch", "insufficient_data", "unpersisted"])
+def test_discord_cli_only_loads_delivery_for_persisted_aggregate_detection(
+    discord_drift_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, status: str,
+) -> None:  # type: ignore[no-untyped-def]
+    import builtins
+    from dataclasses import replace
+
+    from glassbox.cli import main
+    from glassbox.eval.drift import run_drift_report
+
+    original_import = builtins.__import__
+
+    def report(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = run_drift_report(*args, **kwargs)
+        assert any(signal.status == "drift_detected" for signal in result.signals)
+        if status == "unpersisted":
+            return replace(result, persisted_run_id=None)
+        return replace(result, status=status)
+
+    def import_module(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name.startswith("glassbox.eval.discord"):
+            pytest.fail("non-detected or unpersisted report imported Discord")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("glassbox.eval.drift.run_drift_report", report)
+    monkeypatch.setattr(builtins, "__import__", import_module)
+
+    assert main(["--database", str(discord_drift_path), "drift", "--agent", "agent-a",
+                 *LEGACY_DRIFT_POLICY_ARGS]) == 0
+    assert "discord_delivery" not in json.loads(capsys.readouterr().out)
+
+
+def test_discord_cli_baseline_creation_never_imports_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    import builtins
+
+    from glassbox.cli import main
+    from tests.eval.test_drift import _seed_drift
+
+    path = tmp_path / "drift.sqlite3"
+    _seed_drift(path)
+    original_import = builtins.__import__
+
+    def import_module(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name.startswith("glassbox.eval.discord"):
+            pytest.fail("baseline creation imported Discord")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_module)
+    assert main(["--database", str(path), "drift", "baseline", "--agent", "agent-a",
+                 *LEGACY_DRIFT_POLICY_ARGS, *DRIFT_WINDOW_ARGS]) == 0
+    assert "discord_delivery" not in json.loads(capsys.readouterr().out)
+
+
+def test_discord_imports_are_lazy_and_confined_to_report_path() -> None:
+    import ast
+
+    import glassbox.cli as cli
+
+    tree = ast.parse(Path(cli.__file__).read_text())
+    imports = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module in {"glassbox.eval.discord", "glassbox.eval.discord_config"}
+    ]
+    assert {node.module for node in imports} == {
+        "glassbox.eval.discord", "glassbox.eval.discord_config",
+    }
+    baseline_dispatch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "arguments.drift_command == 'baseline'"
+    )
+    report_nodes = [node for branch in baseline_dispatch.orelse for node in ast.walk(branch)]
+    assert all(node in report_nodes for node in imports)
+
+
 @pytest.mark.parametrize("position", ["parent", "baseline"])
 def test_drift_baseline_policy_position_preserves_selected_policy(
     tmp_path: Path, capsys, position: str

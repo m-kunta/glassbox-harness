@@ -278,13 +278,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "supersedes_baseline_id": baseline.supersedes_baseline_id,
                 }
             else:
-                payload = run_drift_report(
+                drift_report = run_drift_report(
                     database_path,
                     arguments.report_agent,
                     policy,
                     clock=lambda: datetime.now(UTC),
                     persist=True,
-                ).to_dict()
+                )
+                payload = drift_report.to_dict()
+                if (
+                    drift_report.status == "drift_detected"
+                    and drift_report.persisted_run_id is not None
+                ):
+                    delivery_payload: dict[str, object] = {
+                        "status": "failed", "reason": "delivery_unavailable", "delivery_id": None,
+                    }
+                    try:
+                        from time import sleep
+
+                        from glassbox.eval.discord import deliver_drift_alert
+                        from glassbox.eval.discord_config import load_discord_config
+
+                        discord_config = load_discord_config(
+                            Path(__file__).resolve().parents[1], os.environ
+                        )
+                        delivery_database = Database.open(database_path)
+                        try:
+                            outcome = deliver_drift_alert(
+                                Repository(delivery_database),
+                                drift_report,
+                                drift_report.persisted_run_id,
+                                discord_config,
+                                clock=lambda: datetime.now(UTC),
+                                sleep=sleep,
+                            )
+                        finally:
+                            delivery_database.close()
+                        delivery_payload = {
+                            "status": outcome.status,
+                            "reason": outcome.reason,
+                            "delivery_id": outcome.delivery_id,
+                        }
+                    except Exception:
+                        # Optional delivery, including imports and cleanup, cannot
+                        # invalidate the persisted report or expose exception details.
+                        pass
+                    payload["discord_delivery"] = delivery_payload
         except DriftPolicyError as error:
             message = str(error)
             if re.fullmatch(

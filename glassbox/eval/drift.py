@@ -9,7 +9,7 @@ import re
 import secrets
 import tomllib
 from bisect import bisect_right
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import mean, stdev
@@ -198,6 +198,7 @@ class DriftReport:
     baseline_decisions_per_trace: float | None
     recent_decisions_per_trace: float | None
     signals: tuple[DriftSignalReport, ...]
+    persisted_run_id: str | None = field(default=None, kw_only=True)
 
     def signal(self, name: SignalName) -> DriftSignalReport:
         for signal in self.signals:
@@ -222,6 +223,7 @@ class DriftReport:
             "policy_hash": self.policy_hash,
             "agent_name": self.agent_name,
             "baseline_id": self.baseline_id,
+            "persisted_run_id": self.persisted_run_id,
             "baseline_versions": _version_map(self.baseline_versions),
             "recent_versions": _version_map(self.recent_versions),
             "baseline_decisions_per_trace": self.baseline_decisions_per_trace,
@@ -1172,11 +1174,12 @@ def run_drift_report(
                 )
                 for signal in report.signals
             )
-            repository.record_drift_run(
+            record = repository.record_drift_run(
                 run,
                 results,
                 enabled_signal_names=frozenset(signal.name for signal in report.signals),
             )
+            report = replace(report, persisted_run_id=record.drift_run_id)
         return report
     finally:
         database.close()
