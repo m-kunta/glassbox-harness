@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Literal, Mapping
 from urllib.parse import urlsplit
 
-from dotenv import dotenv_values
-
 
 @dataclass(frozen=True)
 class DiscordConfig:
@@ -44,7 +42,7 @@ def _loopback_report_url(value: str | None) -> str | None:
 
 
 def load_discord_config(project_root: Path, environ: Mapping[str, str]) -> DiscordConfig:
-    file_values = dotenv_values(Path(project_root) / ".env", interpolate=False)
+    file_values = _discord_env_values(Path(project_root) / ".env")
 
     def resolve(key: str) -> str | None:
         for value in (environ.get(key), file_values.get(key)):
@@ -65,3 +63,28 @@ def load_discord_config(project_root: Path, environ: Mapping[str, str]) -> Disco
         _loopback_report_url(resolve("GLASSBOX_DISCORD_REPORT_URL")),
         None,
     )
+
+
+def _discord_env_values(path: Path) -> dict[str, str]:
+    """Read only Discord's single-line settings, without expansion or mutation."""
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    values = {}
+    for line in contents.splitlines():
+        match = re.fullmatch(
+            r"\s*(?:export\s+)?(GLASSBOX_DISCORD_[A-Z_]+)\s*=\s*(.*)", line
+        )
+        if match is None:
+            continue
+        key, value = match.groups()
+        if value.startswith(("'", '"')):
+            quoted = re.fullmatch(r"(['\"])(.*?)\1\s*(?:#.*)?", value)
+            if quoted is None:
+                continue
+            value = quoted.group(2)
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        values[key] = value
+    return values

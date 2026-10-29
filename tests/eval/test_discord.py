@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import subprocess
+import sys
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from http.client import BadStatusLine
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +19,7 @@ from urllib.request import OpenerDirector, ProxyHandler, Request, build_opener
 
 import pytest
 
+from glassbox.eval._discord_transport import post_json
 from glassbox.eval.discord import _post_json, build_discord_payload, deliver_drift_alert
 from glassbox.eval.discord_config import DiscordConfig
 from glassbox.eval.drift import DriftReport, DriftSignalReport
@@ -217,7 +222,7 @@ def test_payload_is_compact_and_excludes_sensitive_details(report: DriftReport) 
             "0.2",
             "agent-a",
             "v1",
-            "a" * 64,
+            "a" * 12,
             NOW.isoformat(),
             BASELINE_ID,
         )
@@ -300,7 +305,7 @@ def test_initial_success_and_duplicate_skip(repository, report, monkeypatch, sta
             READY,
             clock=lambda: next(stamps),
             sleep=lambda _: pytest.fail("sleep"),
-            opener=opener,
+            post=partial(post_json, opener=opener),
         )
         assert (outcome.status, outcome.reason) == ("delivered", None)
         assert opener.calls == [(WEBHOOK, 2.0)]
@@ -326,7 +331,7 @@ def test_initial_success_and_duplicate_skip(repository, report, monkeypatch, sta
             READY,
             clock=lambda: NOW,
             sleep=lambda _: pytest.fail("sleep"),
-            opener=opener,
+            post=partial(post_json, opener=opener),
         )
         assert (duplicate.status, duplicate.reason, duplicate.delivery_id) == (
             "skipped",
@@ -378,7 +383,7 @@ def test_retries_http_once_with_bounded_delay(repository, report, status, header
             READY,
             clock=lambda: NOW,
             sleep=sleeps.append,
-            opener=opener,
+            post=partial(post_json, opener=opener),
             timeout_seconds=0.4,
         )
         assert outcome.status == "delivered"
@@ -410,7 +415,8 @@ def test_final_http_failures_are_normalized_and_two_calls_maximum(
         sleeps = []
         opener = RoutingOpener(target)
         outcome = deliver_drift_alert(
-            repository, report, RUN_ID, READY, clock=lambda: NOW, sleep=sleeps.append, opener=opener
+            repository, report, RUN_ID, READY, clock=lambda: NOW, sleep=sleeps.append,
+            post=partial(post_json, opener=opener),
         )
         assert (outcome.status, outcome.reason) == ("failed", category)
         assert len(opener.calls) == len(target.requests) == count
@@ -443,7 +449,8 @@ def test_transport_failures_retry_once_and_hide_details(
         opener = RoutingOpener(target, [failure] if recover else [failure, failure])
         sleeps = []
         outcome = deliver_drift_alert(
-            repository, report, RUN_ID, READY, clock=lambda: NOW, sleep=sleeps.append, opener=opener
+            repository, report, RUN_ID, READY, clock=lambda: NOW, sleep=sleeps.append,
+            post=partial(post_json, opener=opener),
         )
         assert len(opener.calls) == 2
         assert len(target.requests) == (1 if recover else 0)
@@ -496,7 +503,7 @@ def test_retry_delay_respects_caller_and_absolute_caps(repository, report, cap, 
             READY,
             clock=lambda: NOW,
             sleep=sleeps.append,
-            opener=RoutingOpener(target),
+            post=partial(post_json, opener=RoutingOpener(target)),
             retry_delay_cap_seconds=cap,
         )
         assert outcome.status == "delivered"
@@ -513,9 +520,155 @@ def test_delivery_includes_only_valid_optional_report_link(repository, report) -
             config,
             clock=lambda: NOW,
             sleep=lambda _: pytest.fail("sleep"),
-            opener=RoutingOpener(target),
+            post=partial(post_json, opener=RoutingOpener(target)),
         )
         assert json.loads(target.requests[0][1])["embeds"][0]["url"] == config.report_url
+
+
+@pytest.mark.parametrize("name", ["private-name-" * 2000, "🔒" * 20000, "界" * 128],
+                         ids=["long-ascii", "long-unicode", "bounded-unicode"])
+def test_payload_bounds_untrusted_metadata_without_partial_secret_disclosure(report, name):
+    changed = replace(report, agent_name=name, policy_version=name)
+    payload = build_discord_payload(changed, report_url="http://localhost/" + "x" * 20000)
+    encoded = json.dumps(payload)
+    assert len(encoded.encode()) <= 8192
+    embed = payload["embeds"][0]
+    assert "url" not in embed
+    assert "Policy hash: " + "a" * 12 in embed["description"]
+    assert "a" * 64 not in encoded
+    assert BASELINE_ID in encoded and "confidence" in encoded and "0.8" in encoded
+    assert payload["allowed_mentions"] == {"parse": []}
+    if len(name) > 128:
+        assert name[:20] not in encoded
+        assert "omitted" in embed["description"]
+    else:
+        assert name in embed["description"]
+
+
+@pytest.mark.parametrize("cap", [0, 0.05])
+@pytest.mark.parametrize("header", [None, "invalid", "nan", "-1", "99"])
+def test_retry_fallback_never_exceeds_small_caller_cap(cap, header):
+    from glassbox.eval.discord import _retry_delay
+    assert _retry_delay(header, cap) == min(0.25, cap)
+
+
+@pytest.mark.parametrize("argument", ["timeout_seconds", "retry_delay_cap_seconds"])
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_invalid_timing_is_rejected_before_claim(repository, report, argument, value):
+    with pytest.raises(ValueError, match="finite.*nonnegative"):
+        deliver_drift_alert(repository, report, RUN_ID, READY, clock=lambda: NOW,
+                            sleep=lambda _: None, **{argument: value})
+    assert rows(repository) == []
+
+
+def test_maximum_unicode_metadata_keeps_all_four_signal_metrics(repository, report):
+    signals = tuple(
+        replace(report.signals[0], name=name)
+        for name in ("confidence", "decision_type", "trace_latency_ms", "trace_cost_usd")
+    )
+    changed = replace(report, agent_name="🔒" * 128, policy_version="🔒" * 128,
+                      signals=signals)
+    sent = []
+
+    def post(url, payload, **kwargs):
+        sent.append(payload)
+        return 204, None
+
+    deliver_drift_alert(
+        repository, changed, RUN_ID,
+        replace(READY, report_url="http://localhost/" + "界" * 160),
+        clock=lambda: NOW, sleep=lambda _: pytest.fail("sleep"), post=post,
+    )
+    assert len(json.dumps(sent[0]).encode("utf-8")) <= 8192
+    assert len(sent[0]["embeds"][0]["fields"]) == 4
+    assert sent[0]["content"] == f"Drift run: {RUN_ID}"
+
+
+def test_recovery_is_bounded_and_uses_only_previously_attempted_destination(repository):
+    for index in range(6):
+        run_id = f"01ARZ3NDEKTSV4RRFFQ69G5F{index:02d}"
+        repository.record_drift_run(
+            DriftRunInsert(run_id, BASELINE_ID, "agent-a", "v1", "a" * 64,
+                           NOW + timedelta(seconds=index), NOW - timedelta(days=7), NOW,
+                           "drift_detected", None, {}, {}),
+            (DriftResultInsert(
+                f"01ARZ3NDEKTSV4RRFFQ69G5E{index:02d}", "confidence", "decision", "psi",
+                "drift_detected", 100, 30, 0.8, 0.1, 0.2, {"prompt": "PRIVATE"},
+            ),),
+            enabled_signal_names=frozenset({"confidence"}),
+        )
+        if index == 5:  # Newer unattempted reports must not enter recovery.
+            continue
+        destination = "b" * 64 if index == 4 else DESTINATION_HASH
+        claim = repository.claim_discord_delivery(run_id, destination, now=NOW)
+        repository.finalize_discord_delivery(
+            claim.delivery.delivery_id, status="failed", error_category="transport_error",
+            finalized_at=NOW,
+        )
+    recovered = repository.recoverable_discord_reports(
+        "agent-a", DESTINATION_HASH, exclude_run_id=RUN_ID, now=NOW,
+    )
+    assert [item.persisted_run_id for item in recovered] == [
+        f"01ARZ3NDEKTSV4RRFFQ69G5F{index:02d}" for index in (3, 2, 1)
+    ]
+    assert "PRIVATE" not in repr(recovered)
+    assert repository.recoverable_discord_reports(
+        "other-agent", DESTINATION_HASH, exclude_run_id=RUN_ID, now=NOW,
+    ) == ()
+
+
+def test_request_deadline_kills_and_reaps_slow_dns_operation(monkeypatch):
+    original_popen = subprocess.Popen
+    children = []
+    # Real child process, with only the resolver replaced by a slow operation.
+    code = '''
+import runpy, socket, time
+def slow_dns(*args, **kwargs):
+    time.sleep(10)
+    raise OSError("private resolver detail")
+socket.getaddrinfo = slow_dns
+runpy.run_module("glassbox.eval._discord_transport", run_name="__main__")
+'''
+    def start(*args, **kwargs):
+        child = original_popen([sys.executable, "-c", code], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(subprocess, "Popen", start)
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        _post_json("http://127.0.0.1:1/", {}, timeout_seconds=0.3)
+    assert children, "request must run in a cancellable process"
+    assert time.monotonic() - started < 1.5
+    assert all(child.returncode is not None for child in children)
+
+
+def test_request_deadline_includes_slow_response_headers():
+    class SlowHeaders(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            try:
+                self.wfile.write(b"HTTP/1.1 204 No Content\r\n")
+                for _ in range(20):
+                    self.wfile.write(b"X-Slow: progress\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+                self.wfile.write(b"\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHeaders)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+    thread.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(OSError):
+            _post_json(f"http://127.0.0.1:{server.server_port}/", {}, timeout_seconds=0.3)
+        assert time.monotonic() - started < 0.8
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_failed_delivery_can_be_claimed_by_a_later_invocation(repository, report) -> None:
@@ -528,7 +681,7 @@ def test_failed_delivery_can_be_claimed_by_a_later_invocation(repository, report
             READY,
             clock=lambda: NOW,
             sleep=lambda _: None,
-            opener=opener,
+            post=partial(post_json, opener=opener),
         )
         delivered = deliver_drift_alert(
             repository,
@@ -537,7 +690,7 @@ def test_failed_delivery_can_be_claimed_by_a_later_invocation(repository, report
             READY,
             clock=lambda: NOW,
             sleep=lambda _: pytest.fail("sleep"),
-            opener=opener,
+            post=partial(post_json, opener=opener),
         )
         assert (failed.status, delivered.status) == ("failed", "delivered")
         assert failed.delivery_id != delivered.delivery_id

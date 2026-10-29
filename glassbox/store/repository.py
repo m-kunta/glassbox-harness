@@ -423,6 +423,32 @@ class DiscordDeliveryClaim:
 
 
 @dataclass(frozen=True)
+class DiscordDriftSignal:
+    name: str
+    algorithm: str
+    value: float | None
+    warning_threshold: float
+    alert_threshold: float
+    baseline_count: int
+    recent_count: int
+    status: str
+
+
+@dataclass(frozen=True)
+class DiscordDriftSnapshot:
+    """Only persisted operational metadata required to retry an alert."""
+
+    persisted_run_id: str
+    baseline_id: str
+    agent_name: str
+    policy_version: str
+    policy_hash: str
+    as_of: datetime
+    signals: tuple[DiscordDriftSignal, ...]
+    status: Literal["drift_detected"] = "drift_detected"
+
+
+@dataclass(frozen=True)
 class DriftResultInsert:
     drift_result_id: str
     signal_name: str
@@ -1197,6 +1223,56 @@ class Repository:
                 if self._connection.in_transaction:
                     self._connection.execute("ROLLBACK")
                 raise
+
+    def recoverable_discord_reports(
+        self, agent_name: str, destination_hash: str, *, exclude_run_id: str, now: datetime,
+    ) -> tuple[DiscordDriftSnapshot, ...]:
+        """Inspect at most 100 recent runs; recover at most three previously attempted alerts."""
+        _counterfactual_hash(destination_hash)
+        snapshots = []
+        with self._operation_lock:
+            runs = self._connection.execute(
+                "SELECT drift_run_id,baseline_id,agent_name,policy_version,"
+                "policy_hash,as_of,status "
+                "FROM drift_runs WHERE agent_name=? AND drift_run_id!=? "
+                "ORDER BY as_of DESC,drift_run_id DESC LIMIT 100",
+                (agent_name, exclude_run_id),
+            ).fetchall()
+            for run in runs:
+                if run["status"] != "drift_detected":
+                    continue
+                attempt = self._connection.execute(
+                    "SELECT status,created_at FROM discord_deliveries "
+                    "WHERE drift_run_id=? AND destination_hash=? "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (run["drift_run_id"], destination_hash),
+                ).fetchone()
+                if attempt is None or attempt["status"] == "delivered":
+                    continue
+                if attempt["status"] == "pending" and (
+                    now - self._drift_datetime(attempt["created_at"]) < timedelta(seconds=30)
+                ):
+                    continue
+                signals = self._connection.execute(
+                    "SELECT signal_name,algorithm,metric_value,warning_threshold,alert_threshold,"
+                    "baseline_count,recent_count,status FROM drift_results WHERE drift_run_id=? "
+                    "ORDER BY signal_name LIMIT 4", (run["drift_run_id"],),
+                ).fetchall()
+                snapshots.append(DiscordDriftSnapshot(
+                    persisted_run_id=run["drift_run_id"], baseline_id=run["baseline_id"],
+                    agent_name=run["agent_name"], policy_version=run["policy_version"],
+                    policy_hash=run["policy_hash"], as_of=self._drift_datetime(run["as_of"]),
+                    signals=tuple(DiscordDriftSignal(
+                        name=row["signal_name"], algorithm=row["algorithm"],
+                        value=row["metric_value"], warning_threshold=row["warning_threshold"],
+                        alert_threshold=row["alert_threshold"],
+                        baseline_count=row["baseline_count"],
+                        recent_count=row["recent_count"], status=row["status"],
+                    ) for row in signals),
+                ))
+                if len(snapshots) == 3:
+                    break
+        return tuple(snapshots)
 
     def claim_discord_delivery(
         self,

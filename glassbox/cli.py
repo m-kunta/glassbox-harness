@@ -296,7 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     try:
                         from time import sleep
 
-                        from glassbox.eval.discord import deliver_drift_alert
+                        from glassbox.eval.discord import deliver_drift_alert, recover_drift_alerts
                         from glassbox.eval.discord_config import load_discord_config
 
                         discord_config = load_discord_config(
@@ -304,8 +304,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                         delivery_database = Database.open(database_path)
                         try:
+                            delivery_repository = Repository(delivery_database)
+                            recover_drift_alerts(
+                                delivery_repository, drift_report, discord_config,
+                                clock=lambda: datetime.now(UTC), sleep=sleep,
+                            )
                             outcome = deliver_drift_alert(
-                                Repository(delivery_database),
+                                delivery_repository,
                                 drift_report,
                                 drift_report.persisted_run_id,
                                 discord_config,

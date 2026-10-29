@@ -156,5 +156,6 @@ forbidden_modules = [
   "glassbox.eval.shadow",
   "glassbox.eval.discord",
   "glassbox.eval.discord_config",
+  "glassbox.eval._discord_transport",
   "glassbox.sdk",
 ]

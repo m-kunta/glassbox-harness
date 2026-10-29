@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 from types import MappingProxyType
 
@@ -7,6 +9,34 @@ from glassbox.eval.discord_config import load_discord_config
 
 WEBHOOK = "https://discord.com/api/webhooks/123/token"
 ENV = {"GLASSBOX_DISCORD_WEBHOOK_URL": WEBHOOK, "GLASSBOX_DISCORD_ALLOW_EGRESS": "1"}
+
+
+def test_base_install_environment_config_does_not_import_dotenv(tmp_path):
+    code = '''
+import sys
+sys.modules["dotenv"] = None
+from pathlib import Path
+from glassbox.eval.discord_config import load_discord_config
+config = load_discord_config(Path(sys.argv[1]), {
+    "GLASSBOX_DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/123/token",
+    "GLASSBOX_DISCORD_ALLOW_EGRESS": "1",
+})
+assert config.status == "ready"
+from glassbox.eval.discord import deliver_drift_alert
+'''
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def test_scoped_dotenv_supports_quotes_export_and_comments(tmp_path):
+    (tmp_path / ".env").write_text(
+        f'export GLASSBOX_DISCORD_WEBHOOK_URL="{WEBHOOK}" # local secret\n'
+        "GLASSBOX_DISCORD_ALLOW_EGRESS='1'\n"
+        "GLASSBOX_DISCORD_REPORT_URL=http://localhost/drift # local report\n"
+    )
+    config = load_discord_config(tmp_path, {})
+    assert (config.status, config.webhook_url, config.report_url) == (
+        "ready", WEBHOOK, "http://localhost/drift")
 
 
 @pytest.mark.parametrize(

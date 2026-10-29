@@ -219,6 +219,7 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.shadow",
                 "glassbox.eval.discord",
                 "glassbox.eval.discord_config",
+                "glassbox.eval._discord_transport",
                 "glassbox.sdk",
             ],
         },
@@ -617,7 +618,8 @@ def test_import_linter_forbids_production_discord_imports() -> None:
                  for contract in config["tool"]["importlinter"]["contracts"]}
     for name in ("sdk-dependencies", "collector-dependencies", "web-dependencies"):
         forbidden = contracts[name]["forbidden_modules"]
-        for module in ("glassbox.eval.discord", "glassbox.eval.discord_config"):
+        for module in ("glassbox.eval.discord", "glassbox.eval.discord_config",
+                       "glassbox.eval._discord_transport"):
             assert any(module == parent or module.startswith(parent + ".") for parent in forbidden)
 
 

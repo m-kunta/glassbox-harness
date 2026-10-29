@@ -261,6 +261,62 @@ def test_discord_imports_are_lazy_and_confined_to_report_path() -> None:
     assert all(node in report_nodes for node in imports)
 
 
+@pytest.mark.parametrize("first_attempt", ["failed", "stale", "active", "delivered"])
+def test_discord_cli_recovers_previous_attempt_on_separate_invocation(
+    discord_drift_path, monkeypatch, capsys, first_attempt,
+):
+    from glassbox.cli import main
+    from glassbox.eval.discord_config import DiscordConfig
+
+    config = DiscordConfig("ready", "https://discord.com/api/webhooks/123/PRIVATE", None, None)
+    monkeypatch.setattr("glassbox.eval.discord_config.load_discord_config", lambda *_: config)
+    requests = []
+    phase = [1]
+    original_claim = Repository.claim_discord_delivery
+    def claim(repository, run_id, destination_hash, *, now):
+        if phase[0] == 1 and first_attempt == "stale":
+            now -= timedelta(seconds=31)
+        return original_claim(repository, run_id, destination_hash, now=now)
+    monkeypatch.setattr(Repository, "claim_discord_delivery", claim)
+    def post(url, payload, **kwargs):
+        requests.append(payload)
+        if phase[0] == 1:
+            if first_attempt in {"stale", "active"}:
+                raise RuntimeError("PRIVATE interrupted worker")
+            if first_attempt == "failed":
+                return 400, None
+        return 204, None
+    monkeypatch.setattr("glassbox.eval.discord._post_json", post)
+    arguments = ["--database", str(discord_drift_path), "drift", "--agent", "agent-a",
+                 *LEGACY_DRIFT_POLICY_ARGS]
+    assert main(arguments) == 0
+    first_output = capsys.readouterr()
+    first_id = json.loads(first_output.out)["persisted_run_id"]
+    first_payload = requests[0]
+    phase[0] = 2
+    assert main(arguments) == 0
+    second_output = capsys.readouterr()
+    second_id = json.loads(second_output.out)["persisted_run_id"]
+    assert first_id != second_id
+    expected = 2 if first_attempt in {"failed", "stale"} else 1
+    assert sum(item["content"] == f"Drift run: {first_id}" for item in requests) == expected
+    if expected == 2:
+        assert requests[1] == first_payload  # Reuse persisted metrics and identity exactly.
+    assert main(arguments) == 0
+    third_output = capsys.readouterr()
+    assert sum(item["content"] == f"Drift run: {first_id}" for item in requests) == expected
+    assert "PRIVATE" not in str(first_output) + str(second_output) + str(third_output)
+    with sqlite3.connect(discord_drift_path) as connection:
+        history = connection.execute(
+            "SELECT status,error_category FROM discord_deliveries WHERE drift_run_id=? "
+            "ORDER BY attempt_number", (first_id,),
+        ).fetchall()
+    if first_attempt == "stale":
+        assert history == [("failed", "stale_claim"), ("delivered", None)]
+    elif first_attempt == "failed":
+        assert history == [("failed", "http_4xx"), ("delivered", None)]
+
+
 @pytest.mark.parametrize("position", ["parent", "baseline"])
 def test_drift_baseline_policy_position_preserves_selected_policy(
     tmp_path: Path, capsys, position: str
