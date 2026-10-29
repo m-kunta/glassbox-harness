@@ -177,6 +177,47 @@ def test_discord_update_or_replace_cannot_delete_delivered_history(
     database.close()
 
 
+def test_discord_insert_or_replace_rowid_cannot_delete_delivered_history(tmp_path: Path) -> None:
+    from tests.store.test_repository import _stored_drift_run
+
+    database = Database.open(tmp_path / "discord-insert-replace.sqlite3")
+    repository = Repository(database)
+    run = _stored_drift_run(repository)
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    delivery = repository.claim_discord_delivery(run.drift_run_id, "a" * 64, now=now).delivery
+    assert delivery is not None
+    repository.finalize_discord_delivery(
+        delivery.delivery_id,
+        status="delivered",
+        error_category=None,
+        finalized_at=now,
+    )
+    original = tuple(
+        database.connection.execute("SELECT rowid,* FROM discord_deliveries").fetchone()
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        database.connection.execute(
+            "INSERT OR REPLACE INTO discord_deliveries "
+            "(rowid,delivery_id,drift_run_id,destination_hash,attempt_number,status,created_at) "
+            "VALUES (?,?,?,?,1,'pending',?)",
+            (
+                original[0],
+                "01ARZ3NDEKTSV4RRFFQ69G5FF1",
+                run.drift_run_id,
+                "b" * 64,
+                "2026-10-24T12:00:00Z",
+            ),
+        )
+    database.connection.rollback()
+    assert [
+        tuple(row)
+        for row in database.connection.execute(
+            "SELECT rowid,* FROM discord_deliveries",
+        )
+    ] == [original]
+    database.close()
+
+
 TRACE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
 CHILD_SPAN_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB2"

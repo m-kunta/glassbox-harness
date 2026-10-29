@@ -499,6 +499,7 @@ CREATE TRIGGER discord_deliveries_no_replace BEFORE INSERT ON discord_deliveries
 WHEN EXISTS (
     SELECT 1 FROM discord_deliveries
     WHERE delivery_id = NEW.delivery_id
+       OR rowid = NEW.rowid
        OR (drift_run_id = NEW.drift_run_id AND destination_hash = NEW.destination_hash
            AND (attempt_number = NEW.attempt_number
                OR (status = NEW.status AND status IN ('pending', 'delivered'))))
