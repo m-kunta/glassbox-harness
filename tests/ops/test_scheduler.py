@@ -437,3 +437,57 @@ def test_install_rejects_nonexecutable_interpreter_before_writes(tmp_path: Path)
         _install(settings, calls)
     assert not settings.plist_path.parent.exists()
     assert calls == []
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+def test_install_preserves_foreign_destination_created_during_temporary_write(
+    tmp_path: Path, monkeypatch, replacing: bool,
+) -> None:
+    settings = _settings(tmp_path)
+    if replacing:
+        _install(settings, [])
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    calls: list[tuple[str, ...]] = []
+    original_open = os.open
+
+    def intercept_open(path, flags, mode=0o777):
+        if Path(path).suffix == ".tmp":
+            settings.plist_path.write_bytes(foreign)
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", intercept_open)
+    with pytest.raises(SchedulerError) as error:
+        install_drift_schedule(settings, replace=replacing, platform="darwin", uid=501,
+                               run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert SECRET not in str(error.value)
+    assert settings.plist_path.read_bytes() == foreign
+    assert calls == ([("bootout", "gui/501", str(settings.plist_path))] if replacing else [])
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
+
+
+@pytest.mark.parametrize("operation", ["install", "status", "remove"])
+def test_malformed_plist_date_is_always_a_safe_scheduler_error(
+    tmp_path: Path, operation: str,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.plist_path.parent.mkdir()
+    malformed = (
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+        f'<key>Label</key><string>{SCHEDULER_LABEL}</string>'
+        f'<key>Comment</key><string>{OWNERSHIP_MARKER}</string>'
+        f'<key>UntrustedDate</key><date>{SECRET}</date></dict></plist>'
+    ).encode()
+    settings.plist_path.write_bytes(malformed)
+    calls: list[tuple[str, ...]] = []
+    runner = lambda argv: calls.append(tuple(argv))  # noqa: E731
+    with pytest.raises(SchedulerError, match="^scheduler plist is malformed$") as error:
+        if operation == "install":
+            install_drift_schedule(settings, replace=True, platform="darwin", uid=501,
+                                   run_launchctl=runner)
+        elif operation == "status":
+            drift_schedule_status(settings, platform="darwin", uid=501, run_launchctl=runner)
+        else:
+            remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
+    assert SECRET not in str(error.value)
+    assert calls == []
+    assert settings.plist_path.read_bytes() == malformed

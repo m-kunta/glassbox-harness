@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
-from xml.parsers.expat import ExpatError
 
 from glassbox.eval.drift import DriftPolicyError, load_policy
 
@@ -58,7 +57,9 @@ def _owned(path: Path) -> tuple[bytes, dict[str, object]] | None:
     data = path.read_bytes()
     try:
         value = plistlib.loads(data)
-    except (ValueError, ExpatError, OverflowError):
+    except Exception:
+        # plistlib exposes several parser exceptions, including AttributeError
+        # for malformed dates; none of that untrusted input belongs in errors.
         raise SchedulerError("scheduler plist is malformed") from None
     if (not isinstance(value, dict) or value.get("Label") != SCHEDULER_LABEL
             or value.get("Comment") != OWNERSHIP_MARKER):
@@ -104,7 +105,9 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
+def _write_atomic(
+    path: Path, data: bytes, previous: tuple[bytes, dict[str, object]] | None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -113,7 +116,15 @@ def _write_atomic(path: Path, data: bytes) -> None:
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
-        temporary.replace(path)
+        if previous is None:
+            # A hard link publishes the complete file atomically and refuses
+            # an intervening destination, unlike an unconditional rename.
+            os.link(temporary, path)
+            temporary.unlink()
+        else:
+            if _owned(path) != previous:
+                raise SchedulerError("scheduler plist changed during replacement")
+            temporary.replace(path)
         _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
@@ -133,7 +144,7 @@ def install_drift_schedule(
             run_launchctl(["bootout", f"gui/{uid}", str(settings.plist_path)])
             if _owned(settings.plist_path) != previous:
                 raise SchedulerError("scheduler plist changed during replacement")
-        _write_atomic(settings.plist_path, data)
+        _write_atomic(settings.plist_path, data, previous)
         try:
             run_launchctl(["bootstrap", f"gui/{uid}", str(settings.plist_path)])
         except (OSError, subprocess.SubprocessError):
