@@ -491,3 +491,87 @@ def test_malformed_plist_date_is_always_a_safe_scheduler_error(
     assert SECRET not in str(error.value)
     assert calls == []
     assert settings.plist_path.read_bytes() == malformed
+
+
+def test_replacement_restores_foreign_file_swapped_after_final_validation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    _install(settings, [])
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    original_owned = scheduler._owned
+    reads = 0
+
+    def intercept_owned(path: Path):
+        nonlocal reads
+        result = original_owned(path)
+        if path == settings.plist_path:
+            reads += 1
+            if reads == 3:
+                settings.plist_path.write_bytes(foreign)
+        return result
+
+    monkeypatch.setattr(scheduler, "_owned", intercept_owned)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(SchedulerError) as error:
+        install_drift_schedule(settings, replace=True, platform="darwin", uid=501,
+                               run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert reads >= 3
+    assert SECRET not in str(error.value)
+    assert settings.plist_path.read_bytes() == foreign
+    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
+
+
+def test_failed_atomic_swap_preserves_original_owned_plist(tmp_path: Path, monkeypatch) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    _install(settings, [])
+    original = settings.plist_path.read_bytes()
+
+    def failed_swap(first: Path, second: Path) -> None:
+        raise OSError(SECRET)
+
+    monkeypatch.setattr(scheduler, "_swap_paths", failed_swap)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(SchedulerError) as error:
+        install_drift_schedule(settings, replace=True, platform="darwin", uid=501,
+                               run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert SECRET not in str(error.value)
+    assert settings.plist_path.read_bytes() == original
+    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
+
+
+def test_failed_rollback_preserves_displaced_foreign_bytes(tmp_path: Path, monkeypatch) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    _install(settings, [])
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    real_swap = scheduler._swap_paths
+    swaps = 0
+
+    def failed_rollback(first: Path, second: Path) -> None:
+        nonlocal swaps
+        swaps += 1
+        if swaps == 1:
+            settings.plist_path.write_bytes(foreign)
+            real_swap(first, second)
+        else:
+            raise OSError(SECRET)
+
+    monkeypatch.setattr(scheduler, "_swap_paths", failed_rollback)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(SchedulerError) as error:
+        install_drift_schedule(settings, replace=True, platform="darwin", uid=501,
+                               run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert SECRET not in str(error.value)
+    assert swaps == 2
+    displaced = list(settings.plist_path.parent.glob("*.tmp"))
+    assert len(displaced) == 1
+    assert displaced[0].read_bytes() == foreign
+    assert calls == [("bootout", "gui/501", str(settings.plist_path))]

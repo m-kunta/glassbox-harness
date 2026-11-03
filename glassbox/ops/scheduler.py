@@ -1,5 +1,6 @@
 """Owned, opt-in macOS LaunchAgent lifecycle with injected launchctl execution."""
 
+import ctypes
 import os
 import plistlib
 import stat
@@ -105,12 +106,27 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _swap_paths(first: Path, second: Path) -> None:
+    """Atomically exchange two existing names using Darwin's RENAME_SWAP."""
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameatx_np
+    except (OSError, AttributeError):
+        raise SchedulerError("scheduler atomic replacement is unavailable") from None
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    # Darwin SDK: AT_FDCWD=-2 (sys/fcntl.h), RENAME_SWAP=2 (sys/stdio.h).
+    if rename(-2, os.fsencode(first), -2, os.fsencode(second), 2) != 0:
+        raise OSError(ctypes.get_errno(), "scheduler atomic replacement failed")
+
+
 def _write_atomic(
     path: Path, data: bytes, previous: tuple[bytes, dict[str, object]] | None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    cleanup_temporary = True
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(data)
@@ -124,10 +140,25 @@ def _write_atomic(
         else:
             if _owned(path) != previous:
                 raise SchedulerError("scheduler plist changed during replacement")
-            temporary.replace(path)
+            _swap_paths(temporary, path)
+            # The temporary name now holds the actual displaced destination.
+            # Never discard it unless verified owned or restored to its name.
+            cleanup_temporary = False
+            try:
+                if _owned(temporary) != previous:
+                    raise SchedulerError("scheduler plist changed during replacement")
+            except (SchedulerError, OSError):
+                _swap_paths(temporary, path)
+                cleanup_temporary = True
+                temporary.unlink()
+                _sync_directory(path.parent)
+                raise SchedulerError("scheduler plist changed during replacement") from None
+            cleanup_temporary = True
+            temporary.unlink()
         _sync_directory(path.parent)
     finally:
-        temporary.unlink(missing_ok=True)
+        if cleanup_temporary:
+            temporary.unlink(missing_ok=True)
 
 
 def install_drift_schedule(
