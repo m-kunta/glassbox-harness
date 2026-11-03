@@ -102,6 +102,8 @@ name = "sdk-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.sdk"]
 forbidden_modules = [
+  "glassbox.ops.scheduler",
+  "glassbox.ops.scheduler_runner",
   "glassbox.collector",
   "glassbox.eval",
   "glassbox.explain",
@@ -114,6 +116,8 @@ name = "eval-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.eval"]
 forbidden_modules = [
+  "glassbox.ops.scheduler",
+  "glassbox.ops.scheduler_runner",
   "glassbox.collector",
   "glassbox.sdk",
   "glassbox.explain",
@@ -125,6 +129,8 @@ name = "collector-dependencies"
 type = "forbidden"
 source_modules = ["glassbox.collector"]
 forbidden_modules = [
+  "glassbox.ops.scheduler",
+  "glassbox.ops.scheduler_runner",
   "glassbox.eval",
   "glassbox.explain",
   "glassbox.sdk",
@@ -145,6 +151,8 @@ source_modules = ["glassbox.web"]
 # import-linter's "forbidden" contract type does not extend a restriction to
 # sibling modules on its own.
 forbidden_modules = [
+  "glassbox.ops.scheduler",
+  "glassbox.ops.scheduler_runner",
   "glassbox.eval.judge",
   "glassbox.eval.judge_config",
   "glassbox.eval.judge_provider",
@@ -158,4 +166,18 @@ forbidden_modules = [
   "glassbox.eval.discord_config",
   "glassbox.eval._discord_transport",
   "glassbox.sdk",
+]
+
+
+[[tool.importlinter.contracts]]
+name = "ops-scheduler-dependencies"
+type = "forbidden"
+source_modules = ["glassbox.ops"]
+forbidden_modules = [
+  "glassbox.sdk",
+  "glassbox.collector",
+  "glassbox.web",
+  "glassbox.eval.discord",
+  "glassbox.eval.discord_config",
+  "glassbox.eval._discord_transport",
 ]

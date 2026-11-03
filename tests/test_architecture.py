@@ -185,6 +185,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         "collector-dependencies": {
             "source_modules": ["glassbox.collector"],
             "forbidden_modules": [
+                "glassbox.ops.scheduler",
+                "glassbox.ops.scheduler_runner",
                 "glassbox.eval",
                 "glassbox.explain",
                 "glassbox.sdk",
@@ -194,6 +196,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         "sdk-dependencies": {
             "source_modules": ["glassbox.sdk"],
             "forbidden_modules": [
+                "glassbox.ops.scheduler",
+                "glassbox.ops.scheduler_runner",
                 "glassbox.collector",
                 "glassbox.eval",
                 "glassbox.explain",
@@ -204,6 +208,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         "eval-dependencies": {
             "source_modules": ["glassbox.eval"],
             "forbidden_modules": [
+                "glassbox.ops.scheduler",
+                "glassbox.ops.scheduler_runner",
                 "glassbox.collector",
                 "glassbox.sdk",
                 "glassbox.explain",
@@ -213,6 +219,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
         "web-dependencies": {
             "source_modules": ["glassbox.web"],
             "forbidden_modules": [
+                "glassbox.ops.scheduler",
+                "glassbox.ops.scheduler_runner",
                 "glassbox.eval.judge",
                 "glassbox.eval.judge_config",
                 "glassbox.eval.judge_provider",
@@ -226,6 +234,14 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval.discord_config",
                 "glassbox.eval._discord_transport",
                 "glassbox.sdk",
+            ],
+        },
+        "ops-scheduler-dependencies": {
+            "source_modules": ["glassbox.ops"],
+            "forbidden_modules": [
+                "glassbox.sdk", "glassbox.collector", "glassbox.web",
+                "glassbox.eval.discord", "glassbox.eval.discord_config",
+                "glassbox.eval._discord_transport",
             ],
         },
     }
@@ -252,7 +268,7 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 6
+    assert len(user_options.contracts_options) == 7
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
 
