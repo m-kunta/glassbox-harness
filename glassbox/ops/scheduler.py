@@ -149,6 +149,11 @@ def _write_atomic(
                     raise SchedulerError("scheduler plist changed during replacement")
             except (SchedulerError, OSError):
                 _swap_paths(temporary, path)
+                # Another destination may have arrived before the rollback.
+                # Discard only our exact rejected new file, never that arrival.
+                rejected = _owned(temporary)
+                if rejected is None or rejected[0] != data:
+                    raise SchedulerError("scheduler plist changed during replacement") from None
                 cleanup_temporary = True
                 temporary.unlink()
                 _sync_directory(path.parent)
