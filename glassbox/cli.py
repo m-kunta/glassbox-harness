@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -94,7 +95,74 @@ def main(argv: Sequence[str] | None = None) -> int:
         "report", help="print one persisted counterfactual run as JSON"
     )
     counterfactual_report_parser.add_argument("--run", required=True)
+    schedule_command = commands.add_parser("schedule", help="manage macOS daily drift monitoring")
+    schedule_subcommands = schedule_command.add_subparsers(dest="schedule_command", required=True)
+    schedule_install = schedule_subcommands.add_parser(
+        "install-drift", help="install the daily 09:00 local drift job"
+    )
+    schedule_install.add_argument("--database", type=Path, required=True)
+    schedule_install.add_argument("--agent", required=True)
+    schedule_install.add_argument("--policy", type=Path, required=True)
+    schedule_install.add_argument("--replace", action="store_true")
+    schedule_subcommands.add_parser("status-drift", help="print safe scheduler status as JSON")
+    schedule_subcommands.add_parser("remove-drift", help="remove the managed drift job")
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "schedule":
+        if sys.platform != "darwin":
+            print("glassbox: scheduler is only available on macOS", file=sys.stderr)
+            return 2
+
+        from glassbox.ops.scheduler import (
+            DriftScheduleSettings,
+            SchedulerError,
+            drift_schedule_status,
+            install_drift_schedule,
+            remove_drift_schedule,
+        )
+
+        def run_launchctl(command: Sequence[str]) -> str:
+            return subprocess.run(
+                ["launchctl", *command], check=True, capture_output=True, text=True
+            ).stdout
+
+        def run_launchctl_mutation(command: Sequence[str]) -> None:
+            run_launchctl(command)
+
+        try:
+            library = Path.home() / "Library"
+            settings = DriftScheduleSettings(
+                database_path=Path(arguments.database),
+                agent_name=getattr(arguments, "agent", ""),
+                policy_path=getattr(arguments, "policy", Path()),
+                executable=Path(sys.executable).resolve(),
+                plist_path=library / "LaunchAgents/com.glassbox.drift-monitor.plist",
+                logs_directory=library / "Logs/Glassbox",
+            )
+            uid = os.getuid()
+            if arguments.schedule_command == "install-drift":
+                install_drift_schedule(
+                    settings, replace=arguments.replace, platform=sys.platform,
+                    uid=uid, run_launchctl=run_launchctl_mutation,
+                )
+            elif arguments.schedule_command == "status-drift":
+                status = drift_schedule_status(
+                    settings, platform=sys.platform, uid=uid, run_launchctl=run_launchctl,
+                )
+                print(json.dumps({
+                    "state": status.state, "hour": status.hour, "minute": status.minute,
+                    "stdout_log": str(status.stdout_log) if status.stdout_log is not None else None,
+                    "stderr_log": str(status.stderr_log) if status.stderr_log is not None else None,
+                }, sort_keys=True, separators=(",", ":")))
+            else:
+                remove_drift_schedule(
+                    settings, platform=sys.platform, uid=uid,
+                    run_launchctl=run_launchctl_mutation,
+                )
+            return 0
+        except (SchedulerError, OSError, subprocess.SubprocessError, ValueError):
+            print("glassbox: unable to run scheduler command", file=sys.stderr)
+            return 2
 
     if arguments.command == "counterfactual":
         try:

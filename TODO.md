@@ -103,7 +103,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Add offline counterfactual prompt providers with explicit egress consent and auditable reports.
 - [x] Add opt-in live decision-time shadow execution for approved counterfactual prompts, preserving fail-open production behaviour and bounded cost/latency.
 - [x] Add Discord notification delivery for operational alerts.
-- [ ] Add scheduling and CI gating once monitoring has an approved operational policy.
+- [x] Add opt-in macOS daily drift scheduling with explicit install, status, replacement, and removal commands.
+- [ ] Add CI gating once monitoring has an approved operational policy.
 
 ## P4 — Outcome reconciliation
 

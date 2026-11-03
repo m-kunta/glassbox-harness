@@ -706,3 +706,90 @@ def test_judge_provider_keeps_optional_provider_sdk_imports_lazy() -> None:
 
     forbidden = {"anthropic", "openai", "google", "google.genai"}
     assert module_level_imports & forbidden == set()
+
+
+@pytest.mark.parametrize("contract", [
+    "macOS-only", "09:00", "local timezone", "absolute paths",
+    "glassbox schedule install-drift", "glassbox schedule status-drift",
+    "glassbox schedule remove-drift", "--replace",
+    "~/Library/LaunchAgents/com.glassbox.drift-monitor.plist",
+    "~/Library/Logs/Glassbox/drift-monitor.stdout.log",
+    "~/Library/Logs/Glassbox/drift-monitor.stderr.log",
+    "1 MiB", "one `.1` backup", "no immediate run", "no catch-up run",
+    "next scheduled calendar time", "ordinary `glassbox drift`",
+    "existing Discord", "`drift_detected`", "CI gating", "non-macOS",
+    "deferred", "leaves the database", "logs intact",
+])
+def test_readme_documents_schedule_operations(contract: str) -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+    assert "## Schedule daily drift monitoring on macOS" in readme
+    section = readme.split("## Schedule daily drift monitoring on macOS", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    assert contract in " ".join(section.split())
+
+
+def _assert_schedule_imports_stay_in_command_branch(source_path: Path) -> None:
+    tree = ast.parse(source_path.read_text())
+    found: list[ast.AST] = []
+
+    def visit(node: ast.AST, *, in_branch: bool = False) -> None:
+        if isinstance(node, ast.If):
+            branch = ast.unparse(node.test) == "arguments.command == 'schedule'"
+            for child in node.body:
+                visit(child, in_branch=in_branch or branch)
+            for child in node.orelse:
+                visit(child, in_branch=in_branch)
+            return
+        if isinstance(node, ast.Import):
+            modules = {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = importlib.util.resolve_name("." * node.level + module, "glassbox")
+            modules = {module, *(f"{module}.{alias.name}" for alias in node.names)}
+        else:
+            modules = set()
+        if modules & {"glassbox.ops.scheduler", "glassbox.ops.scheduler_runner"}:
+            assert in_branch, "scheduler imports must stay in schedule branch"
+            found.append(node)
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_branch=in_branch)
+
+    visit(tree)
+    assert found, "scheduler import is missing"
+
+
+def test_cli_schedule_imports_stay_in_command_branch() -> None:
+    _assert_schedule_imports_stay_in_command_branch(PROJECT_ROOT / "glassbox/cli.py")
+
+
+@pytest.mark.parametrize("source", [
+    "import glassbox.ops.scheduler\n",
+    "from glassbox.ops import scheduler\n",
+    "from .ops.scheduler import DriftScheduleSettings\n",
+    "def main(arguments):\n    from glassbox.ops import scheduler\n",
+    "def main(arguments):\n    if arguments.command == 'drift':\n"
+    "        from glassbox.ops.scheduler import drift_schedule_status\n",
+])
+def test_schedule_lazy_import_check_rejects_outside_branch(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "cli.py"
+    path.write_text(source)
+    with pytest.raises(AssertionError, match="scheduler imports"):
+        _assert_schedule_imports_stay_in_command_branch(path)
+
+
+def test_schedule_lazy_import_check_allows_handler_branch(tmp_path: Path) -> None:
+    path = tmp_path / "cli.py"
+    path.write_text(
+        "def main(arguments):\n"
+        "    if arguments.command == 'schedule':\n"
+        "        from glassbox.ops.scheduler import drift_schedule_status\n"
+    )
+    _assert_schedule_imports_stay_in_command_branch(path)
+
+
+def test_schedule_todo_separates_completed_scheduler_from_deferred_ci() -> None:
+    todo = (PROJECT_ROOT / "TODO.md").read_text()
+    assert "- [x] Add opt-in macOS daily drift scheduling" in todo
+    assert "- [ ] Add CI gating once monitoring has an approved operational policy." in todo

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -2086,3 +2087,179 @@ def test_judge_command_preflight_discloses_the_self_judge_unverified_count(
     error = capsys.readouterr().err
     assert "recent_gated_count=1" in error
     assert "self_judge_unverified_count=1" in error
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_schedule_install_delegates_on_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: bool,
+) -> None:
+    from glassbox.cli import main
+    from glassbox.ops.scheduler import DriftScheduleSettings
+
+    home = tmp_path / "home"
+    database = tmp_path / "monitor.sqlite3"
+    policy = tmp_path / "drift.toml"
+    calls: list[DriftScheduleSettings] = []
+    launchctl_calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: home)
+    monkeypatch.setattr("glassbox.cli.os.getuid", lambda: 501)
+
+    def run(arguments, **kwargs):  # type: ignore[no-untyped-def]
+        launchctl_calls.append((arguments, kwargs))
+        return subprocess.CompletedProcess(arguments, 0, stdout="private output")
+
+    def install(settings, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(settings)
+        assert kwargs["replace"] is replace
+        assert kwargs["platform"] == "darwin"
+        assert kwargs["uid"] == 501
+        kwargs["run_launchctl"](["bootstrap", "gui/501", str(settings.plist_path)])
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("glassbox.ops.scheduler.install_drift_schedule", install)
+    assert main([
+        "schedule", "install-drift", "--database", str(database), "--agent", "agent",
+        "--policy", str(policy), *(["--replace"] if replace else []),
+    ]) == 0
+    assert calls == [DriftScheduleSettings(
+        database, "agent", policy, Path(sys.executable).resolve(),
+        home / "Library/LaunchAgents/com.glassbox.drift-monitor.plist",
+        home / "Library/Logs/Glassbox",
+    )]
+    assert launchctl_calls == [(
+        ["launchctl", "bootstrap", "gui/501", str(calls[0].plist_path)],
+        {"check": True, "capture_output": True, "text": True},
+    )]
+
+
+@pytest.mark.parametrize("state,hour,minute", [
+    ("not_installed", None, None), ("installed_not_loaded", 9, 0),
+    ("loaded", 9, 0), ("unavailable", 9, 0),
+])
+def test_schedule_status_prints_only_safe_sorted_compact_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    state: str, hour: int | None, minute: int | None,
+) -> None:
+    from glassbox.cli import main
+    from glassbox.ops.scheduler import SchedulerStatus
+
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: tmp_path)
+    logs = tmp_path / "Library/Logs/Glassbox"
+    stdout = logs / "drift-monitor.stdout.log" if hour is not None else None
+    stderr = logs / "drift-monitor.stderr.log" if hour is not None else None
+
+    def status(settings, **kwargs):  # type: ignore[no-untyped-def]
+        assert settings.plist_path == (
+            tmp_path / "Library/LaunchAgents/com.glassbox.drift-monitor.plist"
+        )
+        return SchedulerStatus(state, hour, minute, stdout, stderr)
+
+    monkeypatch.setattr("glassbox.ops.scheduler.drift_schedule_status", status)
+    assert main(["schedule", "status-drift"]) == 0
+    output = capsys.readouterr()
+    expected = {"state": state, "hour": hour, "minute": minute,
+                "stdout_log": str(stdout) if stdout else None,
+                "stderr_log": str(stderr) if stderr else None}
+    assert output.out == json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+    assert output.err == ""
+
+
+def test_schedule_remove_delegates_without_drift_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from glassbox.cli import main
+
+    calls: list[Path] = []
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("glassbox.cli.os.getuid", lambda: 501)
+
+    def remove(settings, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["platform"] == "darwin"
+        assert kwargs["uid"] == 501
+        calls.append(settings.plist_path)
+
+    monkeypatch.setattr("glassbox.ops.scheduler.remove_drift_schedule", remove)
+    assert main(["schedule", "remove-drift"]) == 0
+    assert calls == [tmp_path / "Library/LaunchAgents/com.glassbox.drift-monitor.plist"]
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("operation", ["install-drift", "status-drift", "remove-drift"])
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_schedule_non_macos_does_no_import_preflight_or_launchctl_work(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    operation: str, platform: str,
+) -> None:
+    import builtins
+
+    from glassbox.cli import main
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        assert not name.startswith("glassbox.ops")
+        return original_import(name, *args, **kwargs)
+
+    def unexpected(*args, **kwargs):  # type: ignore[no-untyped-def]
+        pytest.fail("unsupported platform must do no scheduler work")
+
+    monkeypatch.setattr("glassbox.cli.sys.platform", platform)
+    monkeypatch.setattr("glassbox.cli.Path.home", unexpected)
+    monkeypatch.setattr("glassbox.cli.os.getuid", unexpected)
+    monkeypatch.setattr("subprocess.run", unexpected)
+    monkeypatch.setattr("glassbox.eval.drift.load_policy", unexpected)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    arguments = ["schedule", operation]
+    if operation == "install-drift":
+        arguments += ["--database", "/absent/db", "--agent", "agent",
+                      "--policy", "/absent/policy"]
+    assert main(arguments) == 2
+    assert capsys.readouterr() == ("", "glassbox: scheduler is only available on macOS\n")
+
+
+@pytest.mark.parametrize("operation,function", [
+    ("install-drift", "install_drift_schedule"),
+    ("status-drift", "drift_schedule_status"),
+    ("remove-drift", "remove_drift_schedule"),
+])
+@pytest.mark.parametrize("error_kind", ["scheduler", "os", "subprocess", "value"])
+def test_schedule_errors_have_fixed_safe_copy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    operation: str, function: str, error_kind: str,
+) -> None:
+    from glassbox.cli import main
+    from glassbox.ops.scheduler import SchedulerError
+
+    secret = "https://discord.com/api/webhooks/123/SECRET /private/customer.sqlite3"
+    errors = {"scheduler": SchedulerError(secret), "os": OSError(secret),
+              "subprocess": subprocess.CalledProcessError(1, [secret], output=secret),
+              "value": ValueError(secret)}
+
+    def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise errors[error_kind]
+
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr(f"glassbox.ops.scheduler.{function}", fail)
+    arguments = ["schedule", operation]
+    if operation == "install-drift":
+        arguments += ["--database", "/absent/db", "--agent", "agent",
+                      "--policy", "/absent/policy"]
+    assert main(arguments) == 2
+    assert capsys.readouterr() == ("", "glassbox: unable to run scheduler command\n")
+
+
+@pytest.mark.parametrize("missing", ["--database", "--agent", "--policy"])
+def test_schedule_install_requires_explicit_inputs(missing: str) -> None:
+    from glassbox.cli import main
+
+    values = {"--database": "/abs/db", "--agent": "agent", "--policy": "/abs/policy"}
+    arguments = ["schedule", "install-drift"]
+    for flag, value in values.items():
+        if flag != missing:
+            arguments += [flag, value]
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2

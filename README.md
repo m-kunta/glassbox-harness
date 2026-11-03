@@ -328,6 +328,71 @@ Detected-report JSON includes a concise `discord_delivery` status, reason, and
 delivery ID without exposing secrets or remote response details. No scheduler
 or background delivery service is started.
 
+## Schedule daily drift monitoring on macOS
+
+The opt-in scheduler is macOS-only and installs one per-user LaunchAgent at
+`~/Library/LaunchAgents/com.glassbox.drift-monitor.plist`. Use existing database
+and policy files with absolute paths, and run installation from the Python
+environment where Glassbox is installed:
+
+```shell
+glassbox schedule install-drift \
+  --database /absolute/path/to/glassbox.sqlite3 \
+  --agent replenishment-triage-ai \
+  --policy /absolute/path/to/glassbox/glassbox/eval/policies/drift_v2.toml
+
+glassbox schedule status-drift
+```
+
+The job uses the resolved Python interpreter and runs daily at **09:00 in the
+operator's local timezone**. There is no immediate run when installed and no
+catch-up run for missed machine-offline runs: it waits for the next scheduled
+calendar time. The scheduler does not create a baseline; prepare the approved
+policy and baseline with the ordinary drift commands before installing it.
+
+Installation refuses an existing job unless it is Glassbox-owned and you pass
+`--replace`. To change the database, agent, or policy, explicitly replace it:
+
+```shell
+glassbox schedule install-drift \
+  --database /absolute/path/to/glassbox.sqlite3 \
+  --agent replenishment-triage-ai \
+  --policy /absolute/path/to/glassbox/glassbox/eval/policies/drift_v2.toml \
+  --replace
+```
+
+`status-drift` does not execute drift. It prints compact JSON containing only
+`state`, `hour`, `minute`, `stdout_log`, and `stderr_log`. State is
+`not_installed`, `installed_not_loaded`, `loaded`, or `unavailable`; time and log
+paths are `null` when not installed. Status never prints job arguments,
+environment values, or raw `launchctl` output. Commands return `0` on completion
+and `2` on operational failure, including unsupported platforms and foreign or
+malformed scheduler files.
+
+Each invocation runs ordinary `glassbox drift` with the supplied database,
+agent, and policy. Existing project-root `.env` configuration and existing
+Discord delivery retain their roles: alerts occur only after a persisted
+`drift_detected` report, and delivery failure does not change drift exit semantics.
+The plist contains no webhook URL, credential, or `.env` content.
+
+Process output goes to these local logs:
+
+- `~/Library/Logs/Glassbox/drift-monitor.stdout.log`
+- `~/Library/Logs/Glassbox/drift-monitor.stderr.log`
+
+Before each run, logs at least 1 MiB rotate, retaining one `.1` backup per
+stream. The wrapper waits for the drift process and returns its exit status.
+Remove the job explicitly when daily monitoring is no longer needed:
+
+```shell
+glassbox schedule remove-drift
+```
+
+Removal unloads only the valid Glassbox-owned job and leaves the database,
+baselines, drift runs, delivery history, policies, `.env`, and logs intact.
+GitHub Actions, CI gating, non-macOS scheduling, custom times, retries, and
+escalation remain deferred.
+
 ## Import and reconcile deferred outcomes
 
 Import observed outcomes from JSONL, then print a read-only reconciliation
