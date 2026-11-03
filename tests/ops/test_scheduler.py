@@ -63,7 +63,13 @@ def test_install_writes_owned_daily_launchagent(tmp_path: Path, monkeypatch) -> 
     assert plist["Comment"] == OWNERSHIP_MARKER == "Glassbox managed drift monitor"
     assert plist["StartCalendarInterval"] == {"Hour": 9, "Minute": 0}
     assert plist["ProcessType"] == "Background"
+    assert set(plist) == {
+        "Label", "Comment", "StartCalendarInterval", "ProcessType", "ProgramArguments",
+    }
+    # The runner opens logs after rotation; launchd must not open them first.
+    assert "StandardOutPath" not in plist and "StandardErrorPath" not in plist
     assert "RunAtLoad" not in plist and "KeepAlive" not in plist
+    assert not settings.logs_directory.exists()
     assert plist["ProgramArguments"] == [
         str(settings.executable), "-m", "glassbox.ops.scheduler_runner",
         "--database", str(settings.database_path), "--agent", settings.agent_name,
