@@ -344,11 +344,14 @@ glassbox schedule install-drift \
 glassbox schedule status-drift
 ```
 
-The job uses the resolved Python interpreter and runs daily at **09:00 in the
-operator's local timezone**. There is no immediate run when installed and no
-catch-up run for missed machine-offline runs: it waits for the next scheduled
-calendar time. The scheduler does not create a baseline; prepare the approved
-policy and baseline with the ordinary drift commands before installing it.
+The job preserves the absolute virtualenv interpreter path and runs daily at
+**09:00 in the operator's local timezone**. There is no immediate run when
+installed. Scheduled events missed during sleep are coalesced into one run after
+wake, even if several daily intervals elapsed. Events missed while shut down
+wait until the next daily calendar interval; starting the machine does not
+trigger a catch-up run. This follows [launchd's sleep and shutdown behavior](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html).
+The scheduler does not create a baseline; prepare the approved policy and
+baseline with the ordinary drift commands before installing it.
 
 Installation refuses an existing job unless it is Glassbox-owned and you pass
 `--replace`. To change the database, agent, or policy, explicitly replace it:

@@ -715,8 +715,10 @@ def test_judge_provider_keeps_optional_provider_sdk_imports_lazy() -> None:
     "~/Library/LaunchAgents/com.glassbox.drift-monitor.plist",
     "~/Library/Logs/Glassbox/drift-monitor.stdout.log",
     "~/Library/Logs/Glassbox/drift-monitor.stderr.log",
-    "1 MiB", "one `.1` backup", "no immediate run", "no catch-up run",
-    "next scheduled calendar time", "ordinary `glassbox drift`",
+    "1 MiB", "one `.1` backup", "no immediate run", "missed during sleep",
+    "coalesced into one run after wake", "missed while shut down",
+    "wait until the next daily calendar interval", "virtualenv interpreter path",
+    "ordinary `glassbox drift`",
     "existing Discord", "`drift_detected`", "CI gating", "non-macOS",
     "deferred", "leaves the database", "logs intact",
 ])

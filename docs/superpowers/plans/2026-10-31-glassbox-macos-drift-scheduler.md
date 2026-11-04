@@ -12,6 +12,8 @@
 
 - Support only macOS user LaunchAgents. Other platforms return exit `2` without writes or `launchctl` calls.
 - Use label `com.glassbox.drift-monitor`, managed path `~/Library/LaunchAgents/com.glassbox.drift-monitor.plist`, and `StartCalendarInterval={Hour=9, Minute=0}`. Never set `RunAtLoad` or `KeepAlive`.
+- Allow launchd to coalesce events missed during sleep into one run after wake. Events missed while shut down wait until the next daily calendar interval; neither installation nor startup triggers an immediate catch-up run.
+- Preserve the installing environment's absolute `sys.executable` path without resolving symlinks, so a virtualenv remains the launch target.
 - Require absolute existing regular database/policy files and successful `glassbox.eval.drift.load_policy()` before mutation.
 - Require a Glassbox ownership marker and exact label before replace, unload, or removal; refuse foreign/malformed plists.
 - Write new plist mode `0600` via same-directory temporary file, fsync, atomic replacement, then bootstrap. On bootstrap failure remove only the new owned plist.
@@ -218,10 +220,14 @@ def test_schedule_is_safe_on_non_macos(capsys: pytest.CaptureFixture[str]) -> No
 ```
 
 Cover replacement, safe status JSON containing only state/time/log paths, generic
-safe errors, and zero preflight/launchctl behavior on non-macOS. Add README
+safe errors, and zero preflight/launchctl behavior on non-macOS. Add a regression
+using a symlinked virtualenv Python path: installation must preserve that path,
+and invoking it independently of the working directory must import
+`glassbox.ops.scheduler_runner`. Add README
 contract checks for macOS-only scope, 09:00 local schedule, all commands,
-replacement/removal, logs/rotation, missed run, existing Discord role, and
-deferred CI/non-macOS support.
+replacement/removal, logs/rotation, coalesced wake-up runs after sleep, missed
+shutdown runs waiting for the next calendar interval, preserved virtualenv
+interpreter paths, existing Discord role, and deferred CI/non-macOS support.
 
 - [ ] **Step 2: Prove tests fail.**
 
@@ -234,16 +240,19 @@ Expected: FAIL because command and guide do not exist.
 Add `schedule` subcommands `install-drift`, `status-drift`, `remove-drift`.
 `install-drift` has required `--database Path`, `--agent`, `--policy Path`, and
 `--replace`. Lazily import scheduler; derive paths from `Path.home() / "Library"`;
-use `Path(sys.executable).resolve()`, `sys.platform`, `os.getuid()`, and a
+use `Path(sys.executable).absolute()` without resolving symlinks, `sys.platform`,
+`os.getuid()`, and a
 `subprocess.run(..., check=True, capture_output=True, text=True)` runner. Print
 sorted compact status JSON containing state/time/log paths only. Map
 `SchedulerError`, `OSError`, `subprocess.SubprocessError`, and `ValueError` to a
 fixed safe error / exit `2`.
 
 Document exact install/status/remove commands, absolute paths, local 09:00 timing,
-no immediate/catch-up run, logs/rotation, ordinary drift/Discord behavior, and
-explicit removal. Split the P3 scheduling/CI TODO into checked scheduler work
-plus unchecked CI gating follow-up.
+no immediate run at installation, coalesced wake-up runs for events missed during
+sleep, and no catch-up run after shutdown (wait for the next daily calendar
+interval). Include logs/rotation, ordinary drift/Discord behavior, and explicit
+removal. Split the P3 scheduling/CI TODO into checked scheduler work plus
+unchecked CI gating follow-up.
 
 - [ ] **Step 4: Verify and commit Task 3.**
 

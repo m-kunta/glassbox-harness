@@ -37,16 +37,20 @@ glassbox schedule remove-drift
 `install-drift` writes the per-user LaunchAgent
 `~/Library/LaunchAgents/com.glassbox.drift-monitor.plist`, with label
 `com.glassbox.drift-monitor`. It runs once each day at **09:00 in the
-operator's local timezone** using `StartCalendarInterval` and invokes the
-installed `glassbox` executable with the supplied absolute database, agent,
-and policy paths. It sets `ProcessType=Background`, does not set
-`RunAtLoad`, and does not set `KeepAlive`; a missed machine-offline run waits
-until the next scheduled calendar time.
+operator's local timezone** using `StartCalendarInterval` and invokes Glassbox
+with the installing environment's absolute Python interpreter path and the
+supplied absolute database and policy paths plus agent name. It sets
+`ProcessType=Background`, does not set `RunAtLoad`, and does not set `KeepAlive`.
+Installation does not immediately execute drift. Scheduled events missed during
+sleep are coalesced into one run after wake, even if several intervals elapsed.
+Events missed while shut down wait until the next daily calendar interval;
+starting the machine does not trigger a catch-up run. This adopts launchd's
+documented sleep and shutdown behavior without an additional scheduling gate.
 
 The scheduled child runs the ordinary equivalent of:
 
 ```text
-<resolved-glassbox-executable> drift --database <database> --agent <agent> --policy <policy>
+<absolute-venv-python> -m glassbox.cli --database <database> drift --agent <agent> --policy <policy>
 ```
 
 It may use the existing project-root `.env` as the ordinary CLI does. The
@@ -59,9 +63,11 @@ it happens only if the already configured drift command persists
 
 `install-drift` accepts only existing regular database and policy files and
 requires absolute paths. It validates the policy with the same parser used by
-the drift command before changing any scheduler state. It resolves the actual
-`glassbox` executable from `sys.executable` / the installed entry point rather
-than relying on `PATH` at launch time.
+the drift command before changing any scheduler state. It retains
+`Path(sys.executable).absolute()` without resolving symlinks, preserving the
+virtualenv interpreter path and its installed Glassbox package. It does not rely
+on `PATH` at launch time or replace the virtualenv executable with its base
+Python target.
 
 The generated plist carries a Glassbox ownership marker in its comment and the
 fixed job label. Installation proceeds as follows:
@@ -158,8 +164,11 @@ never bootstrap a real user job. They prove:
 - import-linter enforces scheduler isolation.
 
 Operator documentation covers macOS scope, explicit install/replace/status/
-remove commands, daily timing, log locations/rotation, missed-run behavior,
-and the fact that GitHub Actions and non-macOS support remain deferred.
+remove commands, daily timing, log locations/rotation, coalesced wake-up runs
+after sleep, missed shutdown runs waiting for the next calendar interval, and
+the fact that GitHub Actions and non-macOS support remain deferred. Sleep and
+shutdown behavior follows [Apple's timed jobs guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html)
+and the `StartCalendarInterval` section of `launchd.plist(5)`.
 
 ## Deferred work
 

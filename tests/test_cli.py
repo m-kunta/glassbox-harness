@@ -2123,7 +2123,7 @@ def test_schedule_install_delegates_on_macos(
         "--policy", str(policy), *(["--replace"] if replace else []),
     ]) == 0
     assert calls == [DriftScheduleSettings(
-        database, "agent", policy, Path(sys.executable).resolve(),
+        database, "agent", policy, Path(sys.executable).absolute(),
         home / "Library/LaunchAgents/com.glassbox.drift-monitor.plist",
         home / "Library/Logs/Glassbox",
     )]
@@ -2131,6 +2131,50 @@ def test_schedule_install_delegates_on_macos(
         ["launchctl", "bootstrap", "gui/501", str(calls[0].plist_path)],
         {"check": True, "capture_output": True, "text": True},
     )]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX virtualenv symlink layout")
+def test_schedule_preserves_symlinked_venv_python_and_importable_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sysconfig
+    import venv
+
+    from glassbox.cli import main
+    from glassbox.ops.scheduler import DriftScheduleSettings
+
+    environment = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    executable = environment / "bin/python"
+    assert executable.is_symlink()
+    packages = environment / "lib" / (
+        f"python{sys.version_info.major}.{sys.version_info.minor}"
+    ) / "site-packages"
+    # Make this checkout and its installed dependencies available only through
+    # the virtualenv's site configuration, independently of cwd/PYTHONPATH.
+    (packages / "glassbox-test.pth").write_text(
+        f"{Path(__file__).resolve().parents[1]}\n{sysconfig.get_path('purelib')}\n"
+    )
+    calls: list[DriftScheduleSettings] = []
+    monkeypatch.setattr("glassbox.cli.sys.executable", str(executable))
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: tmp_path / "home")
+    monkeypatch.setattr(
+        "glassbox.ops.scheduler.install_drift_schedule",
+        lambda settings, **_: calls.append(settings),
+    )
+    assert main([
+        "schedule", "install-drift", "--database", str(tmp_path / "db"),
+        "--agent", "agent", "--policy", str(tmp_path / "policy"),
+    ]) == 0
+    assert calls[0].executable == executable
+    result = subprocess.run(
+        [str(calls[0].executable), "-I", "-c",
+         "import sys, glassbox.ops.scheduler_runner as runner; "
+         "print(sys.prefix); print(runner.__name__)"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    )
+    assert result.stdout.splitlines() == [str(environment), "glassbox.ops.scheduler_runner"]
 
 
 @pytest.mark.parametrize("state,hour,minute", [

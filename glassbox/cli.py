@@ -135,7 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 database_path=Path(arguments.database),
                 agent_name=getattr(arguments, "agent", ""),
                 policy_path=getattr(arguments, "policy", Path()),
-                executable=Path(sys.executable).resolve(),
+                executable=Path(sys.executable).absolute(),
                 plist_path=library / "LaunchAgents/com.glassbox.drift-monitor.plist",
                 logs_directory=library / "Logs/Glassbox",
             )
