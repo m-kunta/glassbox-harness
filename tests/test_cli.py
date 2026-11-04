@@ -346,8 +346,17 @@ def test_drift_baseline_policy_position_preserves_selected_policy(
 def _counterfactual_cli_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
                               remote: bool, responses: list[str | Exception],
                               count: int = 1):
+    import glassbox.cli as cli
     from glassbox.eval.counterfactual_config import CounterfactualConfig
-    from tests.eval.test_counterfactual import FakeProvider, _seed
+    from tests.eval.test_counterfactual import AS_OF, FakeProvider, _seed
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            assert tz == UTC
+            return AS_OF
+
+    monkeypatch.setattr(cli, "datetime", FixedDatetime)
 
     database_path = tmp_path / "counterfactual.sqlite3"
     _seed(database_path, count=count)
