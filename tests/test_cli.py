@@ -2201,13 +2201,68 @@ def test_schedule_status_prints_only_safe_sorted_compact_json(
         return SchedulerStatus(state, hour, minute, stdout, stderr)
 
     monkeypatch.setattr("glassbox.ops.scheduler.drift_schedule_status", status)
-    assert main(["schedule", "status-drift"]) == 0
+    assert main(["schedule", "status-drift"]) == (2 if state == "unavailable" else 0)
     output = capsys.readouterr()
     expected = {"state": state, "hour": hour, "minute": minute,
                 "stdout_log": str(stdout) if stdout else None,
                 "stderr_log": str(stderr) if stderr else None}
     assert output.out == json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
     assert output.err == ""
+
+
+@pytest.mark.parametrize("agent", ["-agent", "--agent"])
+def test_schedule_install_rejects_option_like_agent_before_launchctl_or_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    agent: str,
+) -> None:
+    from glassbox.cli import main
+
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("glassbox.cli.subprocess.run", lambda *_, **__: pytest.fail(
+        "invalid agent must not invoke launchctl"
+    ))
+    database = tmp_path / "database.sqlite3"
+    database.touch()
+    policy = Path(__file__).parents[1] / "glassbox/eval/policies/drift_v2.toml"
+    assert main([
+        "schedule", "install-drift", "--database", str(database), f"--agent={agent}",
+        "--policy", str(policy),
+    ]) == 2
+    assert capsys.readouterr() == ("", "glassbox: unable to run scheduler command\n")
+    assert not (tmp_path / "Library").exists()
+
+
+@pytest.mark.parametrize("streams", [("stdout",), ("stderr",), ("stdout", "stderr")])
+def test_schedule_status_never_displays_secret_from_altered_log_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    streams: tuple[str, ...],
+) -> None:
+    import plistlib
+
+    from glassbox.cli import main
+    from glassbox.ops.scheduler import OWNERSHIP_MARKER, SCHEDULER_LABEL
+
+    monkeypatch.setattr("glassbox.cli.sys.platform", "darwin")
+    monkeypatch.setattr("glassbox.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("glassbox.cli.subprocess.run", lambda *_, **__: pytest.fail(
+        "invalid log metadata must not invoke launchctl"
+    ))
+    secret = "PRIVATE_LOG_PARENT"
+    path = tmp_path / "Library/LaunchAgents" / f"{SCHEDULER_LABEL}.plist"
+    path.parent.mkdir(parents=True)
+    argv = []
+    for stream in ("stdout", "stderr"):
+        directory = tmp_path / secret if stream in streams else tmp_path / "Library/Logs/Glassbox"
+        argv.extend([f"--{stream}-log", str(directory / f"drift-monitor.{stream}.log")])
+    path.write_bytes(plistlib.dumps({
+        "Label": SCHEDULER_LABEL, "Comment": OWNERSHIP_MARKER,
+        "StartCalendarInterval": {"Hour": 9, "Minute": 0}, "ProgramArguments": argv,
+    }))
+    original = path.read_bytes()
+    assert main(["schedule", "status-drift"]) == 2
+    assert capsys.readouterr() == ("", "glassbox: unable to run scheduler command\n")
+    assert path.read_bytes() == original
 
 
 def test_schedule_remove_delegates_without_drift_preflight(

@@ -110,7 +110,7 @@ def test_install_requires_absolute_output_paths(tmp_path: Path, field: str) -> N
     assert calls == []
 
 
-@pytest.mark.parametrize("agent", ["", "  ", "bad\x00agent"])
+@pytest.mark.parametrize("agent", ["", "  ", "bad\x00agent", "-agent", "--agent"])
 def test_install_rejects_invalid_agent_without_mutation(tmp_path: Path, agent: str) -> None:
     settings = replace(_settings(tmp_path), agent_name=agent)
     calls: list[tuple[str, ...]] = []
@@ -613,3 +613,240 @@ def test_rollback_preserves_second_foreign_file_displaced_during_restoration(
     assert len(retained) == 1
     assert retained[0].read_bytes() == foreign_b
     assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+
+
+@pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])
+def test_cleanup_preserves_foreign_entry_swapped_after_final_ownership_check(
+    tmp_path: Path, monkeypatch, operation: str,
+) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    if operation == "remove":
+        _install(settings, [])
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    original_owned = scheduler._owned
+    reads = 0
+    swapped = False
+
+    def intercept_owned(path: Path):
+        nonlocal reads, swapped
+        result = original_owned(path)
+        if path == settings.plist_path:
+            reads += 1
+            final_read = 2 if operation == "bootstrap_rollback" else 3
+            if reads == final_read:
+                arrival = tmp_path / "foreign.plist"
+                arrival.write_bytes(foreign)
+                arrival.replace(settings.plist_path)
+                swapped = True
+        return result
+
+    monkeypatch.setattr(scheduler, "_owned", intercept_owned)
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: Sequence[str]) -> None:
+        calls.append(tuple(argv))
+        if argv[0] == "bootstrap":
+            _failure(argv)
+
+    with pytest.raises(SchedulerError) as error:
+        if operation == "bootstrap_rollback":
+            install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                                   run_launchctl=runner)
+        else:
+            remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
+    assert swapped
+    assert SECRET not in str(error.value)
+    assert settings.plist_path.exists()
+    assert settings.plist_path.read_bytes() == foreign
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
+    assert [call[0] for call in calls] == (
+        ["bootstrap"] if operation == "bootstrap_rollback" else ["print", "bootout"]
+    )
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("parent", ["other", SECRET])
+def test_status_rejects_altered_log_parent_without_disclosing_it(
+    tmp_path: Path, stream: str, parent: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _install(settings, [])
+    plist = plistlib.loads(settings.plist_path.read_bytes())
+    argv = plist["ProgramArguments"]
+    argv[argv.index(f"--{stream}-log") + 1] = str(
+        tmp_path / parent / f"drift-monitor.{stream}.log"
+    )
+    settings.plist_path.write_bytes(plistlib.dumps(plist))
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(SchedulerError, match="^scheduler plist configuration is invalid$") as error:
+        drift_schedule_status(settings, platform="darwin", uid=501,
+                              run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert SECRET not in str(error.value)
+    assert calls == []
+
+
+@pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])
+@pytest.mark.parametrize("arrival", ["second_foreign", "restore_failure"])
+def test_cleanup_preserves_quarantined_foreign_capture_if_restoration_cannot_complete(
+    tmp_path: Path, monkeypatch, operation: str, arrival: str,
+) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    if operation == "remove":
+        _install(settings, [])
+    foreign_a = plistlib.dumps({"Label": "foreign-a", "secret": SECRET + "-a"})
+    foreign_b = plistlib.dumps({"Label": "foreign-b", "secret": SECRET + "-b"})
+    original_owned = scheduler._owned
+    real_move = scheduler._move_exclusive
+    reads = 0
+    moves: list[tuple[Path, Path]] = []
+
+    def interleaved_owned(path: Path):
+        nonlocal reads
+        result = original_owned(path)
+        if path == settings.plist_path:
+            reads += 1
+            if reads == (2 if operation == "bootstrap_rollback" else 3):
+                path.write_bytes(foreign_a)
+        return result
+
+    def interleaved_move(source: Path, destination: Path) -> None:
+        moves.append((source, destination))
+        if destination == settings.plist_path:
+            if arrival == "restore_failure":
+                raise OSError(SECRET)
+            destination.write_bytes(foreign_b)
+        real_move(source, destination)
+
+    monkeypatch.setattr(scheduler, "_owned", interleaved_owned)
+    monkeypatch.setattr(scheduler, "_move_exclusive", interleaved_move)
+
+    def runner(argv: Sequence[str]) -> None:
+        if argv[0] == "bootstrap":
+            _failure(argv)
+
+    with pytest.raises(SchedulerError) as error:
+        if operation == "bootstrap_rollback":
+            install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                                   run_launchctl=runner)
+        else:
+            remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
+    assert SECRET not in str(error.value)
+    assert len(moves) == 2
+    captures = list(settings.plist_path.parent.glob("*.quarantine"))
+    assert len(captures) == 1
+    assert captures[0].read_bytes() == foreign_a
+    if arrival == "second_foreign":
+        assert settings.plist_path.read_bytes() == foreign_b
+    else:
+        assert not settings.plist_path.exists()
+
+
+@pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])
+@pytest.mark.parametrize("kind", ["symlink", "directory", "owned_changed", "malformed"])
+def test_cleanup_restores_all_kinds_of_changed_entries_without_deleting_them(
+    tmp_path: Path, monkeypatch, operation: str, kind: str,
+) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    if operation == "remove":
+        _install(settings, [])
+    target = tmp_path / "foreign-target"
+    target.write_text(SECRET)
+    original_owned = scheduler._owned
+    reads = 0
+    foreign = b""
+
+    def interleaved_owned(path: Path):
+        nonlocal reads, foreign
+        result = original_owned(path)
+        if path == settings.plist_path:
+            reads += 1
+            if reads == (2 if operation == "bootstrap_rollback" else 3):
+                if kind == "owned_changed":
+                    foreign = plistlib.dumps(plistlib.loads(path.read_bytes()) | {"Extra": SECRET})
+                elif kind == "malformed":
+                    foreign = SECRET.encode()
+                path.unlink()
+                if kind == "symlink":
+                    path.symlink_to(target)
+                elif kind == "directory":
+                    path.mkdir()
+                    (path / "foreign-file").write_text(SECRET)
+                else:
+                    path.write_bytes(foreign)
+        return result
+
+    monkeypatch.setattr(scheduler, "_owned", interleaved_owned)
+
+    def runner(argv: Sequence[str]) -> None:
+        if argv[0] == "bootstrap":
+            _failure(argv)
+
+    with pytest.raises(SchedulerError) as error:
+        if operation == "bootstrap_rollback":
+            install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                                   run_launchctl=runner)
+        else:
+            remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
+    assert SECRET not in str(error.value)
+    if kind == "symlink":
+        assert settings.plist_path.is_symlink()
+        assert settings.plist_path.readlink() == target
+    elif kind == "directory":
+        assert (settings.plist_path / "foreign-file").read_text() == SECRET
+    else:
+        assert settings.plist_path.read_bytes() == foreign
+    assert target.read_text() == SECRET
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
+
+
+@pytest.mark.parametrize("agent", ["supply agent", "supply-agent", " supply agent"])
+def test_install_preserves_legitimate_agent_names(tmp_path: Path, agent: str) -> None:
+    settings = replace(_settings(tmp_path), agent_name=agent)
+    _install(settings, [])
+    argv = plistlib.loads(settings.plist_path.read_bytes())["ProgramArguments"]
+    assert argv[argv.index("--agent") + 1] == agent
+
+
+@pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])
+def test_cleanup_leaves_foreign_arrival_after_owned_capture_validation(
+    tmp_path: Path, monkeypatch, operation: str,
+) -> None:
+    from glassbox.ops import scheduler
+
+    settings = _settings(tmp_path)
+    if operation == "remove":
+        _install(settings, [])
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    original_owned = scheduler._owned
+    captured = False
+
+    def interleaved_owned(path: Path):
+        nonlocal captured
+        result = original_owned(path)
+        if path.suffix == ".quarantine":
+            assert not settings.plist_path.exists()
+            settings.plist_path.write_bytes(foreign)
+            captured = True
+        return result
+
+    monkeypatch.setattr(scheduler, "_owned", interleaved_owned)
+
+    def runner(argv: Sequence[str]) -> None:
+        if argv[0] == "bootstrap":
+            _failure(argv)
+
+    if operation == "bootstrap_rollback":
+        with pytest.raises(SchedulerError, match="^scheduler installation failed$"):
+            install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                                   run_launchctl=runner)
+    else:
+        remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
+    assert captured
+    assert settings.plist_path.read_bytes() == foreign
+    assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]

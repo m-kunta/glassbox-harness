@@ -76,6 +76,8 @@ def _render(settings: DriftScheduleSettings) -> bytes:
         raise SchedulerError("scheduler requires an executable interpreter")
     if not settings.logs_directory.is_absolute() or not settings.agent_name.strip():
         raise SchedulerError("scheduler requires an absolute log directory and nonempty agent")
+    if settings.agent_name.startswith("-"):
+        raise SchedulerError("scheduler agent cannot start with an option prefix")
     try:
         load_policy(settings.policy_path)
     except DriftPolicyError:
@@ -106,8 +108,8 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _swap_paths(first: Path, second: Path) -> None:
-    """Atomically exchange two existing names using Darwin's RENAME_SWAP."""
+def _rename_paths(first: Path, second: Path, flags: int) -> None:
+    """Apply an atomic Darwin rename operation to two directory entries."""
     try:
         rename = ctypes.CDLL(None, use_errno=True).renameatx_np
     except (OSError, AttributeError):
@@ -115,9 +117,39 @@ def _swap_paths(first: Path, second: Path) -> None:
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
                        ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    # Darwin SDK: AT_FDCWD=-2 (sys/fcntl.h), RENAME_SWAP=2 (sys/stdio.h).
-    if rename(-2, os.fsencode(first), -2, os.fsencode(second), 2) != 0:
+    # Darwin SDK: AT_FDCWD=-2 (sys/fcntl.h).
+    if rename(-2, os.fsencode(first), -2, os.fsencode(second), flags) != 0:
         raise OSError(ctypes.get_errno(), "scheduler atomic replacement failed")
+
+
+def _swap_paths(first: Path, second: Path) -> None:
+    """Atomically exchange two existing names using Darwin's RENAME_SWAP."""
+    _rename_paths(first, second, 2)
+
+
+def _move_exclusive(first: Path, second: Path) -> None:
+    """Move any entry without overwriting a destination (Darwin RENAME_EXCL)."""
+    _rename_paths(first, second, 4)
+
+
+def _discard_owned(path: Path, expected: bytes) -> None:
+    """Capture the actual entry before validation; never unlink the public name."""
+    captured = path.with_name(f".{path.name}.{uuid4().hex}.quarantine")
+    _move_exclusive(path, captured)
+    try:
+        owned = _owned(captured)
+        if owned is None or owned[0] != expected:
+            raise SchedulerError("scheduler plist changed during cleanup")
+    except (SchedulerError, OSError):
+        # Restore foreign captures only into an empty name. If another entry
+        # arrived, or restoration fails, retain the capture for recovery.
+        try:
+            _move_exclusive(captured, path)
+        finally:
+            _sync_directory(path.parent)
+        raise SchedulerError("scheduler plist changed during cleanup") from None
+    captured.unlink()
+    _sync_directory(path.parent)
 
 
 def _write_atomic(
@@ -187,11 +219,10 @@ def install_drift_schedule(
             # Never remove a file swapped by another process during bootstrap.
             try:
                 current = _owned(settings.plist_path)
-            except SchedulerError:
-                current = None
-            if current is not None and current[0] == data:
-                settings.plist_path.unlink()
-                _sync_directory(settings.plist_path.parent)
+                if current is not None and current[0] == data:
+                    _discard_owned(settings.plist_path, data)
+            except (SchedulerError, OSError):
+                pass
             raise SchedulerError("scheduler installation failed") from None
     except (OSError, subprocess.SubprocessError):
         raise SchedulerError("scheduler installation failed") from None
@@ -207,7 +238,7 @@ def _loaded(uid: int, run_launchctl: Callable[[Sequence[str]], object]) -> bool 
     return True
 
 
-def _metadata(plist: dict[str, object]) -> tuple[int, int, Path, Path]:
+def _metadata(plist: dict[str, object], logs_directory: Path) -> tuple[int, int, Path, Path]:
     interval = plist.get("StartCalendarInterval")
     argv = plist.get("ProgramArguments")
     if not isinstance(interval, dict) or not isinstance(argv, list):
@@ -225,8 +256,8 @@ def _metadata(plist: dict[str, object]) -> tuple[int, int, Path, Path]:
             raise SchedulerError("scheduler plist configuration is invalid") from None
         if not isinstance(value, str):
             raise SchedulerError("scheduler plist configuration is invalid")
-        path = Path(value)
-        if not path.is_absolute() or path.name != f"drift-monitor.{stream}.log":
+        path = logs_directory / f"drift-monitor.{stream}.log"
+        if not path.is_absolute() or value != str(path):
             raise SchedulerError("scheduler plist configuration is invalid")
         logs.append(path)
     return hour, minute, logs[0], logs[1]
@@ -241,7 +272,7 @@ def drift_schedule_status(
         owned = _owned(settings.plist_path)
         if owned is None:
             return SchedulerStatus("not_installed", None, None, None, None)
-        hour, minute, stdout, stderr = _metadata(owned[1])
+        hour, minute, stdout, stderr = _metadata(owned[1], settings.logs_directory)
         loaded = _loaded(uid, run_launchctl)
         state: Literal["loaded", "installed_not_loaded", "unavailable"] = (
             "unavailable" if loaded is None else "loaded" if loaded else "installed_not_loaded"
@@ -269,7 +300,6 @@ def remove_drift_schedule(
             run_launchctl(["bootout", f"gui/{uid}", str(settings.plist_path)])
         if _owned(settings.plist_path) != previous:
             raise SchedulerError("scheduler plist changed during removal")
-        settings.plist_path.unlink()
-        _sync_directory(settings.plist_path.parent)
+        _discard_owned(settings.plist_path, previous[0])
     except (OSError, subprocess.SubprocessError):
         raise SchedulerError("scheduler removal failed") from None

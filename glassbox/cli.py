@@ -154,6 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "stdout_log": str(status.stdout_log) if status.stdout_log is not None else None,
                     "stderr_log": str(status.stderr_log) if status.stderr_log is not None else None,
                 }, sort_keys=True, separators=(",", ":")))
+                return 2 if status.state == "unavailable" else 0
             else:
                 remove_drift_schedule(
                     settings, platform=sys.platform, uid=uid,
