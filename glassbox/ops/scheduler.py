@@ -250,6 +250,9 @@ def _metadata(plist: dict[str, object], logs_directory: Path) -> tuple[int, int,
     logs: list[Path] = []
     for stream in ("stdout", "stderr"):
         flag = f"--{stream}-log"
+        if (argv.count(flag) != 1
+                or any(isinstance(arg, str) and arg.startswith(f"{flag}=") for arg in argv)):
+            raise SchedulerError("scheduler plist configuration is invalid")
         try:
             value = argv[argv.index(flag) + 1]
         except (ValueError, IndexError):

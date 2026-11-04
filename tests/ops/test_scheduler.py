@@ -687,6 +687,31 @@ def test_status_rejects_altered_log_parent_without_disclosing_it(
     assert calls == []
 
 
+@pytest.mark.parametrize("streams", [("stdout",), ("stderr",), ("stdout", "stderr")])
+@pytest.mark.parametrize("form", ["separate", "equals"])
+def test_status_rejects_duplicate_log_flags_before_query(
+    tmp_path: Path, streams: tuple[str, ...], form: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _install(settings, [])
+    plist = plistlib.loads(settings.plist_path.read_bytes())
+    for stream in streams:
+        flag = f"--{stream}-log"
+        path = str(tmp_path / SECRET / f"drift-monitor.{stream}.log")
+        plist["ProgramArguments"].extend(
+            [flag, path] if form == "separate" else [f"{flag}={path}"]
+        )
+    changed = plistlib.dumps(plist)
+    settings.plist_path.write_bytes(changed)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(SchedulerError, match="^scheduler plist configuration is invalid$") as error:
+        drift_schedule_status(settings, platform="darwin", uid=501,
+                              run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert SECRET not in str(error.value)
+    assert calls == []
+    assert settings.plist_path.read_bytes() == changed
+
+
 @pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])
 @pytest.mark.parametrize("arrival", ["second_foreign", "restore_failure"])
 def test_cleanup_preserves_quarantined_foreign_capture_if_restoration_cannot_complete(
