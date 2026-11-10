@@ -244,6 +244,21 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval._discord_transport",
             ],
         },
+        "dashboard-dependencies": {
+            "source_modules": ["glassbox.dashboard"],
+            "forbidden_modules": [
+                "glassbox.web.server",
+                "glassbox.web.auth",
+                "glassbox.sdk",
+                "glassbox.collector",
+                "glassbox.ops",
+                "glassbox.eval.counterfactual_provider",
+                "glassbox.eval.counterfactual_config",
+                "glassbox.eval.discord",
+                "glassbox.eval.discord_config",
+                "glassbox.eval._discord_transport",
+            ],
+        },
     }
 
     actual = {
@@ -268,9 +283,22 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 7
+    assert len(user_options.contracts_options) == 8
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
+
+
+def test_import_linter_dashboard_contract_is_registered() -> None:
+    from importlinter.application.use_cases import read_user_options
+    from importlinter.configuration import configure
+
+    configure()
+    user_options = read_user_options(config_filename=str(PROJECT_ROOT / "pyproject.toml"))
+
+    assert any(
+        contract["name"] == "dashboard-dependencies"
+        for contract in user_options.contracts_options
+    )
 
 
 def test_events_source_uses_no_absolute_glassbox_imports() -> None:

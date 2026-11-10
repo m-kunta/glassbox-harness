@@ -1429,6 +1429,164 @@ def test_trace_command_never_mutates_the_database(tmp_path: Path, capsys) -> Non
     assert rows_after == rows_before
 
 
+def test_dashboard_command_writes_one_read_only_snapshot(tmp_path: Path, capsys) -> None:
+    from glassbox.cli import main
+
+    path = tmp_path / "glassbox.sqlite3"
+    database = _repository_with_trace(path)
+    before = list(database.connection.iterdump())
+    database.close()
+    output = tmp_path / "dashboard.html"
+
+    assert main(["--database", str(path), "dashboard", "--output", str(output)]) == 0
+
+    assert output.is_file()
+    assert "Static operations dashboard" in output.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    database = Database.open_read_only(path)
+    try:
+        assert list(database.connection.iterdump()) == before
+    finally:
+        database.close()
+
+
+def test_dashboard_command_missing_database_has_one_generic_error(tmp_path: Path, capsys) -> None:
+    from glassbox.cli import main
+
+    path = tmp_path / "PRIVATE-missing.sqlite3"
+    output = tmp_path / "dashboard.html"
+
+    assert main(["--database", str(path), "dashboard", "--output", str(output)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert not path.exists()
+    assert not output.exists()
+
+
+def test_dashboard_command_preserves_existing_output_without_overwrite(
+    tmp_path: Path, capsys,
+) -> None:
+    from glassbox.cli import main
+
+    path = tmp_path / "glassbox.sqlite3"
+    _repository_with_trace(path).close()
+    output = tmp_path / "dashboard.html"
+    original = b"PRIVATE original artifact\x00\xff"
+    output.write_bytes(original)
+    arguments = ["--database", str(path), "dashboard", "--output", str(output)]
+
+    assert main(arguments) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert output.read_bytes() == original
+
+    assert main([*arguments, "--overwrite"]) == 0
+    assert "Static operations dashboard" in output.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+@pytest.mark.parametrize("failure_type", [
+    "DashboardError", "ReadOnlyDatabaseError", "OSError", "sqlite3.Error", "ValueError",
+])
+@pytest.mark.parametrize("stage", ["build_dashboard", "render_dashboard", "write_dashboard"])
+def test_dashboard_command_operational_errors_are_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, failure_type: str, stage: str,
+) -> None:
+    from glassbox import dashboard
+    from glassbox.cli import main
+    from glassbox.store import ReadOnlyDatabaseError
+
+    failures = {
+        "DashboardError": dashboard.DashboardError,
+        "ReadOnlyDatabaseError": ReadOnlyDatabaseError,
+        "OSError": OSError,
+        "sqlite3.Error": sqlite3.Error,
+        "ValueError": ValueError,
+    }
+    path = tmp_path / "glassbox.sqlite3"
+    Database.open(path).close()
+    output = tmp_path / "dashboard.html"
+
+    def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise failures[failure_type]("PRIVATE path, credential, SQLite detail")
+
+    monkeypatch.setattr(dashboard, stage, fail)
+
+    assert main(["--database", str(path), "dashboard", "--output", str(output)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("template", [None, "{{", "{{ PRIVATE_MISSING.name }}"])
+def test_dashboard_command_normalizes_template_failures_and_preserves_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, template: str | None,
+) -> None:
+    from jinja2 import DictLoader, Environment
+
+    from glassbox import dashboard
+    from glassbox.cli import main
+
+    path = tmp_path / "glassbox.sqlite3"
+    Database.open(path).close()
+    output = tmp_path / "dashboard.html"
+    original = b"PRIVATE original artifact"
+    output.write_bytes(original)
+    templates = {} if template is None else {"dashboard.html": template}
+    monkeypatch.setattr(dashboard, "_TEMPLATES", Environment(loader=DictLoader(templates)))
+
+    assert main([
+        "--database", str(path), "dashboard", "--output", str(output), "--overwrite",
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert output.read_bytes() == original
+
+
+def test_dashboard_import_is_lazy_for_trace_and_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    import builtins
+    import importlib
+
+    import glassbox.cli as cli
+
+    path = tmp_path / "glassbox.sqlite3"
+    _repository_with_trace(path).close()
+    output = tmp_path / "card.html"
+    original_import = builtins.__import__
+
+    def import_module(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "glassbox.dashboard" or name.startswith("glassbox.dashboard."):
+            pytest.fail("trace or export imported the dashboard")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_module)
+    importlib.reload(cli)
+
+    assert cli.main(["--database", str(path), "trace", TRACE_ID]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["trace"]["trace_id"] == TRACE_ID
+    assert captured.err == ""
+    assert cli.main([
+        "--database", str(path), "export", "--decision", DECISION_ID,
+        "--output", str(output),
+    ]) == 0
+    assert "Decision brief" in output.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
 def test_export_command_writes_one_read_only_card(tmp_path: Path, capsys) -> None:
     from glassbox.cli import main
 

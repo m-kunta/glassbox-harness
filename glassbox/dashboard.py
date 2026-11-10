@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoescape
 
 from glassbox.eval.drift import default_policy_path as default_drift_policy_path
 from glassbox.eval.drift import load_policy as load_drift_policy
@@ -247,10 +247,13 @@ def build_dashboard(path: Path, *, clock: Callable[[], datetime]) -> DashboardVi
 
 def render_dashboard(view: DashboardView) -> str:
     """Render only typed display fields as one self-contained static document."""
-    return _TEMPLATES.get_template("dashboard.html").render(
-        dashboard=view,
-        css=(Path(__file__).parent / "web/static/glassbox.css").read_text(encoding="utf-8"),
-    )
+    try:
+        return _TEMPLATES.get_template("dashboard.html").render(
+            dashboard=view,
+            css=(Path(__file__).parent / "web/static/glassbox.css").read_text(encoding="utf-8"),
+        )
+    except TemplateError:
+        raise DashboardError("unable to render dashboard") from None
 
 
 def write_dashboard(path: Path, html: str, *, overwrite: bool) -> None:

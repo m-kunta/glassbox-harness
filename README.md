@@ -111,6 +111,44 @@ Use `--overwrite` to replace an existing artifact. Optionally add
 card. Exports contain inline CSS and no JavaScript, session state, or feedback
 form; feedback and operational actions remain available only in the live app.
 
+## Generate a static operations dashboard
+
+Generate one offline, read-only HTML snapshot from an existing Glassbox database:
+
+```shell
+glassbox --database /absolute/path/glassbox.sqlite3 dashboard \
+  --output /absolute/path/glassbox-dashboard.html
+```
+
+`--output` is required. The database must already exist with a compatible schema;
+generation never initializes, migrates, or writes it. Without `--database`, the
+existing `GLASSBOX_DATABASE` or `glassbox.sqlite3` default applies. Add `--overwrite`
+to replace an existing output; otherwise generation preserves it and exits `2`.
+Success exits `0` without console output. Operational failures exit `2` with only
+`glassbox: unable to generate dashboard` on stderr.
+
+The single file contains inline CSS, needs no server or network, and has no
+JavaScript or live links. Regenerate it to refresh its captured UTC snapshot.
+It reports three sections:
+
+- Drift overview for recorded agent cohorts under the default policy, including
+  insufficient data and signals disabled by policy.
+- Outcome reconciliation under `reconciliation_v2`, with confusion totals,
+  available precision/recall/F1, and decision-type breakdowns.
+- The newest 20 counterfactual runs, with provider/model, prompt and outcome-policy
+  provenance, execution mode, and result counts; older history is explicitly capped.
+
+No recorded activity, no imported outcomes, and no counterfactual runs are normal
+empty states. Negative outcomes must be exported and imported explicitly. A report
+section with invalid policy or stored data may show `Unavailable` while the other
+sections remain readable.
+
+The snapshot excludes Decision Cards, traces, evidence, prompts, completions,
+blobs, feedback, overrides, credentials, and provider URLs. It does not start the
+live server, inspect scheduler or Discord health, send alerts, or run CI gates.
+Use `glassbox schedule status-drift` for scheduler status; CI automation remains
+separate deferred work.
+
 ## Run the calibrated LLM judge
 
 The judge scores recorded decision reasoning against the `reasoning_quality_v1`

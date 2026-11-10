@@ -39,6 +39,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     export_command.add_argument("--output", required=True)
     export_command.add_argument("--live-base-url")
     export_command.add_argument("--overwrite", action="store_true")
+    dashboard_command = commands.add_parser(
+        "dashboard", help="write a static operations dashboard HTML file"
+    )
+    dashboard_command.add_argument("--output", required=True)
+    dashboard_command.add_argument("--overwrite", action="store_true")
     eval_command = commands.add_parser("eval", help="run one deterministic evaluation suite")
     eval_command.add_argument("--suite", required=True)
     serve_command = commands.add_parser("serve", help="run the local Glassbox web server")
@@ -456,6 +461,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_decision_export(Path(arguments.output), html, overwrite=arguments.overwrite)
         except (ExportError, ReadOnlyDatabaseError, OSError):
             print("glassbox: unable to export decision", file=sys.stderr)
+            return 2
+        return 0
+
+    if arguments.command == "dashboard":
+        from glassbox.dashboard import (
+            DashboardError,
+            build_dashboard,
+            render_dashboard,
+            write_dashboard,
+        )
+
+        try:
+            view = build_dashboard(Path(arguments.database), clock=lambda: datetime.now(UTC))
+            write_dashboard(
+                Path(arguments.output), render_dashboard(view), overwrite=arguments.overwrite
+            )
+        except (DashboardError, ReadOnlyDatabaseError, OSError, sqlite3.Error, ValueError):
+            print("glassbox: unable to generate dashboard", file=sys.stderr)
             return 2
         return 0
 

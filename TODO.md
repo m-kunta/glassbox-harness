@@ -112,7 +112,7 @@ This is the living project backlog. Refine an item when new evidence changes its
 
 ## P5 — Dashboard and operations (deferred)
 
-- [ ] Add dashboard generation.
+- [x] Add dashboard generation.
 - [ ] Wire CI workflow automation.
 
 ## Demand-triggered backlog
