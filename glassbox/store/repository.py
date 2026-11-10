@@ -711,6 +711,24 @@ class Repository:
                     self._connection.execute("ROLLBACK")
                 raise
 
+    def counterfactual_runs(self, limit: int) -> tuple[CounterfactualRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("counterfactual run limit is invalid")
+        with self._operation_lock:
+            rows = self._connection.execute(
+                "SELECT * FROM counterfactual_runs "
+                "ORDER BY glassbox_timestamp_key(created_at) DESC, run_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        runs: list[CounterfactualRun] = []
+        for row in rows:
+            values = dict(row)
+            for name in ("created_at", "as_of", "decided_since"):
+                values[name] = datetime.fromisoformat(values[name].replace("Z", "+00:00"))
+            values["remote_egress_confirmed"] = bool(values["remote_egress_confirmed"])
+            runs.append(CounterfactualRun(**values))
+        return tuple(runs)
+
     def counterfactual_run_detail(self, run_id: str) -> CounterfactualRunDetail | None:
         with self._operation_lock:
             row = self._connection.execute(

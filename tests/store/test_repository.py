@@ -76,6 +76,61 @@ def _counterfactual_records():
     return run, result
 
 
+def test_counterfactual_runs_are_newest_first_with_ulid_tie_breaker(
+    outcome_repository: Repository,
+) -> None:
+    run, _ = _counterfactual_records()
+    runs = tuple(
+        dataclasses.replace(
+            run,
+            run_id=run_id,
+            created_at=datetime.fromisoformat(created_at.replace("Z", "+00:00")),
+            selected_count=0,
+            succeeded_count=0,
+        )
+        for run_id, created_at in (
+            ("01ARZ3NDEKTSV4RRFFQ69G5FA2", "2026-10-01T12:00:00Z"),
+            ("01ARZ3NDEKTSV4RRFFQ69G5FA3", "2026-10-01T12:00:00.001Z"),
+            ("01ARZ3NDEKTSV4RRFFQ69G5FA4", "2026-10-01T12:00:00.001Z"),
+        )
+    )
+    for run in runs:
+        outcome_repository.record_counterfactual_run(run, ())
+
+    assert outcome_repository.counterfactual_runs(3) == runs[::-1]
+    assert outcome_repository.counterfactual_runs(2) == (runs[2], runs[1])
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "2", None])
+def test_counterfactual_runs_reject_invalid_limits(
+    outcome_repository: Repository,
+    limit: object,
+) -> None:
+    with pytest.raises(ValueError, match="counterfactual run limit is invalid"):
+        outcome_repository.counterfactual_runs(limit)
+
+
+def test_counterfactual_runs_return_headers_without_reading_results(
+    outcome_repository: Repository,
+) -> None:
+    run, result = _counterfactual_records()
+    result = dataclasses.replace(
+        result, hypothetical_rationale="PRIVATE_COUNTERFACTUAL_RATIONALE",
+    )
+    outcome_repository.record_counterfactual_run(run, (result,))
+    queries: list[str] = []
+    outcome_repository._connection.set_trace_callback(queries.append)
+    try:
+        runs = outcome_repository.counterfactual_runs(2)
+    finally:
+        outcome_repository._connection.set_trace_callback(None)
+
+    assert runs == (run,)
+    assert not hasattr(runs[0], "results")
+    assert "PRIVATE_COUNTERFACTUAL_RATIONALE" not in repr(runs)
+    assert all("counterfactual_results" not in query.lower() for query in queries)
+
+
 def test_counterfactual_candidate_reads_one_exact_decision(
     outcome_repository: Repository,
 ) -> None:
