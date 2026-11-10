@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operations dashboard · Glassbox</title>
+  <style>{{ css }}</style>
+</head>
+<body>
+{% macro metrics_table(metrics, caption) %}
+<div class="dashboard-table-scroll">
+  <table class="dashboard-metrics">
+    <caption>{{ caption }}</caption>
+    <thead><tr><th scope="col">True positives</th><th scope="col">False positives</th><th scope="col">True negatives</th><th scope="col">False negatives</th><th scope="col">Precision</th><th scope="col">Recall</th><th scope="col">F1</th></tr></thead>
+    <tbody><tr><td>{{ metrics.tp }}</td><td>{{ metrics.fp }}</td><td>{{ metrics.tn }}</td><td>{{ metrics.fn }}</td><td>{{ "%.3f"|format(metrics.precision) if metrics.precision is not none else "Not available" }}</td><td>{{ "%.3f"|format(metrics.recall) if metrics.recall is not none else "Not available" }}</td><td>{{ "%.3f"|format(metrics.f1) if metrics.f1 is not none else "Not available" }}</td></tr></tbody>
+  </table>
+</div>
+{% endmacro %}
+<main class="dashboard">
+  <header class="dashboard-header">
+    <p class="eyebrow">Glassbox operations</p>
+    <h1>Operations dashboard</h1>
+    <p>A read-only static snapshot. Regenerate this file to refresh the recorded signals.</p>
+    <p class="metadata">Generated at {{ dashboard.generated_at }} · Report format version: 1</p>
+  </header>
+
+  <section class="dashboard-section section-card">
+    <h2>Drift overview</h2>
+    {% if dashboard.drift.state == "ready" %}
+      {% for cohort in dashboard.drift.cohorts %}
+      <article class="dashboard-entry">
+        <h3>{{ cohort.agent_name }}</h3>
+        <p><strong>{{ cohort.status }}</strong> · {{ cohort.action }}</p>
+        <dl class="dashboard-facts">
+          <div><dt>Policy version</dt><dd>{{ cohort.policy_version }}</dd></div>
+          <div><dt>Policy hash</dt><dd>{{ cohort.policy_hash }}</dd></div>
+          <div><dt>Baseline ID</dt><dd>{{ cohort.baseline_id if cohort.baseline_id is not none else "Not materialized" }}</dd></div>
+          <div><dt>Baseline window</dt><dd>{{ cohort.baseline_range }}</dd></div>
+          <div><dt>Recent window</dt><dd>{{ cohort.recent_range }}</dd></div>
+          <div><dt>Monitored signals</dt><dd>{{ cohort.monitored_signals|join(", ") if cohort.monitored_signals else "None" }}</dd></div>
+        </dl>
+        <div class="dashboard-signals">
+          {% for signal in cohort.signals %}
+          <div class="dashboard-signal">
+            <h4>{{ signal.name }}</h4>
+            {% if signal.monitored %}
+            <p><strong>{{ signal.status }}</strong></p>
+            <p>{{ signal.population_label }} · {{ signal.algorithm }}</p>
+            <dl class="dashboard-facts">
+              <div><dt>Value</dt><dd>{{ signal.metric }}</dd></div>
+              <div><dt>Thresholds</dt><dd>{{ signal.thresholds }}</dd></div>
+              <div><dt>Baseline count</dt><dd>{{ signal.baseline_count }}</dd></div>
+              <div><dt>Recent count</dt><dd>{{ signal.recent_count }}</dd></div>
+            </dl>
+            {% if signal.detail_rows %}
+            <div class="dashboard-table-scroll"><table>
+              <thead><tr><th scope="col">Detail</th><th scope="col">Baseline</th><th scope="col">Recent</th></tr></thead>
+              <tbody>{% for name, baseline, recent in signal.detail_rows %}<tr><th scope="row">{{ name }}</th><td>{{ baseline }}</td><td>{{ recent }}</td></tr>{% endfor %}</tbody>
+            </table></div>
+            {% endif %}
+            {% else %}
+            <p>{{ signal.status }}</p>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+      {% endfor %}
+    {% else %}
+      {% if dashboard.drift.state == "unavailable" %}<p><strong>Unavailable</strong></p>{% endif %}
+      <p>{{ dashboard.drift.message }}</p>
+    {% endif %}
+  </section>
+
+  <section class="dashboard-section section-card">
+    <h2>Outcome reconciliation</h2>
+    {% if dashboard.reconciliation.state == "unavailable" %}
+      <p><strong>Unavailable</strong></p>
+      <p>{{ dashboard.reconciliation.message }}</p>
+    {% else %}
+      {% if dashboard.reconciliation.state == "empty" %}<p>{{ dashboard.reconciliation.message }}</p>{% endif %}
+      <dl class="dashboard-facts">
+        <div><dt>Policy version</dt><dd>{{ dashboard.reconciliation.policy_version }}</dd></div>
+        <div><dt>Policy hash</dt><dd>{{ dashboard.reconciliation.policy_hash }}</dd></div>
+        <div><dt>Maturity window</dt><dd>{{ dashboard.reconciliation.maturity_days }} days</dd></div>
+        <div><dt>Total decisions</dt><dd>{{ dashboard.reconciliation.total_decisions }}</dd></div>
+        <div><dt>Immature decisions</dt><dd>{{ dashboard.reconciliation.immature_count }}</dd></div>
+        {% if dashboard.reconciliation.totals is not none %}
+        <div><dt>Eligible decisions</dt><dd>{{ dashboard.reconciliation.totals.mature }}</dd></div>
+        <div><dt>Labelled decisions</dt><dd>{{ dashboard.reconciliation.totals.labelled }}</dd></div>
+        <div><dt>Unlabelled eligible decisions</dt><dd>{{ dashboard.reconciliation.totals.unlabelled }}</dd></div>
+        {% endif %}
+      </dl>
+      {% if dashboard.reconciliation.totals is not none %}{{ metrics_table(dashboard.reconciliation.totals, "Aggregate confusion matrix and metrics") }}{% endif %}
+      {% for item in dashboard.reconciliation.by_decision_type %}
+      <article class="dashboard-entry">
+        <h3>{{ item.decision_type }}</h3>
+        <p>Eligible: {{ item.metrics.mature }} · Labelled: {{ item.metrics.labelled }} · Unlabelled: {{ item.metrics.unlabelled }}</p>
+        {{ metrics_table(item.metrics, "Decision-type confusion matrix and metrics") }}
+      </article>
+      {% endfor %}
+    {% endif %}
+    <p class="metadata">{{ dashboard.reconciliation.outcome_notice }}</p>
+  </section>
+
+  <section class="dashboard-section section-card">
+    <h2>Counterfactual history</h2>
+    {% if dashboard.counterfactuals.state == "ready" %}
+      {% if dashboard.counterfactuals.has_older_runs %}<p>Newest 20 runs shown; older runs are omitted.</p>{% endif %}
+      {% for run in dashboard.counterfactuals.runs %}
+      <article class="dashboard-entry">
+        <h3>{{ run.run_id }}</h3>
+        <dl class="dashboard-facts">
+          <div><dt>Created at</dt><dd>{{ run.created_at }}</dd></div>
+          <div><dt>Provider</dt><dd>{{ run.provider }}</dd></div>
+          <div><dt>Model</dt><dd>{{ run.model }}</dd></div>
+          <div><dt>Execution mode</dt><dd>{{ run.execution_mode }}</dd></div>
+          <div><dt>Prompt version</dt><dd>{{ run.prompt_version }}</dd></div>
+          <div><dt>Prompt hash</dt><dd>{{ run.prompt_hash }}</dd></div>
+          <div><dt>Selected</dt><dd>{{ run.selected_count }}</dd></div>
+          <div><dt>Succeeded</dt><dd>{{ run.succeeded_count }}</dd></div>
+          <div><dt>Failed</dt><dd>{{ run.failed_count }}</dd></div>
+          <div><dt>Outcome policy version</dt><dd>{{ run.outcome_policy_version }}</dd></div>
+          <div><dt>Outcome policy hash</dt><dd>{{ run.outcome_policy_hash }}</dd></div>
+        </dl>
+      </article>
+      {% endfor %}
+    {% else %}
+      {% if dashboard.counterfactuals.state == "unavailable" %}<p><strong>Unavailable</strong></p>{% endif %}
+      <p>{{ dashboard.counterfactuals.message }}</p>
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

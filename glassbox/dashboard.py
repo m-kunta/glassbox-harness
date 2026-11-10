@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from glassbox.eval.drift import default_policy_path as default_drift_policy_path
 from glassbox.eval.drift import load_policy as load_drift_policy
@@ -22,6 +26,14 @@ _RECONCILIATION_POLICY_PATH = (
     Path(__file__).parent / "eval" / "policies" / "reconciliation_v2.toml"
 )
 _UNAVAILABLE = "This section is unavailable."
+_TEMPLATES = Environment(
+    loader=FileSystemLoader(Path(__file__).parent / "web/templates"),
+    autoescape=select_autoescape(("html",)),
+)
+
+
+class DashboardError(RuntimeError):
+    """A dashboard output request cannot safely be completed."""
 
 
 @dataclass(frozen=True)
@@ -231,3 +243,41 @@ def build_dashboard(path: Path, *, clock: Callable[[], datetime]) -> DashboardVi
         )
     finally:
         database.close()
+
+
+def render_dashboard(view: DashboardView) -> str:
+    """Render only typed display fields as one self-contained static document."""
+    return _TEMPLATES.get_template("dashboard.html").render(
+        dashboard=view,
+        css=(Path(__file__).parent / "web/static/glassbox.css").read_text(encoding="utf-8"),
+    )
+
+
+def write_dashboard(path: Path, html: str, *, overwrite: bool) -> None:
+    """Publish a complete private UTF-8 artifact without clobbering by default."""
+    if not overwrite and (path.exists() or path.is_symlink()):
+        raise DashboardError("output already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary_path.chmod(0o600)
+            temporary.write(html)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        if overwrite:
+            os.replace(temporary_path, path)
+        else:
+            # An existence check followed by replace could clobber a concurrent
+            # creator. Linking publishes the complete file only if the name is free.
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError:
+                raise DashboardError("output already exists") from None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

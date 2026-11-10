@@ -1,6 +1,7 @@
 """Static snapshot assembly stays within one strict read-only transaction."""
 
 import sqlite3
+import stat
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -375,3 +376,200 @@ def test_sqlite_errors_propagate_and_connection_is_closed(
         build_dashboard(empty_path, clock=lambda: AS_OF)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connections[0].execute("SELECT 1")
+
+
+def test_render_is_standalone_escaped_and_excludes_source_fields(populated_path: Path) -> None:
+    view = build_dashboard(populated_path, clock=lambda: AS_OF)
+    untrusted = "<script>UNTRUSTED</script>"
+    cohort = replace(view.drift.cohorts[0], agent_name=untrusted, policy_version=untrusted)
+    run = replace(view.counterfactuals.runs[0], model=untrusted)
+    # Even an excluded source field injected into a display object is never rendered.
+    object.__setattr__(run, "base_url", "https://private.example/token")
+    object.__setattr__(run, "rationale", "PRIVATE_COUNTERFACTUAL_RATIONALE")
+    view = replace(
+        view, drift=replace(view.drift, cohorts=(cohort, view.drift.cohorts[1])),
+        counterfactuals=replace(view.counterfactuals, runs=(run,)),
+    )
+
+    html = dashboard.render_dashboard(view)
+
+    assert html.lstrip().startswith("<!doctype html>")
+    assert '<meta charset="utf-8">' in html
+    assert "<style>" in html
+    css = Path(dashboard.__file__).parent / "web/static/glassbox.css"
+    assert css.read_text(encoding="utf-8") in html
+    assert "&lt;script&gt;UNTRUSTED&lt;/script&gt;" in html
+    for forbidden in ("<script", "<form", "href=", "src=", "<link", "http://", "https://",
+                      "PRIVATE_COUNTERFACTUAL_RATIONALE", "private.example", PRIVATE,
+                      "private-blob", "private-host"):
+        assert forbidden not in html
+    assert "Not monitored (disabled by policy)" in html
+    assert html == dashboard.render_dashboard(view)
+
+
+def test_render_ready_sections_show_operational_summaries(populated_path: Path) -> None:
+    view = build_dashboard(populated_path, clock=lambda: AS_OF)
+
+    html = dashboard.render_dashboard(view)
+
+    for text in (
+        "Generated at", view.generated_at, "Report format version: 1", "static snapshot",
+        "Drift overview", "Outcome reconciliation", "Counterfactual history",
+        "Insufficient Data", "Not materialized", view.drift.cohorts[0].action,
+        view.drift.cohorts[0].policy_hash, view.drift.cohorts[0].baseline_id,
+        "Monitored signals", "Eligible decisions", "Labelled decisions", "Unlabelled",
+        "Maturity window", "Immature decisions", "True positives", "False positives",
+        "True negatives", "False negatives", "Precision", "Recall", "F1", "triage",
+        view.reconciliation.policy_version, view.reconciliation.policy_hash,
+        view.reconciliation.outcome_notice, "Newest 20 runs", "older runs",
+        view.counterfactuals.runs[0].run_id, "test-provider", "test-model", "prompt-v1",
+        "a" * 64, "b" * 64, "live_shadow", "Selected", "Succeeded", "Failed",
+    ):
+        assert text in html
+    assert html.count('class="dashboard-section section-card"') == 3
+    assert html.index(_id(4001)) < html.index(_id(4000)) < html.index(_id(4003))
+
+
+def test_render_empty_and_unavailable_states(empty_path: Path) -> None:
+    view = build_dashboard(empty_path, clock=lambda: AS_OF)
+
+    html = dashboard.render_dashboard(view)
+
+    for section in (view.drift, view.reconciliation, view.counterfactuals):
+        assert section.message in html
+    assert view.reconciliation.outcome_notice in html
+    assert "Not available" in html  # Undefined metric denominators stay explicit.
+    assert "Newest 20 runs" not in html
+    unavailable = replace(
+        view,
+        drift=dashboard.DriftSectionView("unavailable", "This section is unavailable."),
+        reconciliation=dashboard.ReconciliationSectionView(
+            "unavailable", "This section is unavailable.",
+        ),
+        counterfactuals=dashboard.CounterfactualSectionView(
+            "unavailable", "This section is unavailable.",
+        ),
+    )
+    html = dashboard.render_dashboard(unavailable)
+    assert html.count("Unavailable") == 3
+    assert html.count("This section is unavailable.") == 3
+    assert "None" not in html
+
+
+def test_writer_refuses_existing_output_without_creating_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "report.html"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(dashboard.tempfile, "NamedTemporaryFile", _forbidden)
+
+    with pytest.raises(dashboard.DashboardError):
+        dashboard.write_dashboard(target, "new", overwrite=False)
+
+    assert target.read_bytes() == b"old"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_writer_publishes_complete_private_utf8_file(tmp_path: Path, overwrite: bool) -> None:
+    target = tmp_path / "nested" / "report.html"
+    if overwrite:
+        target.parent.mkdir()
+        target.write_bytes(b"old")
+    html = "<!doctype html><html><body>Snapshot \u00b7 \u0394</body></html>"
+
+    dashboard.write_dashboard(target, html, overwrite=overwrite)
+
+    assert target.read_bytes() == html.encode("utf-8")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_writer_fsyncs_private_same_directory_temp_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "report.html"
+    target.write_bytes(b"old")
+    html = "complete snapshot \u0394"
+    fsynced = False
+    original_fsync = dashboard.os.fsync
+    original_replace = dashboard.os.replace
+
+    def fsync(descriptor: int) -> None:
+        nonlocal fsynced
+        assert target.read_bytes() == b"old"
+        original_fsync(descriptor)
+        fsynced = True
+
+    def publish(source: Path, destination: Path) -> None:
+        source = Path(source)
+        assert fsynced
+        assert destination == target
+        assert source.parent == target.parent
+        assert source.name.startswith(f".{target.name}.")
+        assert source.suffix == ".tmp"
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+        assert source.read_bytes() == html.encode("utf-8")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(dashboard.os, "fsync", fsync)
+    monkeypatch.setattr(dashboard.os, "replace", publish)
+    dashboard.write_dashboard(target, html, overwrite=True)
+    assert target.read_text(encoding="utf-8") == html
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_writer_replace_failure_preserves_target_and_cleans_only_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool,
+) -> None:
+    target = tmp_path / "report.html"
+    if existing:
+        target.write_bytes(b"old\x00\xff")
+    unrelated = tmp_path / "unrelated.tmp"
+    unrelated.write_bytes(b"keep")
+
+    def fail(*args: object) -> NoReturn:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(dashboard.os, "replace", fail)
+    with pytest.raises(OSError, match="replace failed"):
+        dashboard.write_dashboard(target, "new", overwrite=True)
+
+    if existing:
+        assert target.read_bytes() == b"old\x00\xff"
+    else:
+        assert not target.exists()
+    assert list(tmp_path.glob("*.tmp")) == [unrelated]
+    assert unrelated.read_bytes() == b"keep"
+
+
+def test_writer_no_overwrite_rejects_a_dangling_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "report.html"
+    missing = tmp_path / "missing.html"
+    target.symlink_to(missing)
+
+    with pytest.raises(dashboard.DashboardError):
+        dashboard.write_dashboard(target, "new", overwrite=False)
+
+    assert target.is_symlink()
+    assert not missing.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_writer_no_overwrite_preserves_a_concurrently_created_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "report.html"
+    original_temporary = dashboard.tempfile.NamedTemporaryFile
+
+    def concurrent_creator(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        temporary = original_temporary(*args, **kwargs)
+        target.write_bytes(b"concurrent report")
+        return temporary
+
+    monkeypatch.setattr(dashboard.tempfile, "NamedTemporaryFile", concurrent_creator)
+    with pytest.raises(dashboard.DashboardError):
+        dashboard.write_dashboard(target, "new", overwrite=False)
+
+    assert target.read_bytes() == b"concurrent report"
+    assert not list(tmp_path.glob("*.tmp"))
