@@ -472,14 +472,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_dashboard,
         )
 
+        def resolve_dashboard_path(path: Path) -> Path:
+            try:
+                return path.resolve()
+            except RuntimeError:
+                raise DashboardError("unable to resolve dashboard path") from None
+
         try:
             database_path = Path(arguments.database)
             output_path = Path(arguments.output)
-            resolved_output = output_path.resolve()
-            for source in (database_path.absolute(), database_path.resolve()):
+            resolved_output = resolve_dashboard_path(output_path)
+            for source in (database_path.absolute(), resolve_dashboard_path(database_path)):
                 for suffix in ("", "-wal", "-shm", "-journal"):
                     protected = Path(str(source) + suffix)
-                    if resolved_output == protected.resolve() or (
+                    if resolved_output == resolve_dashboard_path(protected) or (
                         output_path.exists() and protected.exists()
                         and output_path.samefile(protected)
                     ):

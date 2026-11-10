@@ -1504,6 +1504,48 @@ def test_dashboard_command_rejects_database_and_sidecar_output_aliases(
     assert target.read_bytes() == original_target
 
 
+@pytest.mark.parametrize("location", ["output", "source", "-wal", "-shm", "-journal"])
+def test_dashboard_command_rejects_symlink_loops_before_database_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, location: str,
+) -> None:
+    from glassbox import dashboard
+    from glassbox.cli import main
+
+    original_path = tmp_path / "glassbox.sqlite3"
+    Database.open(original_path).close()
+    original_bytes = original_path.read_bytes()
+    path = original_path
+    output = tmp_path / "PRIVATE-dashboard.html"
+    if location == "output":
+        cyclic_path = output
+    elif location == "source":
+        path = tmp_path / "PRIVATE-source.sqlite3"
+        cyclic_path = path
+    else:
+        cyclic_path = Path(str(path) + location)
+    cyclic_path.symlink_to(cyclic_path.name)
+
+    def forbidden(*args, **kwargs):  # type: ignore[no-untyped-def]
+        pytest.fail("cyclic path reached database access or dashboard generation")
+
+    monkeypatch.setattr(Database, "open_read_only", forbidden)
+    monkeypatch.setattr(dashboard, "build_dashboard", forbidden)
+    monkeypatch.setattr(dashboard, "write_dashboard", forbidden)
+
+    assert main([
+        "--database", str(path), "dashboard", "--output", str(output), "--overwrite",
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert original_path.read_bytes() == original_bytes
+    assert cyclic_path.is_symlink()
+    assert cyclic_path.readlink() == Path(cyclic_path.name)
+    if location != "output":
+        assert not output.exists()
+
+
 def test_dashboard_command_missing_database_has_one_generic_error(tmp_path: Path, capsys) -> None:
     from glassbox.cli import main
 
