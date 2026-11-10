@@ -192,6 +192,8 @@ forbidden_modules = [
   "glassbox.sdk",
   "glassbox.collector",
   "glassbox.ops",
+  "glassbox.eval.judge_provider",
+  "glassbox.eval.judge_config",
   "glassbox.eval.counterfactual_provider",
   "glassbox.eval.counterfactual_config",
   "glassbox.eval.discord",

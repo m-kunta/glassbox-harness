@@ -252,6 +252,8 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.sdk",
                 "glassbox.collector",
                 "glassbox.ops",
+                "glassbox.eval.judge_provider",
+                "glassbox.eval.judge_config",
                 "glassbox.eval.counterfactual_provider",
                 "glassbox.eval.counterfactual_config",
                 "glassbox.eval.discord",

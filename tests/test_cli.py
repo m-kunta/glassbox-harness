@@ -1451,6 +1451,59 @@ def test_dashboard_command_writes_one_read_only_snapshot(tmp_path: Path, capsys)
         database.close()
 
 
+@pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("alias", [
+    "direct", "relative", "directory_symlink", "output_symlink", "source_symlink", "hardlink",
+])
+def test_dashboard_command_rejects_database_and_sidecar_output_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, suffix: str, alias: str,
+) -> None:
+    from glassbox import dashboard
+    from glassbox.cli import main
+
+    path = tmp_path / "glassbox.sqlite3"
+    Database.open(path).close()
+    target = Path(str(path) + suffix)
+    if suffix:
+        target.write_bytes(b"PRIVATE SQLite sidecar")
+    original_source = path.read_bytes()
+    original_target = target.read_bytes()
+    output = target
+    if alias == "relative":
+        monkeypatch.chdir(tmp_path)
+        output = Path(target.name)
+    elif alias == "directory_symlink":
+        directory = tmp_path / "alias"
+        directory.symlink_to(tmp_path, target_is_directory=True)
+        output = directory / target.name
+    elif alias == "output_symlink":
+        output = tmp_path / "output.html"
+        output.symlink_to(target)
+    elif alias == "source_symlink":
+        source_alias = tmp_path / "source.sqlite3"
+        source_alias.symlink_to(path)
+        path = source_alias
+    elif alias == "hardlink":
+        output = tmp_path / "output.html"
+        output.hardlink_to(target)
+
+    def forbidden(*args, **kwargs):  # type: ignore[no-untyped-def]
+        pytest.fail("protected output reached the dashboard generation pipeline")
+
+    monkeypatch.setattr(dashboard, "build_dashboard", forbidden)
+    monkeypatch.setattr(dashboard, "write_dashboard", forbidden)
+
+    assert main([
+        "--database", str(path), "dashboard", "--output", str(output), "--overwrite",
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to generate dashboard\n"
+    assert path.read_bytes() == original_source
+    assert target.read_bytes() == original_target
+
+
 def test_dashboard_command_missing_database_has_one_generic_error(tmp_path: Path, capsys) -> None:
     from glassbox.cli import main
 

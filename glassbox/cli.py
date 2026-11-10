@@ -473,9 +473,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         try:
-            view = build_dashboard(Path(arguments.database), clock=lambda: datetime.now(UTC))
+            database_path = Path(arguments.database)
+            output_path = Path(arguments.output)
+            resolved_output = output_path.resolve()
+            for source in (database_path.absolute(), database_path.resolve()):
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    protected = Path(str(source) + suffix)
+                    if resolved_output == protected.resolve() or (
+                        output_path.exists() and protected.exists()
+                        and output_path.samefile(protected)
+                    ):
+                        raise DashboardError("output targets the source database")
+            view = build_dashboard(database_path, clock=lambda: datetime.now(UTC))
             write_dashboard(
-                Path(arguments.output), render_dashboard(view), overwrite=arguments.overwrite
+                output_path, render_dashboard(view), overwrite=arguments.overwrite
             )
         except (DashboardError, ReadOnlyDatabaseError, OSError, sqlite3.Error, ValueError):
             print("glassbox: unable to generate dashboard", file=sys.stderr)

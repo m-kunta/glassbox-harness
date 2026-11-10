@@ -325,6 +325,83 @@ def test_malformed_counterfactual_is_unavailable(
     assert view.drift.state == "ready"
 
 
+@pytest.mark.parametrize("field,value", [
+    ("prompt_hash", b"a" * 64),
+    ("outcome_policy_hash", b"b" * 64),
+    ("run_id", b"00000000000000000000004999"),
+])
+def test_persisted_binary_counterfactual_provenance_is_unavailable(
+    populated_path: Path, field: str, value: bytes,
+) -> None:
+    database = Database.open(populated_path)
+    try:
+        row = dict(database.connection.execute(
+            "SELECT * FROM counterfactual_runs LIMIT 1"
+        ).fetchone())
+        row["run_id"] = _id(4999)
+        row[field] = value
+        columns = ",".join(row)
+        placeholders = ",".join("?" for _ in row)
+        database.connection.execute(
+            f"INSERT INTO counterfactual_runs ({columns}) VALUES ({placeholders})",
+            tuple(row.values()),
+        )
+        database.connection.commit()
+    finally:
+        database.close()
+
+    view = build_dashboard(populated_path, clock=lambda: AS_OF)
+
+    assert (view.counterfactuals.state, view.counterfactuals.message) == (
+        "unavailable", "This section is unavailable.",
+    )
+    assert view.counterfactuals.runs == ()
+    assert view.drift.state == view.reconciliation.state == "ready"
+
+
+@pytest.mark.parametrize("field", ["created_at", "as_of", "decided_since"])
+@pytest.mark.parametrize("value", ["0000-01-01T00:00:00Z", b"2026-11-06T12:00:00Z"])
+def test_persisted_malformed_counterfactual_timestamps_only_disable_history(
+    populated_path: Path, capsys, field: str, value: str | bytes,
+) -> None:  # type: ignore[no-untyped-def]
+    from glassbox.cli import main
+
+    database = Database.open(populated_path)
+    try:
+        row = dict(database.connection.execute(
+            "SELECT * FROM counterfactual_runs LIMIT 1"
+        ).fetchone())
+        row["run_id"] = _id(4999)
+        row[field] = value
+        # Model corrupted persisted data without changing the released schema.
+        database.connection.execute("PRAGMA ignore_check_constraints = ON")
+        columns = ",".join(row)
+        placeholders = ",".join("?" for _ in row)
+        database.connection.execute(
+            f"INSERT INTO counterfactual_runs ({columns}) VALUES ({placeholders})",
+            tuple(row.values()),
+        )
+        database.connection.commit()
+    finally:
+        database.close()
+
+    view = build_dashboard(populated_path, clock=lambda: AS_OF)
+
+    assert (view.counterfactuals.state, view.counterfactuals.message) == (
+        "unavailable", "This section is unavailable.",
+    )
+    assert view.counterfactuals.runs == ()
+    assert view.drift.state == view.reconciliation.state == "ready"
+    output = populated_path.with_suffix(".html")
+    assert main([
+        "--database", str(populated_path), "dashboard", "--output", str(output),
+    ]) == 0
+    html = output.read_text(encoding="utf-8")
+    assert html.count("This section is unavailable.") == 1
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
 def test_twenty_counterfactual_runs_do_not_claim_older_history(
     populated_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,8 +433,9 @@ def test_missing_database_error_propagates(tmp_path: Path) -> None:
         build_dashboard(tmp_path / "missing.sqlite3", clock=lambda: AS_OF)
 
 
+@pytest.mark.parametrize("method", ["drift_agent_names", "counterfactual_runs"])
 def test_sqlite_errors_propagate_and_connection_is_closed(
-    empty_path: Path, monkeypatch: pytest.MonkeyPatch,
+    empty_path: Path, monkeypatch: pytest.MonkeyPatch, method: str,
 ) -> None:
     original_open = Database.open_read_only
     connections: list[sqlite3.Connection] = []
@@ -367,11 +445,11 @@ def test_sqlite_errors_propagate_and_connection_is_closed(
         connections.append(database.connection)
         return database
 
-    def fail(repository: Repository) -> NoReturn:
+    def fail(repository: Repository, *args: object) -> NoReturn:
         raise sqlite3.OperationalError("private-sqlite-error")
 
     monkeypatch.setattr(Database, "open_read_only", capture)
-    monkeypatch.setattr(Repository, "drift_agent_names", fail)
+    monkeypatch.setattr(Repository, method, fail)
     with pytest.raises(sqlite3.OperationalError):
         build_dashboard(empty_path, clock=lambda: AS_OF)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):

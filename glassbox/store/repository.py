@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
+from heapq import nlargest
 from threading import RLock
 from typing import Any, Literal, Mapping, TypeAlias, cast
 
@@ -714,20 +715,32 @@ class Repository:
     def counterfactual_runs(self, limit: int) -> tuple[CounterfactualRun, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("counterfactual run limit is invalid")
-        with self._operation_lock:
-            rows = self._connection.execute(
-                "SELECT * FROM counterfactual_runs "
-                "ORDER BY glassbox_timestamp_key(created_at) DESC, run_id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        runs: list[CounterfactualRun] = []
-        for row in rows:
+
+        def header(row: sqlite3.Row) -> CounterfactualRun:
             values = dict(row)
+            _counterfactual_ulid(values["run_id"])
             for name in ("created_at", "as_of", "decided_since"):
-                values[name] = datetime.fromisoformat(values[name].replace("Z", "+00:00"))
+                value = values[name]
+                if not isinstance(value, str):
+                    raise ValueError("counterfactual timestamp must be UTC text")
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                self._timestamp_text(parsed)
+                values[name] = parsed
             values["remote_egress_confirmed"] = bool(values["remote_egress_confirmed"])
-            runs.append(CounterfactualRun(**values))
-        return tuple(runs)
+            return CounterfactualRun(**values)
+
+        with self._operation_lock:
+            # Validate timestamp text in Python so malformed history raises a
+            # data ValueError, not a SQLite UDF OperationalError. Stream headers
+            # once and retain only the newest `limit`; never read result payloads.
+            rows = self._connection.execute("SELECT * FROM counterfactual_runs")
+            try:
+                return tuple(nlargest(
+                    limit, (header(row) for row in rows),
+                    key=lambda run: (run.created_at, run.run_id),
+                ))
+            finally:
+                rows.close()
 
     def counterfactual_run_detail(self, run_id: str) -> CounterfactualRunDetail | None:
         with self._operation_lock:

@@ -183,13 +183,15 @@ def _counterfactual_view(run: CounterfactualRun) -> CounterfactualRunView:
     _utc_text(run.decided_since)
     if run.created_at < run.as_of or run.decided_since > run.as_of:
         raise ValueError("inconsistent run timestamps")
-    if re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", run.run_id) is None:
+    if not isinstance(run.run_id, str) or re.fullmatch(
+        r"[0-7][0-9A-HJKMNP-TV-Z]{25}", run.run_id
+    ) is None:
         raise ValueError("invalid run reference")
     for value in (run.provider, run.model, run.prompt_version, run.outcome_policy_version):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("invalid run provenance")
     for value in (run.prompt_hash, run.outcome_policy_hash):
-        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
             raise ValueError("invalid run hash")
     if run.execution_mode not in {"offline", "live_shadow"}:
         raise ValueError("invalid run mode")

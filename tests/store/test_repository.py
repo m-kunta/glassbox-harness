@@ -92,13 +92,14 @@ def test_counterfactual_runs_are_newest_first_with_ulid_tie_breaker(
             ("01ARZ3NDEKTSV4RRFFQ69G5FA2", "2026-10-01T12:00:00Z"),
             ("01ARZ3NDEKTSV4RRFFQ69G5FA3", "2026-10-01T12:00:00.001Z"),
             ("01ARZ3NDEKTSV4RRFFQ69G5FA4", "2026-10-01T12:00:00.001Z"),
+            ("01ARZ3NDEKTSV4RRFFQ69G5FA5", "2026-10-01T12:00:00.001001Z"),
         )
     )
     for run in runs:
         outcome_repository.record_counterfactual_run(run, ())
 
-    assert outcome_repository.counterfactual_runs(3) == runs[::-1]
-    assert outcome_repository.counterfactual_runs(2) == (runs[2], runs[1])
+    assert outcome_repository.counterfactual_runs(4) == runs[::-1]
+    assert outcome_repository.counterfactual_runs(2) == (runs[3], runs[2])
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "2", None])
@@ -128,6 +129,7 @@ def test_counterfactual_runs_return_headers_without_reading_results(
     assert runs == (run,)
     assert not hasattr(runs[0], "results")
     assert "PRIVATE_COUNTERFACTUAL_RATIONALE" not in repr(runs)
+    assert len(queries) == 1
     assert all("counterfactual_results" not in query.lower() for query in queries)
 
 
