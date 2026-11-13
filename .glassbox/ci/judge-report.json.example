@@ -1,0 +1,9 @@
+{
+  "format_version": "judge_gate_report_v1",
+  "status": "uncalibrated",
+  "reason": "too_few_labels",
+  "generated_at": "GENERATED_AT_UTC",
+  "provider": "ollama",
+  "model": "llama3.1:8b",
+  "rubric_version": "reasoning_quality_v1"
+}

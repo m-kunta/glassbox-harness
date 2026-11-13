@@ -847,7 +847,8 @@ def test_schedule_lazy_import_check_allows_handler_branch(tmp_path: Path) -> Non
     _assert_schedule_imports_stay_in_command_branch(path)
 
 
-def test_schedule_todo_separates_completed_scheduler_from_deferred_ci() -> None:
+def test_schedule_todo_records_completed_scheduler_and_judge_ci() -> None:
     todo = (PROJECT_ROOT / "TODO.md").read_text()
     assert "- [x] Add opt-in macOS daily drift scheduling" in todo
-    assert "- [ ] Add CI gating once monitoring has an approved operational policy." in todo
+    assert "- [x] Add CI gating once monitoring has an approved operational policy." in todo
+    assert "- [ ] Record and periodically refresh an operator-generated judge gate report" in todo

@@ -1,0 +1,4 @@
+format_version = "judge_gate_policy_v1"
+max_age_seconds = 604800
+expected_report_format = "judge_gate_report_v1"
+expected_rubric_version = "reasoning_quality_v1"

@@ -7,7 +7,10 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-.glassbox/
+.glassbox/*
+!.glassbox/ci/
+!.glassbox/ci/judge-gate-policy.toml
+!.glassbox/ci/judge-report.json
 .worktrees/
 .env
 .superpowers/sdd/

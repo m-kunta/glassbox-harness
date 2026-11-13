@@ -146,8 +146,9 @@ sections remain readable.
 The snapshot excludes Decision Cards, traces, evidence, prompts, completions,
 blobs, feedback, overrides, credentials, and provider URLs. It does not start the
 live server, inspect scheduler or Discord health, send alerts, or run CI gates.
-Use `glassbox schedule status-drift` for scheduler status; CI automation remains
-separate deferred work.
+Use `glassbox schedule status-drift` for scheduler status; drift CI automation
+remains separate deferred work. The calibrated judge gate below verifies
+operator-generated evidence independently.
 
 ## Run the calibrated LLM judge
 
@@ -223,6 +224,74 @@ agreement of at least **0.60**, and this run's own gated (recent) set has at
 least **10** successful judgments with a failure rate no higher than **5%**.
 Once calibrated, the run's status is `failed` if the gated set's mean score
 falls below **3.5**, otherwise `passed`.
+
+## Verify calibrated judge evidence in CI
+
+The `Calibrated judge gate` GitHub Actions workflow verifies a precomputed local
+report. An operator first runs the existing judge locally with the approved
+provider configuration, human labels, and database:
+
+```shell
+glassbox --database glassbox.sqlite3 judge --since 7d
+```
+
+For remote providers, add `--confirm-egress` after reviewing the disclosure
+described above. Review the resulting `JudgeReport`, then project only these
+seven keys into `.glassbox/ci/judge-report.json`:
+
+```json
+{
+  "format_version": "judge_gate_report_v1",
+  "status": "uncalibrated",
+  "reason": "too_few_labels",
+  "generated_at": "GENERATED_AT_UTC",
+  "provider": "ollama",
+  "model": "llama3.1:8b",
+  "rubric_version": "reasoning_quality_v1"
+}
+```
+
+Use the actual run's `status`, `reason`, `provider`, `model`, and
+`rubric_version`; copy its `run_at` to `generated_at` as an RFC3339 UTC timestamp
+ending in `Z`. Preserve the run time when refreshing evidence: rerun the judge
+instead of changing an old report's timestamp. Do not copy decision IDs,
+prompts, completions, evidence, database paths, or provider URLs. Extra keys are
+rejected. `.glassbox/ci/judge-report.json.example` is documentation only and is
+never live evidence; the literal `GENERATED_AT_UTC` is deliberately invalid.
+The actual report is initially absent. Commit a real operator-generated report
+to the protected base branch to activate a useful check.
+
+The checked-in `.glassbox/ci/judge-gate-policy.toml` accepts only
+`judge_gate_report_v1` and `reasoning_quality_v1`, with a maximum age of
+**604800 seconds (seven days)**. Future-dated reports are rejected. Verify the
+compact report locally before committing it:
+
+```shell
+python -m glassbox judge verify-report --report .glassbox/ci/judge-report.json --policy .glassbox/ci/judge-gate-policy.toml
+```
+
+| Evidence status | Exit | Meaning |
+| --- | --- | --- |
+| `passed` / `calibrated` | `0` | Calibrated evidence meets the score threshold. |
+| `failed` / `mean_score_below_threshold` | `1` | Calibrated evidence fails the score threshold. |
+| `uncalibrated` | `0` | Neutral: calibration is incomplete; this is not a calibrated pass. |
+| Missing, invalid, stale, or future-dated | `2` | Refresh or correct the operator evidence. |
+
+The accepted uncalibrated reasons are `too_few_labels`, `kappa_undefined`,
+`kappa_below_threshold`, `gated_set_too_small`, and `failure_rate_too_high`.
+The workflow preserves these exits and appends compact verifier output under
+`Calibrated judge gate` in the GitHub step summary. Without a real report it
+intentionally exits `2` and asks the operator to refresh evidence.
+
+On `pull_request_target`, the workflow checks out the PR's trusted **base SHA**,
+so changes to code, policy, or reports in the PR cannot affect its own check.
+The check evaluates base-branch evidence, not the PR's behavior. A `main` push
+evaluates that pushed SHA; manual dispatch evaluates the selected trusted ref.
+Official actions are pinned by SHA, permissions are only `contents: read`, and
+checkout does not persist credentials. CI installs the base package without
+provider extras. The workflow has no provider credentials, database, artifact
+download/upload, cache, or PR-code checkout. Provider execution and report
+refresh remain explicit local operator work; drift CI automation remains deferred.
 
 ## Monitor agent drift
 
@@ -431,8 +500,8 @@ glassbox schedule remove-drift
 
 Removal unloads only the valid Glassbox-owned job and leaves the database,
 baselines, drift runs, delivery history, policies, `.env`, and logs intact.
-GitHub Actions, CI gating, non-macOS scheduling, custom times, retries, and
-escalation remain deferred.
+Drift-specific GitHub Actions and CI gating, non-macOS scheduling, custom times,
+retries, and escalation remain deferred. The calibrated judge CI gate is separate.
 
 ## Import and reconcile deferred outcomes
 

@@ -104,7 +104,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 - [x] Add opt-in live decision-time shadow execution for approved counterfactual prompts, preserving fail-open production behaviour and bounded cost/latency.
 - [x] Add Discord notification delivery for operational alerts.
 - [x] Add opt-in macOS daily drift scheduling with explicit install, status, replacement, and removal commands.
-- [ ] Add CI gating once monitoring has an approved operational policy.
+- [x] Add CI gating once monitoring has an approved operational policy.
+- [ ] Record and periodically refresh an operator-generated judge gate report on the protected base branch.
 
 ## P4 — Outcome reconciliation
 
