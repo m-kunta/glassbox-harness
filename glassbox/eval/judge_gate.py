@@ -85,6 +85,15 @@ class _JudgeGatePolicy:
     expected_rubric_version: str
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError
+        fields[key] = value
+    return fields
+
+
 def _exact_fields(value: object, keys: frozenset[str]) -> dict[str, object]:
     if not isinstance(value, dict) or value.keys() != keys:
         raise ValueError
@@ -130,7 +139,10 @@ def verify_judge_gate_report(
     """Check strict schema, provenance, and freshness without executing a judge."""
     try:
         policy = _parse_policy(policy_path.read_text(encoding="utf-8"))
-        fields = _exact_fields(json.loads(report_path.read_text(encoding="utf-8")), _REPORT_KEYS)
+        fields = _exact_fields(
+            json.loads(report_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object),
+            _REPORT_KEYS,
+        )
         if fields["format_version"] != policy.expected_report_format:
             raise ValueError
         status = _string(fields["status"])
@@ -161,7 +173,7 @@ def verify_judge_gate_report(
             model=model,
             rubric_version=rubric,
         )
-    except (OSError, TypeError, ValueError):
-        # JSON/TOML/Unicode decoding errors are ValueErrors. Never retain their
+    except (OSError, TypeError, ValueError, RecursionError):
+        # Decode failures, including excessive nesting, must never expose
         # document snippets or OS path details in the public diagnostic.
         raise JudgeGateError("Unable to verify judge report") from None

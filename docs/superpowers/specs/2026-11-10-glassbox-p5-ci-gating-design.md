@@ -52,11 +52,13 @@ The report is an operator-maintained assertion. A pull request must not be able
 to manufacture its own passing assertion by changing the report, policy, or
 verifier.
 
-For `pull_request_target` events, GitHub runs the workflow definition from the
-target branch, and the workflow checks out that branch's base commit in a
-separate worktree. It runs the verifier and policy from that base commit and
-reads the report from the same worktree. Consequently, a candidate PR's
-changes to `.glassbox/ci/`, Python verification code, or the workflow cannot
+For `pull_request_target` events, GitHub uses the default branch's workflow definition
+from the base repository. The workflow explicitly checks out
+`github.event.pull_request.base.sha` in the runner's default workspace. It runs
+the verifier and policy from that PR base commit and reads the report from the
+same checkout. See [GitHub's security guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)
+for the distinction between the workflow definition and an explicit checkout.
+Consequently, a candidate PR's changes to `.glassbox/ci/`, Python verification code, or the workflow cannot
 change its own gate outcome. The workflow never checks out or executes PR
 code. The report is refreshed through a separate reviewed update to the
 protected base branch.

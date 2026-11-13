@@ -283,8 +283,10 @@ The workflow preserves these exits and appends compact verifier output under
 `Calibrated judge gate` in the GitHub step summary. Without a real report it
 intentionally exits `2` and asks the operator to refresh evidence.
 
-On `pull_request_target`, the workflow checks out the PR's trusted **base SHA**,
-so changes to code, policy, or reports in the PR cannot affect its own check.
+On `pull_request_target`, GitHub uses the default branch's workflow definition
+from the base repository. The workflow explicitly checks out the PR's trusted **base SHA** through
+`github.event.pull_request.base.sha`, so changes to code, policy, or reports in
+the PR cannot affect its own check.
 The check evaluates base-branch evidence, not the PR's behavior. A `main` push
 evaluates that pushed SHA; manual dispatch evaluates the selected trusted ref.
 Official actions are pinned by SHA, permissions are only `contents: read`, and

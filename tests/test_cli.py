@@ -1864,6 +1864,43 @@ def test_judge_verify_report_errors_are_generic_and_have_empty_stdout(
     assert captured.err == "glassbox: unable to verify judge report\n"
 
 
+@pytest.mark.parametrize("problem", ["duplicate_keys", "deep_json", "deep_malformed_json"])
+def test_judge_verify_report_unsafe_json_fails_safely_in_a_real_process(
+    judge_gate_files: tuple[Path, Path], problem: str,
+) -> None:
+    report, policy = judge_gate_files
+    private = "PRIVATE_DECISION_CONTENT"
+    if problem == "duplicate_keys":
+        payload = json.loads(report.read_text())
+        payload.update(
+            status="passed", reason="calibrated",
+            generated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+        text = (
+            '{"status":"failed","reason":"mean_score_below_threshold",'
+            f'"model":"{private}",' + json.dumps(payload)[1:]
+        )
+    else:
+        text = "[" * 10000 + json.dumps(private)
+        if problem == "deep_json":
+            text += "]" * 10000
+    report.write_text(text, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "glassbox", "judge", "verify-report",
+            "--report", str(report), "--policy", str(policy),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "glassbox: unable to verify judge report\n"
+    assert private not in result.stdout + result.stderr
+    assert str(report) not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("options", [[], ["--report", "PRIVATE"], ["--policy", "PRIVATE"]])
 def test_judge_verify_report_requires_both_paths(options: list[str], capsys) -> None:
     from glassbox.cli import main

@@ -9,8 +9,10 @@ dist/
 *.egg-info/
 .glassbox/*
 !.glassbox/ci/
+.glassbox/ci/*
 !.glassbox/ci/judge-gate-policy.toml
 !.glassbox/ci/judge-report.json
+!.glassbox/ci/judge-report.json.example
 .worktrees/
 .env
 .superpowers/sdd/

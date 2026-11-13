@@ -226,6 +226,38 @@ def test_invalid_json_or_root_shape_is_rejected(tmp_path: Path, text: str) -> No
     _assert_safe_error(report, _policy(tmp_path))
 
 
+@pytest.mark.parametrize("key", REPORT)
+def test_duplicate_json_keys_are_rejected_before_values_are_discarded(
+    tmp_path: Path, key: str,
+) -> None:
+    report = _report(tmp_path)
+    report.write_text(
+        "{" + json.dumps(key) + ":" + json.dumps(PRIVATE) + "," + json.dumps(REPORT)[1:],
+        encoding="utf-8",
+    )
+    _assert_safe_error(report, _policy(tmp_path))
+
+
+def test_conflicting_failed_then_passed_json_is_rejected(tmp_path: Path) -> None:
+    report = _report(tmp_path, "passed", "calibrated")
+    report.write_text(
+        '{"status":"failed","reason":"mean_score_below_threshold",'
+        + report.read_text()[1:],
+        encoding="utf-8",
+    )
+    _assert_safe_error(report, _policy(tmp_path))
+
+
+@pytest.mark.parametrize("closing_brackets", [True, False])
+def test_deeply_nested_json_fails_safely(tmp_path: Path, closing_brackets: bool) -> None:
+    report = _report(tmp_path)
+    report.write_text(
+        "[" * 10000 + json.dumps(PRIVATE) + ("]" * 10000 if closing_brackets else ""),
+        encoding="utf-8",
+    )
+    _assert_safe_error(report, _policy(tmp_path))
+
+
 @pytest.mark.parametrize(
     "text",
     [

@@ -44,10 +44,49 @@ def test_gitignore_allows_tracking_operator_ci_files() -> None:
     for pattern in (
         ".glassbox/*",
         "!.glassbox/ci/",
+        ".glassbox/ci/*",
         "!.glassbox/ci/judge-gate-policy.toml",
         "!.glassbox/ci/judge-report.json",
+        "!.glassbox/ci/judge-report.json.example",
     ):
         assert pattern in patterns
+
+
+def test_gitignore_tracks_only_public_ci_contract_files(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text((PROJECT_ROOT / ".gitignore").read_text())
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    public = {
+        ".glassbox/ci/judge-gate-policy.toml",
+        ".glassbox/ci/judge-report.json",
+        ".glassbox/ci/judge-report.json.example",
+    }
+    private = {
+        ".glassbox/private.json",
+        ".glassbox/ci/private.json",
+        ".glassbox/ci/glassbox.sqlite3",
+        ".glassbox/ci/credentials.env",
+        ".glassbox/ci/api-key.txt",
+        ".glassbox/ci/nested/token.json",
+    }
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--stdin"],
+        cwd=tmp_path,
+        input="\n".join(sorted(public | private)) + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert set(result.stdout.splitlines()) == private
+
+
+def test_trust_docs_distinguish_default_workflow_from_explicit_base_checkout() -> None:
+    design = PROJECT_ROOT / "docs" / "superpowers" / "specs" / (
+        "2026-11-10-glassbox-p5-ci-gating-design.md"
+    )
+    for path in (design, PROJECT_ROOT / "README.md"):
+        text = path.read_text()
+        assert "default branch's workflow definition" in text
+        assert "`github.event.pull_request.base.sha`" in text
 
 
 def test_workflow_runs_only_the_trusted_base_verifier() -> None:
