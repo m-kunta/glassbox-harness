@@ -37,6 +37,8 @@ jobs:
             printf '\n```\n'
             if [ "$status" -eq 2 ]; then
               printf '\nEvidence is missing, invalid, stale, or future-dated. Refresh the operator-generated report on the protected base branch.\n'
+            elif [ "$status" -eq 0 ] && python -c 'import json, sys; sys.exit(json.load(sys.stdin)["status"] != "uncalibrated")' < judge-gate-result.json; then
+              printf '\nNeutral: uncalibrated evidence applied no quality gate.\n'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"

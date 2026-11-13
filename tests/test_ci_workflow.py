@@ -5,8 +5,10 @@ import os
 import subprocess
 import sys
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -137,3 +139,53 @@ def test_python_module_entrypoint_runs_the_verifier(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr == "glassbox: unable to verify judge report\n"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "exit_code"),
+    [
+        ("uncalibrated", "too_few_labels", 0),
+        ("passed", "calibrated", 0),
+        ("failed", "mean_score_below_threshold", 1),
+    ],
+)
+def test_workflow_summary_explains_neutral_uncalibrated_evidence(
+    tmp_path: Path, status: str, reason: str, exit_code: int,
+) -> None:
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    script = workflow["jobs"]["judge-gate"]["steps"][-1]["run"]
+    # Synthetic verifier fixtures live only in pytest's isolated directory.
+    ci_root = tmp_path / ".glassbox" / "ci"
+    ci_root.mkdir(parents=True)
+    (ci_root / "judge-gate-policy.toml").write_text(
+        (CI_ROOT / "judge-gate-policy.toml").read_text()
+    )
+    (ci_root / "judge-report.json").write_text(json.dumps({
+        "format_version": "judge_gate_report_v1",
+        "status": status,
+        "reason": reason,
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "provider": "ollama",
+        "model": "llama3.1:8b",
+        "rubric_version": "reasoning_quality_v1",
+    }))
+    summary = tmp_path / "summary.md"
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{PROJECT_ROOT / '.venv' / 'bin'}:{os.environ.get('PATH', '')}",
+            "PYTHONPATH": str(PROJECT_ROOT),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == exit_code
+    assert result.stderr == ""
+    validated = (tmp_path / "judge-gate-result.json").read_text()
+    assert json.loads(validated)["status"] == status
+    assert validated in summary.read_text()
+    neutral_message = "Neutral: uncalibrated evidence applied no quality gate."
+    assert (neutral_message in summary.read_text()) == (status == "uncalibrated")
