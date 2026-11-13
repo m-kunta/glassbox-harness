@@ -80,7 +80,10 @@ def test_install_writes_owned_daily_launchagent(tmp_path: Path, monkeypatch) -> 
     assert data.startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
     assert SECRET.encode() not in data
     assert settings.plist_path.stat().st_mode & 0o777 == 0o600
-    assert calls == [("bootstrap", "gui/501", str(settings.plist_path))]
+    assert calls[0][:2] == ("bootstrap", "gui/501")
+    assert calls[0][2] != str(settings.plist_path)
+    snapshot = Path(calls[0][2])
+    assert not snapshot.exists()
     assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
 
 
@@ -209,8 +212,9 @@ def test_replacement_unloads_old_job_before_atomic_replacement(tmp_path: Path) -
 
     install_drift_schedule(replacement, replace=True, platform="darwin", uid=501,
                            run_launchctl=runner)
-    assert calls == [("bootout", "gui/501", str(settings.plist_path)),
-                     ("bootstrap", "gui/501", str(settings.plist_path))]
+    assert calls[0] == ("bootout", f"gui/501/{SCHEDULER_LABEL}")
+    assert calls[1][:2] == ("bootstrap", "gui/501")
+    assert calls[1][2] != str(settings.plist_path)
 
 
 def test_failed_unload_preserves_existing_plist(tmp_path: Path) -> None:
@@ -246,6 +250,48 @@ def test_bootstrap_failure_never_deletes_a_foreign_replacement(tmp_path: Path) -
         install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
                                run_launchctl=runner)
     assert settings.plist_path.read_bytes() == foreign
+
+
+def test_bootstrap_uses_private_snapshot_when_public_plist_changes_at_launch_boundary(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    foreign = plistlib.dumps({"Label": "foreign", "secret": SECRET})
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: Sequence[str]) -> None:
+        calls.append(tuple(argv))
+        settings.plist_path.write_bytes(foreign)
+        snapshot = Path(argv[2])
+        assert snapshot != settings.plist_path
+        bootstrap_plist = plistlib.loads(snapshot.read_bytes())
+        assert bootstrap_plist["Label"] == SCHEDULER_LABEL
+        assert bootstrap_plist["Comment"] == OWNERSHIP_MARKER
+
+    install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                           run_launchctl=runner)
+    assert calls[0][:2] == ("bootstrap", "gui/501")
+    assert settings.plist_path.read_bytes() == foreign
+    assert not Path(calls[0][2]).exists()
+
+
+def test_snapshot_cleanup_failure_does_not_rollback_successful_bootstrap(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    original_unlink = Path.unlink
+
+    def fail_snapshot_cleanup(path: Path, *args, **kwargs) -> None:
+        if path.name.startswith("glassbox-drift-"):
+            raise OSError(SECRET)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_snapshot_cleanup)
+    calls: list[tuple[str, ...]] = []
+    install_drift_schedule(settings, replace=False, platform="darwin", uid=501,
+                           run_launchctl=lambda argv: calls.append(tuple(argv)))
+    assert calls[0][:2] == ("bootstrap", "gui/501")
+    assert settings.plist_path.exists()
 
 
 def test_status_not_installed_never_calls_launchctl(tmp_path: Path) -> None:
@@ -308,7 +354,7 @@ def test_remove_unloads_only_if_loaded_and_leaves_inputs_and_logs(
 
     remove_drift_schedule(settings, platform="darwin", uid=501, run_launchctl=runner)
     assert calls == [("print", "gui/501/com.glassbox.drift-monitor")] + (
-        [("bootout", "gui/501", str(settings.plist_path))] if loaded else []
+        [("bootout", f"gui/501/{SCHEDULER_LABEL}")] if loaded else []
     )
     assert not settings.plist_path.exists()
     assert settings.database_path.exists()
@@ -467,7 +513,7 @@ def test_install_preserves_foreign_destination_created_during_temporary_write(
                                run_launchctl=lambda argv: calls.append(tuple(argv)))
     assert SECRET not in str(error.value)
     assert settings.plist_path.read_bytes() == foreign
-    assert calls == ([("bootout", "gui/501", str(settings.plist_path))] if replacing else [])
+    assert calls == ([("bootout", f"gui/501/{SCHEDULER_LABEL}")] if replacing else [])
     assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
 
 
@@ -527,7 +573,7 @@ def test_replacement_restores_foreign_file_swapped_after_final_validation(
     assert reads >= 3
     assert SECRET not in str(error.value)
     assert settings.plist_path.read_bytes() == foreign
-    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert calls == [("bootout", f"gui/501/{SCHEDULER_LABEL}")]
     assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
 
 
@@ -548,7 +594,7 @@ def test_failed_atomic_swap_preserves_original_owned_plist(tmp_path: Path, monke
                                run_launchctl=lambda argv: calls.append(tuple(argv)))
     assert SECRET not in str(error.value)
     assert settings.plist_path.read_bytes() == original
-    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert calls == [("bootout", f"gui/501/{SCHEDULER_LABEL}")]
     assert list(settings.plist_path.parent.iterdir()) == [settings.plist_path]
 
 
@@ -580,7 +626,7 @@ def test_failed_rollback_preserves_displaced_foreign_bytes(tmp_path: Path, monke
     displaced = list(settings.plist_path.parent.glob("*.tmp"))
     assert len(displaced) == 1
     assert displaced[0].read_bytes() == foreign
-    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert calls == [("bootout", f"gui/501/{SCHEDULER_LABEL}")]
 
 
 def test_rollback_preserves_second_foreign_file_displaced_during_restoration(
@@ -612,7 +658,7 @@ def test_rollback_preserves_second_foreign_file_displaced_during_restoration(
     retained = list(settings.plist_path.parent.glob("*.tmp"))
     assert len(retained) == 1
     assert retained[0].read_bytes() == foreign_b
-    assert calls == [("bootout", "gui/501", str(settings.plist_path))]
+    assert calls == [("bootout", f"gui/501/{SCHEDULER_LABEL}")]
 
 
 @pytest.mark.parametrize("operation", ["bootstrap_rollback", "remove"])

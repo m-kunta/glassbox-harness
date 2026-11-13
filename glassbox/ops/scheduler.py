@@ -5,7 +5,9 @@ import os
 import plistlib
 import stat
 import subprocess
-from collections.abc import Callable, Sequence
+import tempfile
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -108,6 +110,42 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+@contextmanager
+def _lifecycle_lock(path: Path) -> Iterator[None]:
+    """Serialize Glassbox lifecycle calls without adding a public lock file."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _bootstrap_snapshot(
+    data: bytes, *, uid: int, run_launchctl: Callable[[Sequence[str]], None],
+) -> None:
+    """Bootstrap verified bytes, never the mutable managed plist pathname."""
+    descriptor, temporary = tempfile.mkstemp(prefix="glassbox-drift-", suffix=".plist")
+    snapshot = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        run_launchctl(["bootstrap", f"gui/{uid}", str(snapshot)])
+    finally:
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            # Bootstrap has already accepted the snapshot. Leaving this
+            # private, unique file behind is safer than rolling back a live job.
+            pass
+
+
 def _rename_paths(first: Path, second: Path, flags: int) -> None:
     """Apply an atomic Darwin rename operation to two directory entries."""
     try:
@@ -205,25 +243,26 @@ def install_drift_schedule(
     _platform(platform, settings)
     try:
         data = _render(settings)
-        previous = _owned(settings.plist_path)
-        if previous is not None:
-            if not replace:
-                raise SchedulerError("scheduler is already installed; replacement is required")
-            run_launchctl(["bootout", f"gui/{uid}", str(settings.plist_path)])
-            if _owned(settings.plist_path) != previous:
-                raise SchedulerError("scheduler plist changed during replacement")
-        _write_atomic(settings.plist_path, data, previous)
-        try:
-            run_launchctl(["bootstrap", f"gui/{uid}", str(settings.plist_path)])
-        except (OSError, subprocess.SubprocessError):
-            # Never remove a file swapped by another process during bootstrap.
+        with _lifecycle_lock(settings.plist_path):
+            previous = _owned(settings.plist_path)
+            if previous is not None:
+                if not replace:
+                    raise SchedulerError("scheduler is already installed; replacement is required")
+                run_launchctl(["bootout", f"gui/{uid}/{SCHEDULER_LABEL}"])
+                if _owned(settings.plist_path) != previous:
+                    raise SchedulerError("scheduler plist changed during replacement")
+            _write_atomic(settings.plist_path, data, previous)
             try:
-                current = _owned(settings.plist_path)
-                if current is not None and current[0] == data:
-                    _discard_owned(settings.plist_path, data)
-            except (SchedulerError, OSError):
-                pass
-            raise SchedulerError("scheduler installation failed") from None
+                _bootstrap_snapshot(data, uid=uid, run_launchctl=run_launchctl)
+            except (OSError, subprocess.SubprocessError):
+                # Never remove a file swapped by another process during bootstrap.
+                try:
+                    current = _owned(settings.plist_path)
+                    if current is not None and current[0] == data:
+                        _discard_owned(settings.plist_path, data)
+                except (SchedulerError, OSError):
+                    pass
+                raise SchedulerError("scheduler installation failed") from None
     except (OSError, subprocess.SubprocessError):
         raise SchedulerError("scheduler installation failed") from None
 
@@ -291,18 +330,19 @@ def remove_drift_schedule(
 ) -> None:
     _platform(platform, settings)
     try:
-        previous = _owned(settings.plist_path)
-        if previous is None:
-            return
-        loaded = _loaded(uid, run_launchctl)
-        if loaded is None:
-            raise SchedulerError("scheduler removal failed")
-        if _owned(settings.plist_path) != previous:
-            raise SchedulerError("scheduler plist changed during removal")
-        if loaded:
-            run_launchctl(["bootout", f"gui/{uid}", str(settings.plist_path)])
-        if _owned(settings.plist_path) != previous:
-            raise SchedulerError("scheduler plist changed during removal")
-        _discard_owned(settings.plist_path, previous[0])
+        with _lifecycle_lock(settings.plist_path):
+            previous = _owned(settings.plist_path)
+            if previous is None:
+                return
+            loaded = _loaded(uid, run_launchctl)
+            if loaded is None:
+                raise SchedulerError("scheduler removal failed")
+            if _owned(settings.plist_path) != previous:
+                raise SchedulerError("scheduler plist changed during removal")
+            if loaded:
+                run_launchctl(["bootout", f"gui/{uid}/{SCHEDULER_LABEL}"])
+            if _owned(settings.plist_path) != previous:
+                raise SchedulerError("scheduler plist changed during removal")
+            _discard_owned(settings.plist_path, previous[0])
     except (OSError, subprocess.SubprocessError):
         raise SchedulerError("scheduler removal failed") from None
