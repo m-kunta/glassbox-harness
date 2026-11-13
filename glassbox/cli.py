@@ -52,7 +52,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     judge_command = commands.add_parser(
         "judge", help="run the calibrated LLM reasoning-quality judge"
     )
-    judge_command.add_argument("--since", required=True, type=_parse_duration)
+    judge_command.add_argument("--since", type=_parse_duration)
+    judge_command.add_argument("judge_action", nargs="?", choices=["verify-report"])
+    judge_command.add_argument("--report", type=Path)
+    judge_command.add_argument("--policy", type=Path)
     judge_command.add_argument("--max-cases", type=_parse_max_cases, default=None)
     judge_command.add_argument("--allow-self-judge", action="store_true")
     judge_command.add_argument("--confirm-egress", action="store_true")
@@ -112,6 +115,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     schedule_subcommands.add_parser("status-drift", help="print safe scheduler status as JSON")
     schedule_subcommands.add_parser("remove-drift", help="remove the managed drift job")
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "judge" and arguments.judge_action == "verify-report":
+        from glassbox.eval.judge_gate import JudgeGateError, verify_judge_gate_report
+
+        if arguments.report is None or arguments.policy is None:
+            print("glassbox: unable to verify judge report", file=sys.stderr)
+            return 2
+        try:
+            result = verify_judge_gate_report(
+                arguments.report, arguments.policy, clock=lambda: datetime.now(UTC)
+            )
+        except JudgeGateError:
+            print("glassbox: unable to verify judge report", file=sys.stderr)
+            return 2
+        print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
+        return result.exit_code
 
     if arguments.command == "schedule":
         if sys.platform != "darwin":
@@ -500,6 +519,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if arguments.command == "judge":
+        if arguments.report is not None or arguments.policy is not None:
+            parser.error("judge --report and --policy require verify-report")
+        if arguments.since is None:
+            parser.error("judge requires --since")
+
         # Imported here, not at module scope, so `serve`/`export`/`eval` never
         # trigger loading the judge stack's optional dependency (`dotenv`).
         from glassbox.eval.judge import build_judge_cohort, run_judge

@@ -1760,6 +1760,197 @@ def test_eval_command_prints_result_and_returns_gate_status(tmp_path: Path, caps
 
 # --- `judge` command -------------------------------------------------------
 
+@pytest.fixture
+def judge_gate_files(tmp_path: Path) -> tuple[Path, Path]:
+    report = tmp_path / "PRIVATE-report.json"
+    report.write_text(json.dumps({
+        "format_version": "judge_gate_report_v1",
+        "status": "uncalibrated",
+        "reason": "too_few_labels",
+        "generated_at": "2026-11-10T12:00:00Z",
+        "provider": "ollama",
+        "model": "llama3.2",
+        "rubric_version": "reasoning_quality_v1",
+    }), encoding="utf-8")
+    policy = tmp_path / "PRIVATE-policy.toml"
+    policy.write_text(
+        'format_version = "judge_gate_policy_v1"\n'
+        'max_age_seconds = 604800\n'
+        'expected_report_format = "judge_gate_report_v1"\n'
+        'expected_rubric_version = "reasoning_quality_v1"\n',
+        encoding="utf-8",
+    )
+    return report, policy
+
+
+@pytest.mark.parametrize("status,reason,exit_code", [
+    ("uncalibrated", "too_few_labels", 0),
+    ("passed", "calibrated", 0),
+    ("failed", "mean_score_below_threshold", 1),
+])
+def test_judge_verify_report_emits_only_safe_json_without_provider_imports(
+    judge_gate_files: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys,
+    status: str, reason: str, exit_code: int,
+) -> None:
+    import builtins
+    import importlib
+
+    import glassbox.cli as cli
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name in {
+            "glassbox.eval.judge", "glassbox.eval.judge_config",
+            "glassbox.eval.judge_provider", "glassbox.eval.judge_models", "dotenv",
+        }:
+            pytest.fail(f"verify-report imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    importlib.reload(cli)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            assert tz is UTC
+            return datetime(2026, 11, 10, 12, tzinfo=UTC)
+
+    monkeypatch.setattr(cli, "datetime", FixedDatetime)
+    report, policy = judge_gate_files
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload.update(status=status, reason=reason)
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main([
+        "judge", "verify-report", "--report", str(report), "--policy", str(policy),
+    ]) == exit_code
+
+    captured = capsys.readouterr()
+    expected = {
+        "age_seconds": 0,
+        "generated_at": "2026-11-10T12:00:00Z",
+        "model": "llama3.2",
+        "provider": "ollama",
+        "reason": reason,
+        "rubric_version": "reasoning_quality_v1",
+        "status": status,
+    }
+    assert json.loads(captured.out) == expected
+    assert captured.out == json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("problem", ["invalid_report", "missing_report", "invalid_policy"])
+def test_judge_verify_report_errors_are_generic_and_have_empty_stdout(
+    judge_gate_files: tuple[Path, Path], capsys, problem: str,
+) -> None:
+    from glassbox.cli import main
+
+    report, policy = judge_gate_files
+    if problem == "missing_report":
+        report.unlink()
+    else:
+        (policy if problem == "invalid_policy" else report).write_text(
+            "PRIVATE_DECISION_CONTENT", encoding="utf-8"
+        )
+
+    assert main([
+        "judge", "verify-report", "--report", str(report), "--policy", str(policy),
+    ]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to verify judge report\n"
+
+
+@pytest.mark.parametrize("options", [[], ["--report", "PRIVATE"], ["--policy", "PRIVATE"]])
+def test_judge_verify_report_requires_both_paths(options: list[str], capsys) -> None:
+    from glassbox.cli import main
+
+    assert main(["judge", "verify-report", *options]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to verify judge report\n"
+
+
+@pytest.mark.parametrize("options", [
+    [], ["--since", "7d", "--report", "PRIVATE"],
+    ["--since", "7d", "--policy", "PRIVATE"],
+    ["--report", "PRIVATE", "--policy", "PRIVATE"],
+])
+def test_judge_command_rejects_missing_since_or_verify_report_options_before_provider_imports(
+    options: list[str], monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    import builtins
+
+    from glassbox.cli import main
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name in {"glassbox.eval.judge", "glassbox.eval.judge_config"}:
+            pytest.fail(f"invalid judge arguments imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["judge", *options])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if not options:
+        assert "judge requires --since" in captured.err
+    else:
+        assert "error:" in captured.err
+
+
+@pytest.mark.parametrize("command", ["judge", "trace", "export", "serve", "dashboard"])
+def test_existing_commands_never_import_judge_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, command: str,
+) -> None:
+    import builtins
+    import importlib
+
+    import glassbox.cli as cli
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "glassbox.eval.judge_gate":
+            pytest.fail("existing command imported judge_gate")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    importlib.reload(cli)
+    database_path = tmp_path / "glassbox.sqlite3"
+    _repository_with_trace(database_path).close()
+    prefix = ["--database", str(database_path)]
+
+    if command == "judge":
+        _patch_judge_config(monkeypatch)
+        calls = _patch_run_judge(monkeypatch, _FakeJudgeReport(status="uncalibrated"))
+        assert cli.main([*prefix, "judge", "--since", "7d"]) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "uncalibrated"
+        assert len(calls) == 1
+    elif command == "trace":
+        assert cli.main([*prefix, "trace", TRACE_ID]) == 0
+        assert json.loads(capsys.readouterr().out)["trace"]["trace_id"] == TRACE_ID
+    elif command == "serve":
+        calls = []
+        monkeypatch.setattr(cli, "run_server", lambda **kwargs: calls.append(kwargs))
+        assert cli.main(["serve", "--host", "127.0.0.1", "--port", "8787"]) == 0
+        assert calls == [{"host": "127.0.0.1", "port": 8787}]
+    else:
+        output = tmp_path / f"{command}.html"
+        options = ["--decision", DECISION_ID] if command == "export" else []
+        assert cli.main([*prefix, command, *options, "--output", str(output)]) == 0
+        html = output.read_text(encoding="utf-8")
+        assert ("Decision brief" if command == "export" else "Static operations dashboard") in html
+
+
 _LOOPBACK_CONFIG_ARGS = dict(
     provider="ollama",
     model="llama3",

@@ -244,6 +244,18 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.eval._discord_transport",
             ],
         },
+        "judge-gate-dependencies": {
+            "source_modules": ["glassbox.eval.judge_gate"],
+            "forbidden_modules": [
+                "glassbox.eval.judge", "glassbox.eval.judge_config",
+                "glassbox.eval.judge_provider", "glassbox.eval.judge_models",
+                "glassbox.eval.counterfactual", "glassbox.eval.counterfactual_config",
+                "glassbox.eval.counterfactual_provider", "glassbox.eval.shadow",
+                "glassbox.eval.discord", "glassbox.eval.discord_config",
+                "glassbox.eval._discord_transport", "glassbox.sdk", "glassbox.collector",
+                "glassbox.web", "glassbox.ops",
+            ],
+        },
         "dashboard-dependencies": {
             "source_modules": ["glassbox.dashboard"],
             "forbidden_modules": [
@@ -285,9 +297,23 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 8
+    assert len(user_options.contracts_options) == 9
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
+
+
+def test_import_linter_judge_gate_contract_is_registered() -> None:
+    from importlinter.application.use_cases import read_user_options
+    from importlinter.configuration import configure
+
+    configure()
+    user_options = read_user_options(config_filename=str(PROJECT_ROOT / "pyproject.toml"))
+
+    assert any(
+        contract["name"] == "judge-gate-dependencies"
+        and contract["source_modules"] == ["glassbox.eval.judge_gate"]
+        for contract in user_options.contracts_options
+    )
 
 
 def test_import_linter_dashboard_contract_is_registered() -> None:
