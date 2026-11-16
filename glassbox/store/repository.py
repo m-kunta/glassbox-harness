@@ -24,6 +24,11 @@ QueueSort: TypeAlias = Literal["decided_at", "confidence"]
 OverrideStatus: TypeAlias = Literal["none", "accepted", "modified", "rejected", "inconsistent"]
 FeedbackVerdict: TypeAlias = Literal["agree", "disagree", "uncertain"]
 
+
+class OverrideIdempotencyConflictError(ValueError):
+    """A replay key was reused for a different operational override."""
+
+
 _SORT_COLUMNS: dict[QueueSort, str] = {
     "decided_at": "glassbox_timestamp_key(d.decided_at)",
     "confidence": "d.confidence",
@@ -1214,7 +1219,9 @@ class Repository:
                     ):
                         self._connection.execute("COMMIT")
                         return existing
-                    raise ValueError("override idempotency key was reused with a different payload")
+                    raise OverrideIdempotencyConflictError(
+                        "override idempotency key was reused with a different payload"
+                    )
                 rows = self._connection.execute(
                     "SELECT * FROM overrides WHERE decision_id = ?", (submission.decision_id,)
                 ).fetchall()

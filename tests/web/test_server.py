@@ -719,6 +719,42 @@ def test_exact_override_post_replay_redirects_without_another_history_row(tmp_pa
     assert len(detail.overrides) == 1
 
 
+def test_changed_replay_explains_that_the_first_override_was_saved(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787")
+    client.post("/login", data={"access_token": TOKEN})
+    card = client.get(f"/decision/{decision_id}")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', card.text)
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', card.text)
+    assert csrf is not None
+    assert key is not None
+    payload = {
+        "csrf_token": csrf.group(1),
+        "idempotency_key": key.group(1),
+        "action": "rejected",
+    }
+    url = f"/decision/{decision_id}/override"
+
+    first = client.post(url, data=payload, follow_redirects=False)
+    changed_replay = client.post(
+        url,
+        data={**payload, "action": "accepted"},
+        follow_redirects=False,
+    )
+
+    assert first.status_code == 303
+    assert changed_replay.status_code == 400
+    assert "Override already saved" in changed_replay.text
+    assert "Reload the decision before submitting another override." in changed_replay.text
+    database = Database.open_read_only(database_path)
+    try:
+        detail = Repository(database).decision_detail(decision_id)
+    finally:
+        database.close()
+    assert detail is not None
+    assert [override.action for override in detail.overrides] == ["rejected"]
+
+
 @pytest.mark.parametrize(
     "query",
     ["?sort=bogus", "?from=not-a-date", "?confidence=bogus", "?cursor=not-valid-base64!!"],

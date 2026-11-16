@@ -21,7 +21,11 @@ from starlette.middleware.base import RequestResponseEndpoint
 
 from glassbox.eval.drift import DriftPolicyError
 from glassbox.store import Database, ReadOnlyDatabaseError, Repository
-from glassbox.store.repository import FeedbackSubmission, OverrideSubmission
+from glassbox.store.repository import (
+    FeedbackSubmission,
+    OverrideIdempotencyConflictError,
+    OverrideSubmission,
+)
 
 from .auth import SESSION_COOKIE_NAME, SessionStore, token_matches
 from .read_service import QueueRequest, ReadService
@@ -166,6 +170,17 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             "error.html",
             {"title": "Override not saved", "message": "The override request could not be saved."},
             status_code=status_code,
+        )
+
+    def override_replay_error(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Override already saved",
+                "message": "Reload the decision before submitting another override.",
+            },
+            status_code=400,
         )
 
     def override_verification_error(request: Request) -> HTMLResponse:
@@ -367,6 +382,8 @@ def create_app(config: ServerConfig, *, clock: Callable[[], datetime] = utc_now)
             repository.record_override(submission)
         except sqlite3.OperationalError:
             return override_error(request, 503)
+        except OverrideIdempotencyConflictError:
+            return override_replay_error(request)
         except (ValueError, sqlite3.IntegrityError):
             return override_error(request)
         finally:
