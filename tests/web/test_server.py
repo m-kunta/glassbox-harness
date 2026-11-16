@@ -548,6 +548,25 @@ def test_override_form_exposes_the_complete_current_recommendation_as_json(
     assert "{&#34;action&#34;:&#34;order&#34;,&#34;threshold&#34;:0.25}" in response.text
 
 
+def test_reason_code_fields_explain_their_optional_free_text_contract(tmp_path: Path) -> None:
+    database_path, decision_id, _ = seeded_database(tmp_path)
+    client = TestClient(
+        app_for(Clock(), tmp_path, database_path), base_url="http://127.0.0.1:8787"
+    )
+    client.post("/login", data={"access_token": TOKEN})
+
+    response = client.get(f"/decision/{decision_id}")
+
+    assert response.status_code == 200
+    assert response.text.count('name="reason_code" autocomplete="off"') == 2
+    assert response.text.count(
+        "Reason codes are optional. Glassbox does not define their meanings. "
+        "Explain any code in the adjacent comment or note."
+    ) == 2
+    assert 'aria-describedby="override-reason-code-help"' in response.text
+    assert 'aria-describedby="feedback-reason-code-help"' in response.text
+
+
 def test_modified_override_without_replacement_json_explains_the_required_input(
     tmp_path: Path,
 ) -> None:
