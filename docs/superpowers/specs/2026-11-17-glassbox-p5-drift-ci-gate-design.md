@@ -55,7 +55,8 @@ excessively long fields are rejected. UTC timestamps use the same strict
 `...Z` grammar used by the judge gate. Identifiers are bounded ASCII values.
 
 The TOML policy specifies the expected report format, a maximum report age,
-the expected drift policy version, and the exact enabled signal set. These
+the expected agent name, the expected drift policy version, and the exact
+enabled signal set. These
 choices are version-controlled and therefore part of the audited gate
 contract. A new drift policy or monitored-signal set requires a reviewed policy
 update and a fresh report; CI never compares reports across policy cohorts.
