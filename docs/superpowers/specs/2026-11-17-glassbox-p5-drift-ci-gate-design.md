@@ -52,7 +52,13 @@ It contains no database path, raw evidence, decision identifiers, entity
 values, version mix, metric values, thresholds, trace timing, provider data,
 or free-text diagnostics. Unknown, duplicate, missing, incorrectly typed, or
 excessively long fields are rejected. UTC timestamps use the same strict
-`...Z` grammar used by the judge gate. Identifiers are bounded ASCII values.
+`...Z` grammar used by the judge gate. Agent and signal identifiers are
+bounded ASCII values. A present `baseline_id` must be the canonical
+26-character uppercase ULID used by persisted drift baselines.
+`insufficient_data` is the only report status that permits a null baseline ID.
+Signal sample counts are positive for `healthy`, `watch`, and `drift_detected`.
+An `insufficient_data` signal may report zero counts when a baseline or recent
+window does not yet exist.
 
 The TOML policy specifies the expected report format, a maximum report age,
 the expected agent name, the expected drift policy version, and the exact

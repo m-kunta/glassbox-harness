@@ -51,6 +51,7 @@ _REASONS: dict[str, frozenset[str | None]] = {
     ),
 }
 _IDENTIFIER = re.compile(r"[A-Za-z0-9._:+/-]{1,128}")
+_BASELINE_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", re.ASCII)
 _POLICY_HASH = re.compile(r"[0-9a-f]{64}")
 
@@ -176,9 +177,10 @@ def _parse_signal(value: object) -> _DriftGateSignal:
     status, reason = _status_reason(fields)
     baseline_count = fields["baseline_count"]
     recent_count = fields["recent_count"]
-    if type(baseline_count) is not int or baseline_count <= 0:
+    min_count = 0 if status == "insufficient_data" else 1
+    if type(baseline_count) is not int or baseline_count < min_count:
         raise ValueError
-    if type(recent_count) is not int or recent_count <= 0:
+    if type(recent_count) is not int or recent_count < min_count:
         raise ValueError
     return _DriftGateSignal(
         _identifier(fields["name"]), status, reason, baseline_count, recent_count
@@ -213,7 +215,9 @@ def verify_drift_gate_report(
             raise ValueError
         baseline_id = fields["baseline_id"]
         if baseline_id is not None or status != "insufficient_data":
-            baseline_id = _identifier(baseline_id)
+            baseline_id = _string(baseline_id)
+            if _BASELINE_ID.fullmatch(baseline_id) is None:
+                raise ValueError
 
         raw_signals = fields["signals"]
         if not isinstance(raw_signals, list) or len(raw_signals) != len(policy.expected_signals):
@@ -229,8 +233,9 @@ def verify_drift_gate_report(
         now = clock()
         if not isinstance(now, datetime) or now.utcoffset() != timedelta(0):
             raise ValueError
-        age = (now - generated_at).total_seconds()
-        if age < 0 or age > policy.max_age_seconds:
+        age = now - generated_at
+        age_seconds = age // timedelta(seconds=1)
+        if age_seconds < 0 or (age_seconds, age.microseconds) > (policy.max_age_seconds, 0):
             raise ValueError
         return DriftGateResult(
             format_version=_REPORT_FORMAT,
@@ -242,7 +247,7 @@ def verify_drift_gate_report(
             policy_hash=policy_hash,
             baseline_id=baseline_id,
             signals=signals,
-            age_seconds=int(age),
+            age_seconds=age_seconds,
         )
     except (OSError, TypeError, ValueError, RecursionError):
         raise DriftGateError("Unable to verify drift report") from None

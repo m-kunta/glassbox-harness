@@ -119,7 +119,7 @@ _REASONS = {
 }
 ~~~
 
-Copy judge-gate techniques for unique object parsing, exact fields, bounded ASCII identifiers, strict Z timestamps, and a 64-lowercase-hex policy hash. Require the report agent to equal `expected_agent_name`, a non-null baseline_id except for insufficient_data, positive counts, and exact policy signal order/set. Convert every parsing/file/type error to:
+Copy judge-gate techniques for unique object parsing, exact fields, bounded ASCII identifiers, strict Z timestamps, and a 64-lowercase-hex policy hash. Require the report agent to equal `expected_agent_name` and the signal order and set to match the policy. Require a `baseline_id` except for `insufficient_data`. A present `baseline_id` must match the canonical 26-character uppercase ULID grammar. Signal counts are positive except that `insufficient_data` may use zero when its sample population does not yet exist. Use exact `timedelta` components to compare freshness. Convert every parsing/file/type error to:
 
 ~~~python
 raise DriftGateError("Unable to verify drift report") from None

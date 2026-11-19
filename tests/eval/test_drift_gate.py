@@ -97,6 +97,40 @@ def test_report_at_max_age_passes(evidence: tuple[Path, Path]) -> None:
     assert result.to_dict()["age_seconds"] == 604800
 
 
+def test_report_one_microsecond_past_large_max_age_fails(evidence: tuple[Path, Path]) -> None:
+    report, policy = evidence
+    max_age_seconds = 2**34 + 1
+    policy.write_text(POLICY.replace("604800", str(max_age_seconds)), encoding="utf-8")
+    cutoff = NOW + timedelta(seconds=max_age_seconds)
+
+    result = verify_drift_gate_report(report, policy, clock=lambda: cutoff)
+    assert result.age_seconds == max_age_seconds
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: cutoff + timedelta.resolution)
+
+
+def test_report_one_microsecond_before_large_max_age_floors_age(
+    evidence: tuple[Path, Path],
+) -> None:
+    report, policy = evidence
+    max_age_seconds = 2**34 + 1
+    policy.write_text(POLICY.replace("604800", str(max_age_seconds)), encoding="utf-8")
+    now = NOW + timedelta(seconds=max_age_seconds) - timedelta.resolution
+
+    result = verify_drift_gate_report(report, policy, clock=lambda: now)
+
+    assert result.age_seconds == max_age_seconds - 1
+
+
+def test_report_accepts_policy_max_age_larger_than_timedelta(evidence: tuple[Path, Path]) -> None:
+    report, policy = evidence
+    policy.write_text(POLICY.replace("604800", str(2**63 - 1)), encoding="utf-8")
+
+    result = verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+    assert result.age_seconds == 0
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
@@ -116,6 +150,11 @@ def test_report_at_max_age_passes(evidence: tuple[Path, Path]) -> None:
         ("baseline_id", None),
         ("baseline_id", "a" * 129),
         ("baseline_id", "café"),
+        ("baseline_id", "/private/local.sqlite"),
+        ("baseline_id", "PRIVATE_DECISION_CONTENT"),
+        ("baseline_id", "01arz3ndektsv4rrffq69g5fav"),
+        ("baseline_id", "81ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        ("baseline_id", "01ARZ3NDEKTSV4RRFFQ69G5FAI"),
         ("signals", []),
         ("signals", REPORT["signals"][::-1]),
         ("signals", [REPORT["signals"][0]]),
@@ -127,6 +166,36 @@ def test_invalid_report_field_has_generic_error(
 ) -> None:
     report, policy = evidence
     report.write_text(json.dumps({**REPORT, key: value}), encoding="utf-8")
+
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+
+def test_insufficient_data_signal_accepts_zero_counts(evidence: tuple[Path, Path]) -> None:
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload.update(status="insufficient_data", reason="baseline_not_created", baseline_id=None)
+    payload["signals"][0].update(
+        status="insufficient_data", reason="baseline_not_created", baseline_count=0, recent_count=0
+    )
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+    assert result.to_dict() == {**payload, "age_seconds": 0}
+
+
+@pytest.mark.parametrize("status", ["healthy", "watch", "drift_detected"])
+@pytest.mark.parametrize("count_field", ["baseline_count", "recent_count"])
+def test_other_signal_statuses_require_positive_counts(
+    evidence: tuple[Path, Path], status: str, count_field: str
+) -> None:
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload.update(status="insufficient_data", reason="recent_window_too_small")
+    payload["signals"][0].update(status=status)
+    payload["signals"][0][count_field] = 0
+    report.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(DriftGateError, match=ERROR):
         verify_drift_gate_report(report, policy, clock=lambda: NOW)
