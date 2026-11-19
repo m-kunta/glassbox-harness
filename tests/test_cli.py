@@ -1977,7 +1977,11 @@ def test_existing_commands_never_import_judge_gate(
         assert json.loads(capsys.readouterr().out)["trace"]["trace_id"] == TRACE_ID
     elif command == "serve":
         calls = []
-        monkeypatch.setattr(cli, "run_server", lambda **kwargs: calls.append(kwargs))
+        import glassbox.web.server
+
+        monkeypatch.setattr(
+            glassbox.web.server, "run_server", lambda **kwargs: calls.append(kwargs)
+        )
         assert cli.main(["serve", "--host", "127.0.0.1", "--port", "8787"]) == 0
         assert calls == [{"host": "127.0.0.1", "port": 8787}]
     else:
@@ -2852,3 +2856,60 @@ def test_schedule_install_requires_explicit_inputs(missing: str) -> None:
     with pytest.raises(SystemExit) as error:
         main(arguments)
     assert error.value.code == 2
+def test_drift_verify_report_missing_files_is_generic(tmp_path, capsys):
+    from glassbox import cli
+
+    assert cli.main(["drift", "verify-report", "--report", str(tmp_path / "missing"),
+                     "--policy", str(tmp_path / "policy")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "glassbox: unable to verify drift report\n"
+
+
+def test_drift_verify_report_success_and_failure_status(tmp_path, capsys):
+    from datetime import UTC, datetime
+
+    from glassbox import cli
+
+    report = tmp_path / "report.json"
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        'format_version = "drift_gate_policy_v1"\nmax_age_seconds = 604800\n'
+        'expected_report_format = "drift_gate_report_v1"\n'
+        'expected_agent_name = "agent"\nexpected_policy_version = "drift_v2"\n'
+        'expected_signals = ["confidence"]\n'
+    )
+    data = {
+        "format_version": "drift_gate_report_v1", "status": "healthy", "reason": None,
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "agent_name": "agent", "policy_version": "drift_v2", "policy_hash": "a" * 64,
+        "baseline_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "signals": [{"name": "confidence", "status": "healthy", "reason": None,
+                     "baseline_count": 500, "recent_count": 200}],
+    }
+    args = ["drift", "verify-report", "--report", str(report), "--policy", str(policy)]
+    for status, code in [("healthy", 0), ("drift_detected", 1)]:
+        data["status"] = status
+        report.write_text(json.dumps(data))
+        assert cli.main(args) == code
+        assert json.loads(capsys.readouterr().out)["status"] == status
+
+
+def test_drift_verify_report_does_not_load_command_dependencies(tmp_path):
+    import subprocess
+    import sys
+
+    code = """\
+import sys
+from glassbox.cli import main
+status = main(['drift', 'verify-report', '--report', sys.argv[1], '--policy', sys.argv[2]])
+blocked = ('glassbox.store', 'glassbox.web.server', 'glassbox.eval.drift',
+           'glassbox.eval.judge', 'dotenv')
+assert not any(name in sys.modules for name in blocked)
+assert status == 2
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path / "report"), str(tmp_path / "policy")],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr

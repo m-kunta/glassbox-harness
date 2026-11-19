@@ -12,13 +12,10 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from glassbox.eval.runner import run_suite
-from glassbox.store import Database, ReadOnlyDatabaseError, Repository, TraceTree
-from glassbox.web.export import ExportError, render_decision_export, write_decision_export
-from glassbox.web.read_service import ReadService
-from glassbox.web.server import run_server
+if TYPE_CHECKING:
+    from glassbox.store import TraceTree
 
 _DURATION_PATTERN = re.compile(r"^([1-9][0-9]*)([mhd])$")
 
@@ -64,6 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     drift_command.add_argument("--agent", dest="report_agent")
     drift_command.add_argument("--policy", type=Path)
     drift_subcommands = drift_command.add_subparsers(dest="drift_command")
+    verify_command = drift_subcommands.add_parser("verify-report")
+    verify_command.add_argument("--report", type=Path, required=True)
+    verify_command.add_argument("--policy", dest="verify_policy", type=Path, required=True)
     baseline_command = drift_subcommands.add_parser(
         "baseline", help="materialize an immutable baseline"
     )
@@ -115,6 +115,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     schedule_subcommands.add_parser("status-drift", help="print safe scheduler status as JSON")
     schedule_subcommands.add_parser("remove-drift", help="remove the managed drift job")
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "drift" and arguments.drift_command == "verify-report":
+        from glassbox.eval.drift_gate import DriftGateError, verify_drift_gate_report
+
+        try:
+            drift_gate_result = verify_drift_gate_report(
+                arguments.report, arguments.verify_policy, clock=lambda: datetime.now(UTC)
+            )
+        except DriftGateError:
+            print("glassbox: unable to verify drift report", file=sys.stderr)
+            return 2
+        print(json.dumps(drift_gate_result.to_dict(), sort_keys=True, separators=(",", ":")))
+        return drift_gate_result.exit_code
+
+    from glassbox.eval.runner import run_suite
+    from glassbox.store import Database, ReadOnlyDatabaseError, Repository
+    from glassbox.web.export import ExportError, render_decision_export, write_decision_export
+    from glassbox.web.read_service import ReadService
+    from glassbox.web.server import run_server
 
     if arguments.command == "judge" and arguments.judge_action == "verify-report":
         from glassbox.eval.judge_gate import JudgeGateError, verify_judge_gate_report
@@ -686,6 +705,7 @@ def _safe_disclosure_value(value: str) -> str:
 
 def _read_trace_tree(database_path: Path, trace_id: str) -> TraceTree | None:
     """Read a trace through the existing repository without mutating its SQLite file."""
+    from glassbox.store import Database, Repository
     if not database_path.is_file():
         raise FileNotFoundError(database_path)
     # immutable=1 would make SQLite skip the WAL file entirely, hiding any

@@ -256,6 +256,18 @@ def test_import_linter_contracts_preserve_module_boundaries() -> None:
                 "glassbox.web", "glassbox.ops",
             ],
         },
+        "drift-gate-dependencies": {
+            "source_modules": ["glassbox.eval.drift_gate"],
+            "forbidden_modules": [
+                "glassbox.eval.drift", "glassbox.store", "glassbox.eval.judge",
+                "glassbox.eval.judge_config", "glassbox.eval.judge_provider",
+                "glassbox.eval.judge_models", "glassbox.eval.counterfactual",
+                "glassbox.eval.counterfactual_config", "glassbox.eval.counterfactual_provider",
+                "glassbox.eval.shadow", "glassbox.eval.discord", "glassbox.eval.discord_config",
+                "glassbox.eval._discord_transport", "glassbox.sdk", "glassbox.collector",
+                "glassbox.web", "glassbox.ops",
+            ],
+        },
         "dashboard-dependencies": {
             "source_modules": ["glassbox.dashboard"],
             "forbidden_modules": [
@@ -297,7 +309,7 @@ def test_import_linter_actually_evaluates_and_enforces_the_configured_contracts(
     config_path = str(PROJECT_ROOT / "pyproject.toml")
 
     user_options = read_user_options(config_filename=config_path)
-    assert len(user_options.contracts_options) == 9
+    assert len(user_options.contracts_options) == 10
 
     assert lint_imports(config_filename=config_path, cache_dir=None) is True
 

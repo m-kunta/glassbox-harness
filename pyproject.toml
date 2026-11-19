@@ -222,3 +222,16 @@ forbidden_modules = [
   "glassbox.web",
   "glassbox.ops",
 ]
+
+[[tool.importlinter.contracts]]
+name = "drift-gate-dependencies"
+type = "forbidden"
+source_modules = ["glassbox.eval.drift_gate"]
+forbidden_modules = [
+  "glassbox.eval.drift", "glassbox.store", "glassbox.eval.judge",
+  "glassbox.eval.judge_config", "glassbox.eval.judge_provider", "glassbox.eval.judge_models",
+  "glassbox.eval.counterfactual", "glassbox.eval.counterfactual_config",
+  "glassbox.eval.counterfactual_provider", "glassbox.eval.shadow",
+  "glassbox.eval.discord", "glassbox.eval.discord_config", "glassbox.eval._discord_transport",
+  "glassbox.sdk", "glassbox.collector", "glassbox.web", "glassbox.ops",
+]

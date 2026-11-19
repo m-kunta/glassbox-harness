@@ -143,13 +143,14 @@ def test_non_positive_session_timeout_is_rejected() -> None:
 
 def test_serve_command_dispatches_validated_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     from glassbox import cli
+    from glassbox.web import server
 
     received: dict[str, object] = {}
 
     def fake_run_server(*, host: str, port: int) -> None:
         received.update(host=host, port=port)
 
-    monkeypatch.setattr(cli, "run_server", fake_run_server)
+    monkeypatch.setattr(server, "run_server", fake_run_server)
 
     assert cli.main(["serve", "--host", "::1", "--port", "8788"]) == 0
     assert received == {"host": "::1", "port": 8788}
