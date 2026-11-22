@@ -360,6 +360,31 @@ Both views keep confidence and decision type at decision level. Optional latency
 and cost use traces as their sample unit, with decisions-per-trace shown as
 context for batch-size changes.
 
+## Drift evidence CI gate
+
+The drift evidence gate verifies a compact, operator-reviewed snapshot at
+`.glassbox/ci/drift-report.json` against the checked-in
+`.glassbox/ci/drift-gate-policy.toml`. Run `glassbox drift --agent
+replenishment-triage-ai` locally and project its report into the documented
+shape in `.glassbox/ci/drift-report.json.example`: report format, generation
+time, agent, policy version and hash, baseline ID, aggregate status and reason,
+and each monitored signal's name, status, reason and sample counts. Review the
+snapshot and commit it on the protected base branch. The example is a template,
+not evidence; use the actual report's values and generation time. Do not include
+raw evidence, database paths, decision IDs, entity values, or free text.
+
+Verify locally with `glassbox drift verify-report --report
+.glassbox/ci/drift-report.json --policy .glassbox/ci/drift-gate-policy.toml`.
+Healthy and watch return 0; insufficient data also returns 0 with a neutral
+summary. Detected drift returns 1. Missing, invalid, future-dated, or more than
+seven-day-old evidence returns 2. Refresh the snapshot regularly. Until a real
+snapshot is committed, the check fails with exit 2.
+
+For pull requests, GitHub uses the default branch's workflow definition and the
+workflow checks out `github.event.pull_request.base.sha`. CI verifies trusted
+base evidence without opening the database, calling a provider, or executing
+pull-request code.
+
 ## Send Discord drift alerts
 
 Discord incoming-webhook delivery is opt-in. Configure the following in the

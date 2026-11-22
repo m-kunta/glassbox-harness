@@ -13,6 +13,9 @@ dist/
 !.glassbox/ci/judge-gate-policy.toml
 !.glassbox/ci/judge-report.json
 !.glassbox/ci/judge-report.json.example
+!.glassbox/ci/drift-gate-policy.toml
+!.glassbox/ci/drift-report.json
+!.glassbox/ci/drift-report.json.example
 .worktrees/
 .env
 .superpowers/sdd/

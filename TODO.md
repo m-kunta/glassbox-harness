@@ -114,7 +114,8 @@ This is the living project backlog. Refine an item when new evidence changes its
 ## P5 — Dashboard and operations (deferred)
 
 - [x] Add dashboard generation.
-- [ ] Wire CI workflow automation.
+- [x] Wire CI workflow automation.
+- [ ] Record and periodically refresh an operator-reviewed drift gate report on the protected base branch.
 
 ## Demand-triggered backlog
 

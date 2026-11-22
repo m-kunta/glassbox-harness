@@ -1,0 +1,6 @@
+format_version = "drift_gate_policy_v1"
+max_age_seconds = 604800
+expected_report_format = "drift_gate_report_v1"
+expected_agent_name = "replenishment-triage-ai"
+expected_policy_version = "drift_v2"
+expected_signals = ["confidence", "decision_type"]
