@@ -371,6 +371,32 @@ def test_v2_shifted_distributions_still_detect_drift(
     assert report.status == "drift_detected"
 
 
+@pytest.mark.parametrize(
+    ("baseline_count", "recent_count", "shift", "expected", "reason"),
+    [
+        (499, 200, False, "insufficient_data", "baseline_window_too_small"),
+        (500, 199, False, "insufficient_data", "recent_window_too_small"),
+        (500, 200, False, "healthy", None),
+        (500, 200, True, "drift_detected", None),
+    ],
+)
+def test_synthetic_v2_sample_floors_and_distribution_shift(
+    v2_policy: DriftPolicy,
+    baseline_count: int,
+    recent_count: int,
+    shift: bool,
+    expected: str,
+    reason: str | None,
+) -> None:
+    baseline = _baseline_v2(v2_policy, decisions(0.1, "review", baseline_count))
+    recent = decisions(0.9 if shift else 0.1, "order" if shift else "review",
+                       recent_count, recent=True)
+    report = calculate_report(v2_policy, baseline, recent, (), AS_OF)
+    assert (report.status, report.reason) == (expected, reason)
+    assert all(signal.baseline_count == baseline_count for signal in report.signals)
+    assert all(signal.recent_count == recent_count for signal in report.signals)
+
+
 def _seed_drift(
     path: Path, *, baseline_decisions: int = 100, recent_at: datetime = RECENT_AT
 ) -> None:
