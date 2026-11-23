@@ -27,7 +27,7 @@ REPORT = {
         },
         {
             "name": "decision_type",
-            "status": "watch",
+            "status": "healthy",
             "reason": None,
             "baseline_count": 500,
             "recent_count": 200,
@@ -42,6 +42,46 @@ expected_policy_version = "drift_v2"
 expected_signals = ["confidence", "decision_type"]
 """
 ERROR = "^Unable to verify drift report$"
+
+
+def test_healthy_aggregate_cannot_hide_detected_drift(evidence: tuple[Path, Path]) -> None:
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload["signals"][0]["status"] = "drift_detected"
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+
+@pytest.mark.parametrize(
+    ("statuses", "reasons", "aggregate", "reason"),
+    [
+        (("healthy", "watch"), (None, None), "watch", None),
+        (("watch", "drift_detected"), (None, None), "drift_detected", None),
+        (("drift_detected", "insufficient_data"), (None, "recent_window_too_small"),
+         "insufficient_data", "recent_window_too_small"),
+        (("insufficient_data", "insufficient_data"),
+         ("recent_window_too_small", "baseline_has_no_variance"),
+         "insufficient_data", "baseline_has_no_variance"),
+        (("insufficient_data", "insufficient_data"),
+         ("baseline_has_no_variance", "baseline_window_too_small"),
+         "insufficient_data", "baseline_window_too_small"),
+    ],
+)
+def test_aggregate_matches_signal_precedence(
+    evidence, statuses, reasons, aggregate, reason
+) -> None:
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload.update(status=aggregate, reason=reason)
+    for signal, status, signal_reason in zip(payload["signals"], statuses, reasons, strict=True):
+        signal.update(status=status, reason=signal_reason)
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    assert verify_drift_gate_report(report, policy, clock=lambda: NOW).status == aggregate
+    payload["status"], payload["reason"] = "healthy", None
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: NOW)
 
 
 @pytest.fixture
@@ -66,7 +106,9 @@ def test_valid_report_returns_exact_summary(
     evidence: tuple[Path, Path], status: str, reason: str | None, exit_code: int
 ) -> None:
     report, policy = evidence
-    payload = {**REPORT, "status": status, "reason": reason}
+    payload = copy.deepcopy(REPORT)
+    payload.update(status=status, reason=reason)
+    payload["signals"][0].update(status=status, reason=reason)
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     result = verify_drift_gate_report(report, policy, clock=lambda: NOW)
@@ -83,6 +125,8 @@ def test_insufficient_data_accepts_null_baseline(evidence: tuple[Path, Path]) ->
         "reason": "baseline_not_created",
         "baseline_id": None,
     }
+    payload["signals"] = [dict(signal, status="insufficient_data", reason="baseline_not_created")
+                          for signal in REPORT["signals"]]
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     result = verify_drift_gate_report(report, policy, clock=lambda: NOW)

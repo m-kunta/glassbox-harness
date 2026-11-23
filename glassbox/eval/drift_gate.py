@@ -226,6 +226,21 @@ def verify_drift_gate_report(
         if tuple(signal.name for signal in signals) != policy.expected_signals:
             raise ValueError
 
+        reasons = {signal.reason for signal in signals}
+        expected_reason = next(
+            (item for item in ("baseline_not_created", "policy_changed_requires_rebaseline",
+                               "baseline_window_too_small", "baseline_has_no_variance",
+                               "recent_window_too_small") if item in reasons),
+            None,
+        )
+        expected_status = (
+            "insufficient_data" if expected_reason is not None else
+            "drift_detected" if any(signal.status == "drift_detected" for signal in signals) else
+            "watch" if any(signal.status == "watch" for signal in signals) else "healthy"
+        )
+        if status != expected_status or reason != expected_reason:
+            raise ValueError
+
         timestamp = _string(fields["generated_at"])
         if _TIMESTAMP.fullmatch(timestamp) is None:
             raise ValueError

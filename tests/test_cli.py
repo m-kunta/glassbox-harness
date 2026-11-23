@@ -2890,6 +2890,7 @@ def test_drift_verify_report_success_and_failure_status(tmp_path, capsys):
     args = ["drift", "verify-report", "--report", str(report), "--policy", str(policy)]
     for status, code in [("healthy", 0), ("drift_detected", 1)]:
         data["status"] = status
+        data["signals"][0]["status"] = status
         report.write_text(json.dumps(data))
         assert cli.main(args) == code
         assert json.loads(capsys.readouterr().out)["status"] == status
