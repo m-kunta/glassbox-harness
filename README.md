@@ -293,7 +293,8 @@ Official actions are pinned by SHA, permissions are only `contents: read`, and
 checkout does not persist credentials. CI installs the base package without
 provider extras. The workflow has no provider credentials, database, artifact
 download/upload, cache, or PR-code checkout. Provider execution and report
-refresh remain explicit local operator work; drift CI automation remains deferred.
+refresh remain explicit local operator work. Drift evidence has a separate CI
+workflow, described below.
 
 ## Monitor agent drift
 
@@ -366,9 +367,12 @@ The drift evidence gate verifies a compact, operator-reviewed snapshot at
 `.glassbox/ci/drift-report.json` against the checked-in
 `.glassbox/ci/drift-gate-policy.toml`. Run `glassbox drift --agent
 replenishment-triage-ai` locally and project its report into the documented
-shape in `.glassbox/ci/drift-report.json.example`: report format, generation
-time, agent, policy version and hash, baseline ID, aggregate status and reason,
-and each monitored signal's name, status, reason and sample counts. Review the
+shape in `.glassbox/ci/drift-report.json.example`. Set `format_version` to
+`drift_gate_report_v1` and copy the report's UTC `as_of` into `generated_at`,
+replacing the trailing `+00:00` with `Z`. Copy the agent, policy version and
+hash, baseline ID, and aggregate status and reason. Convert the report's
+`signals` object into an array in the policy's `expected_signals` order,
+copying only each signal's name, status, reason and sample counts. Review the
 snapshot and commit it on the protected base branch. The example is a template,
 not evidence; use the actual report's values and generation time. Do not include
 raw evidence, database paths, decision IDs, entity values, or free text.
