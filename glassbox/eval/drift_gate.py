@@ -226,6 +226,17 @@ def verify_drift_gate_report(
         if tuple(signal.name for signal in signals) != policy.expected_signals:
             raise ValueError
 
+        missing_baseline = reason in {"baseline_not_created", "policy_changed_requires_rebaseline"}
+        if missing_baseline:
+            if baseline_id is not None or any(
+                signal.status != "insufficient_data" or signal.reason != reason
+                or signal.baseline_count != 0 or signal.recent_count != 0
+                for signal in signals
+            ):
+                raise ValueError
+        elif baseline_id is None:
+            raise ValueError
+
         reasons = {signal.reason for signal in signals}
         expected_reason = next(
             (item for item in ("baseline_not_created", "policy_changed_requires_rebaseline",

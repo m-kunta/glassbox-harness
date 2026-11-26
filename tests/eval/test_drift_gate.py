@@ -53,6 +53,38 @@ def test_healthy_aggregate_cannot_hide_detected_drift(evidence: tuple[Path, Path
         verify_drift_gate_report(report, policy, clock=lambda: NOW)
 
 
+@pytest.mark.parametrize("mutation", ["baseline_id", "signal_status", "signal_count", "reason"])
+def test_missing_baseline_evidence_must_be_consistent(evidence, mutation):
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload.update(status="insufficient_data", reason="baseline_not_created", baseline_id=None)
+    for signal in payload["signals"]:
+        signal.update(status="insufficient_data", reason="baseline_not_created",
+                      baseline_count=0, recent_count=0)
+    if mutation == "baseline_id":
+        payload["baseline_id"] = REPORT["baseline_id"]
+    elif mutation == "signal_status":
+        payload["signals"][0].update(status="drift_detected", reason=None,
+                                     baseline_count=1, recent_count=1)
+    elif mutation == "signal_count":
+        payload["signals"][0]["recent_count"] = 1
+    else:
+        payload["signals"][0]["reason"] = "recent_window_too_small"
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+
+def test_recent_insufficient_data_requires_baseline_id(evidence):
+    report, policy = evidence
+    payload = copy.deepcopy(REPORT)
+    payload.update(status="insufficient_data", reason="recent_window_too_small", baseline_id=None)
+    payload["signals"][0].update(status="insufficient_data", reason="recent_window_too_small")
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DriftGateError, match=ERROR):
+        verify_drift_gate_report(report, policy, clock=lambda: NOW)
+
+
 @pytest.mark.parametrize(
     ("statuses", "reasons", "aggregate", "reason"),
     [
@@ -125,8 +157,8 @@ def test_insufficient_data_accepts_null_baseline(evidence: tuple[Path, Path]) ->
         "reason": "baseline_not_created",
         "baseline_id": None,
     }
-    payload["signals"] = [dict(signal, status="insufficient_data", reason="baseline_not_created")
-                          for signal in REPORT["signals"]]
+    payload["signals"] = [dict(signal, status="insufficient_data", reason="baseline_not_created",
+                               baseline_count=0, recent_count=0) for signal in REPORT["signals"]]
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     result = verify_drift_gate_report(report, policy, clock=lambda: NOW)
@@ -219,9 +251,9 @@ def test_insufficient_data_signal_accepts_zero_counts(evidence: tuple[Path, Path
     report, policy = evidence
     payload = copy.deepcopy(REPORT)
     payload.update(status="insufficient_data", reason="baseline_not_created", baseline_id=None)
-    payload["signals"][0].update(
-        status="insufficient_data", reason="baseline_not_created", baseline_count=0, recent_count=0
-    )
+    for signal in payload["signals"]:
+        signal.update(status="insufficient_data", reason="baseline_not_created",
+                      baseline_count=0, recent_count=0)
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     result = verify_drift_gate_report(report, policy, clock=lambda: NOW)
