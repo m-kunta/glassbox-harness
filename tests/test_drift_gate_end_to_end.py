@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
      (499, 200, False, "baseline_rejected", None),
      (500, 199, False, "recent_window_too_small", 0),
      (500, 200, False, "healthy", 0),
+     (500, 200, False, "policy_changed_requires_rebaseline", 0),
      (500, 200, True, "drift_detected", 1)],
 )
 def test_synthetic_cli_to_gate(
@@ -51,18 +52,32 @@ def test_synthetic_cli_to_gate(
         db.close()
 
     prefix = ["--database", str(path), "drift"]
+    baseline_hash = None
     if baseline_count:
         result = cli.main([*prefix, "baseline", "--agent", "agent-a", "--start",
                            "2026-01-01T00:00:00Z", "--end", "2026-06-01T00:00:00Z"])
-        capsys.readouterr()
+        baseline_output = capsys.readouterr()
         if expected == "baseline_rejected":
             assert result == 2
             return
         assert result == 0
+        baseline_hash = json.loads(baseline_output.out)["policy_hash"]
 
-    assert cli.main([*prefix, "--agent", "agent-a"]) == 0
+    policy_args = []
+    if expected == "policy_changed_requires_rebaseline":
+        changed_policy = tmp_path / "changed-policy.toml"
+        changed_policy.write_text(
+            (ROOT / "glassbox/eval/policies/drift_v2.toml").read_text().replace(
+                "warning_threshold = 0.10", "warning_threshold = 0.11"
+            )
+        )
+        policy_args = ["--policy", str(changed_policy)]
+    assert cli.main([*prefix, "--agent", "agent-a", *policy_args]) == 0
     drift = json.loads(capsys.readouterr().out)
     assert (drift["reason"] or drift["status"]) == expected
+    if policy_args:
+        assert drift["policy_hash"] != baseline_hash
+        assert drift["baseline_id"] is None
     compact = {key: drift[key] for key in ("agent_name", "policy_version", "policy_hash",
                                             "baseline_id", "status", "reason")}
     compact.update(format_version="drift_gate_report_v1",
