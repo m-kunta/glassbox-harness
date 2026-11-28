@@ -15,6 +15,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
+    ("decision_at", "expected_exit"),
+    [
+        ("2025-12-31T23:59:59.999999Z", 2),
+        ("2026-01-01T00:00:00Z", 0),
+        ("2026-05-31T23:59:59.999999Z", 0),
+        ("2026-06-01T00:00:00Z", 2),
+    ],
+)
+def test_synthetic_baseline_window_is_half_open(tmp_path, capsys, decision_at, expected_exit):
+    path = tmp_path / "SYNTHETIC-window.sqlite3"
+    _seed_drift(path, baseline_decisions=500)
+    db = Database.open(path)
+    try:
+        db.connection.execute(
+            "UPDATE decisions SET decided_at = ? WHERE decision_id = ?",
+            (decision_at, f"{1000:026X}"),
+        )
+        db.connection.commit()
+    finally:
+        db.close()
+
+    result = cli.main([
+        "--database", str(path), "drift", "baseline", "--agent", "agent-a",
+        "--start", "2026-01-01T00:00:00Z", "--end", "2026-06-01T00:00:00Z",
+    ])
+    captured = capsys.readouterr()
+    assert result == expected_exit
+    if expected_exit == 0:
+        assert json.loads(captured.out)["agent_name"] == "agent-a"
+    else:
+        assert captured.out == ""
+        assert "requires 500" in captured.err
+
+
+@pytest.mark.parametrize(
     ("baseline_count", "recent_count", "shift", "expected", "gate_exit"),
     [(0, 200, False, "baseline_not_created", 0),
      (499, 200, False, "baseline_rejected", None),
